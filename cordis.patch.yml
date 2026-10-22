@@ -1,0 +1,8 @@
+# 木偶记忆（Puppet Memory）bundle layer.
+#
+# 当 profile 的 package.json 在 dsh.profile.bundles 里列出 `dsh-puppet-memory`
+# 时自动挂载。下面这行挂在 host plane 上，那里能拿到 session-start / pre-step /
+# turn-stopping 事件和分层工具注册表，覆盖所有会话。
+- insert:
+    - id: dsh-puppet-memory
+      name: dsh-puppet-memory
