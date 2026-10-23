@@ -70,6 +70,7 @@ window.__ModuleLoader__.load({
       // 分组 + 一行一件事：左边标题/说明，右边控件（跟宿主自带设置页同一个排版语言）
       '.pmb-sec{display:flex;flex-direction:column;gap:2px;border:1px solid var(--dsw-alias-border-l1);border-radius:10px;padding:6px 14px 10px;background:var(--dsw-alias-bg-layer-1)}',
       '.pmb-sec-h{font-size:12px;font-weight:600;color:var(--dsw-alias-label-secondary);padding:8px 0 6px;letter-spacing:.3px}',
+      '.pmb-sec-h-row{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}',
       '.pmb-line{display:flex;align-items:flex-start;gap:16px;padding:9px 0;border-top:1px solid var(--dsw-alias-border-l1)}',
       '.pmb-line:first-of-type{border-top:0}',
       '.pmb-line-main{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:3px}',
@@ -798,7 +799,16 @@ window.__ModuleLoader__.load({
         : null
 
       const entriesSec = h('div', { className: 'pmb-sec' },
-        h('div', { className: 'pmb-sec-h' }, '片段' + (allEntries.length ? '（' + String(allEntries.length) + (total > allEntries.length ? ' / ' + String(total) : '') + '）' : '')),
+        h('div', { className: 'pmb-sec-h pmb-sec-h-row' },
+          h('span', null, '片段' + (allEntries.length ? '（' + String(allEntries.length) + (total > allEntries.length ? ' / ' + String(total) : '') + '）' : '')),
+          hasMore || loadingMore
+            ? h('button', {
+                className: 'pmb-btn',
+                disabled: busy || loadingMore,
+                onClick: () => loadMore(),
+              }, loadingMore ? '加载中…' : '加载更早（还有 ' + String(Math.max(0, total - allEntries.length)) + ' 条）')
+            : null,
+        ),
         h('div', { className: 'pmb-line' },
           h('div', { className: 'pmb-line-main' },
             h('div', { className: 'pmb-line-label' }, '找一条'),
