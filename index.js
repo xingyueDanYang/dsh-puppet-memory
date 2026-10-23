@@ -1323,12 +1323,16 @@ function registerBackupApi(service) {
           const wanted = normalizeSessionId(url.searchParams.get("session") || "");
           const sessions = mem.sessions(10);
           const sid = wanted || sessions[0]?.id || "";
-          if (!sid) return sendJson(res, { ok: true, session: "", sessions: [], entries: [], overview: { suppressed: [] }, disabled: false });
+          // before：翻页用，取这个时间戳之前的（越翻越早）
+          const before = String(url.searchParams.get("before") || "");
+          if (!sid) return sendJson(res, { ok: true, session: "", sessions: [], entries: [], total: 0, before: "", overview: { suppressed: [] }, disabled: false });
           return sendJson(res, {
             ok: true,
             session: sid,
             sessions,
-            entries: mem.entries(sid, 100),
+            entries: mem.entries(sid, 100, before || null),
+            total: mem.countEntries(sid),
+            before,
             overview: mem.overview(sid),
             disabled: !isEnabledForSession(loadConfig(), sid),
           });

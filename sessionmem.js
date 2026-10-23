@@ -153,9 +153,11 @@ export function createSessionMemory({ memDir, now = () => new Date().toISOString
   }
 
   // 本会话产生的条目（turn 日记 + auto-summary），从日记文件里汇总
-  function entries(sessionId, limit = 50) {
+  //   limit: 一页多少条；before: 取这个时间戳之前的（翻页用，越翻越早）
+  function entries(sessionId, limit = 50, before = null) {
     const sid = normalizeSessionId(sessionId);
     if (!sid) return [];
+    const cut = before ? String(before) : "";
     const files = fs.existsSync(paths.diaryDir)
       ? fs.readdirSync(paths.diaryDir).filter((f) => f.endsWith(".jsonl")).sort()
       : [];
@@ -164,6 +166,7 @@ export function createSessionMemory({ memDir, now = () => new Date().toISOString
       for (const row of readJsonl(path.join(paths.diaryDir, file))) {
         if (!row || normalizeSessionId(row.session) !== sid) continue;
         if (row.kind !== "turn" && row.kind !== "auto-summary") continue;
+        if (cut && String(row.ts || "") >= cut) continue;
         out.push({
           hash: String(row.hash || ""),
           ts: row.ts || "",
@@ -178,6 +181,24 @@ export function createSessionMemory({ memDir, now = () => new Date().toISOString
     }
     out.sort((a, b) => String(a.ts).localeCompare(String(b.ts)));
     return out.slice(-Math.max(1, Math.min(200, Number(limit) || 50)));
+  }
+
+  // 本会话一共多少条片段（翻页要知道还有没有更早的）
+  function countEntries(sessionId) {
+    const sid = normalizeSessionId(sessionId);
+    if (!sid) return 0;
+    const files = fs.existsSync(paths.diaryDir)
+      ? fs.readdirSync(paths.diaryDir).filter((f) => f.endsWith(".jsonl")).sort()
+      : [];
+    let n = 0;
+    for (const file of files) {
+      for (const row of readJsonl(path.join(paths.diaryDir, file))) {
+        if (!row || normalizeSessionId(row.session) !== sid) continue;
+        if (row.kind !== "turn" && row.kind !== "auto-summary") continue;
+        n += 1;
+      }
+    }
+    return n;
   }
 
   // 删掉本会话的一条条目：先归档，再从日记 / 阵列索引 / 引导里摘掉
@@ -247,6 +268,7 @@ export function createSessionMemory({ memDir, now = () => new Date().toISOString
     unsuppress,
     sessions,
     entries,
+    countEntries,
     deleteEntry,
     overview,
   };
