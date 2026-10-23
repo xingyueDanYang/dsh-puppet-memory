@@ -18,13 +18,13 @@ function ok(name, cond, extra = "") {
   else fails.push(name + (extra ? `（${extra}）` : ""));
 }
 
-const social = createSocial({ memDir: TMP, getConfig: () => ({ social: { enabled: true, inject: true } }) });
+const social = createSocial({ memDir: TMP, getConfig: () => ({ social: { enabled: true, inject: true, ownerIds: ["10000001"] } }) });
 social.ensure();
 
 // ---------------- mock 世界 ----------------
-const OWNER = "1111111111";
-const G1 = "500000005"; // 游戏群
-const G2 = "500000002"; // 二创群
+const OWNER = "10000001";
+const G1 = "900000001"; // 游戏群
+const G2 = "900000002"; // 二创群
 
 const owner = social.upsertPerson({ nickname: "丹阳", platform_ids: { qq: OWNER } });
 const A = social.upsertPerson({ nickname: "阿青", platform_ids: { qq: "2001" }, aliases: ["摸鱼人不养鱼"] });

@@ -35,7 +35,7 @@ const DEFAULT_SOCIAL = {
   // 每回合自动记一条社交事件（默认关：先把「读」跑稳，写要人看着）
   recordEvents: false,
   // 主人是谁（用于「主人的事只对主人说」）。默认放当前使用的 QQ 号，可在 config.json 里改
-  ownerIds: ["1111111111"],
+  ownerIds: [],
   // 场景识别：session header 里哪些字段当群号 / 发言人（宿主/渠道变了可在这里补）
   sceneKeys: {
     groupId: ["groupId", "group_id", "groupCode", "chatId", "chat_id", "roomId", "room_id", "groupIdStr"],
