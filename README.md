@@ -788,6 +788,7 @@ Copy-Item 'D:\Documents\deepseek-harness\backups\dsh-profile-20261020b\*' 'C:\Us
 
 ## 版本历史（近期）
 
+- **0.29.2（2026-10-23）**：会话记忆面板补完交互——①本会话片段列表对**已屏蔽**条目显示「已屏蔽」标签、按钮变「解除屏蔽」（以前看不出哪条屏蔽过）；②删除/屏蔽后**先在本地改列表再回拉**，点完立刻看见变化，不再像“点了没反应”；③窗口重新聚焦 / 切回页面时自动重拉一次（别的标签页或工具改过之后不会停在旧列表）。只是面板交互修复，注入与数据格式没动。
 - **0.29.0（2026-10-23）**：**移除数值化好感度**（v0.27 的 `affinity`）——用户指出「每次都是好感度 100 的你还是你吗」：把关系压成分数，等于把「亲近」变成可以刷的指标，注意力会跑到数字上、离开当下。现在关系只记**具体发生的事**（facts / events / 群角色 / 熟悉度等级），不做任何自动加减分、不设「亲密值」；`memory_person` 去掉 `action=affinity` 与相关字段；旧数据里的 `affinity` 字段忽略不读，不迁移、不删除（留着也不影响）。核心卡新增一条红线：「关系不做好感度/分数，不为刷亲近表演」。
 - **0.28.0（2026-10-23）**：会话记忆管理——防止脏记忆污染上下文。新增 `state/session-memory.json` 屏蔽表（只影响本会话注入，数据不删）；`memory_forget` 工具（list / overview / suppress / unsuppress / delete）；删除只动本会话片段（turn 日记、自动摘要），删前归档到 `behavior/archive/deleted-*.jsonl` 并摘掉索引/引导指针；注入层支持条目与整块（core / state / social / persona）屏蔽；API 加 `session-memory` / `session-suppress` / `session-unsuppress` / `session-delete` / `session-toggle`；设置页新增第三页 **会话记忆**（选会话、逐条屏蔽/删除、暂停注入）；新增 `test/session-memory.mjs`（27 项，含 pre-step 端到端）。
 - **0.27.0（2026-10-23）**：人物亲近度——人实体加 `affinity`（0–100，普通人 50 / 主人 65）+ `affinity_manual` 锁；从每条用户发言里读态度信号（夸 +0.8 / 骂 −1.2 / 问号 +0.2 / 长消息 +0.1，可配），认不出人跳过、绝不凭猜改分；pre-step 自动更新（diag 有记录）；`memory_person` 新增 `action=affinity`（改分 / 上锁），`get` 显示亲近度；新增 `test/social-affinity.mjs`（26 项）。**（v0.29 已移除该功能，见上）**

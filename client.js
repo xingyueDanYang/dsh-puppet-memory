@@ -563,19 +563,55 @@ window.__ModuleLoader__.load({
         setBusy(true)
         setError('')
         setNotice('')
+        const sid = data && data.session
         try {
-          const res = await callApi(action, { session: data.session, ...(payload || {}) })
+          const res = await callApi(action, { session: sid, ...(payload || {}) })
           if (!res || res.ok !== true) throw new Error((res && res.error) || '操作失败')
           setNotice(res.message || okText || '完成')
-          await load(data.session)
+          // 先本地改列表：界面立刻动，不去等下一次拉取（否则看起来像"点了没反应"）
+          if (action === 'session-delete' && payload && payload.hash) {
+            const drop = payload.hash
+            setData((prev) => (prev && Array.isArray(prev.entries) ? { ...prev, entries: prev.entries.filter((e) => e.hash !== drop) } : prev))
+          }
+          if (action === 'session-suppress' && payload && Array.isArray(payload.hashes)) {
+            setData((prev) => {
+              if (!prev) return prev
+              const ov = prev.overview || {}
+              return { ...prev, overview: { ...ov, suppressed: Array.from(new Set([...(ov.suppressed || []), ...payload.hashes])) } }
+            })
+          }
+          if (action === 'session-unsuppress') {
+            setData((prev) => {
+              if (!prev) return prev
+              const ov = prev.overview || {}
+              const drop = payload && Array.isArray(payload.hashes) ? new Set(payload.hashes) : null
+              return { ...prev, overview: { ...ov, suppressed: drop ? (ov.suppressed || []).filter((x) => !drop.has(x)) : [] } }
+            })
+          }
+          await load(sid)
         } catch (err) {
           setError(err && err.message ? err.message : String(err))
           setBusy(false)
         }
       }
 
+      // 切回页面 / 窗口重新聚焦时重拉一次：别的标签页或工具改过之后，这里不会停在旧列表
+      useEffect(() => {
+        const reload = () => {
+          if (typeof document !== 'undefined' && document.hidden) return
+          load(data && data.session)
+        }
+        if (typeof window !== 'undefined') window.addEventListener('focus', reload)
+        if (typeof document !== 'undefined') document.addEventListener('visibilitychange', reload)
+        return () => {
+          if (typeof window !== 'undefined') window.removeEventListener('focus', reload)
+          if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', reload)
+        }
+      }, [load, data && data.session])
+
       const entries = (data && Array.isArray(data.entries)) ? data.entries : []
       const suppressed = (data && data.overview && Array.isArray(data.overview.suppressed)) ? data.overview.suppressed : []
+      const suppressedSet = new Set(suppressed)
       const sessions = (data && Array.isArray(data.sessions)) ? data.sessions : []
 
       const actions = h(
@@ -647,8 +683,11 @@ window.__ModuleLoader__.load({
                   h('div', { className: 'pmb-item-head' },
                     h('span', { className: 'pmb-v' }, fmtLocal(it.ts)),
                     h('span', { className: 'pmb-tag' }, it.kind === 'auto-summary' ? '自动摘要' : '回合'),
+                    suppressedSet.has(it.hash) ? h('span', { className: 'pmb-tag' }, '已屏蔽') : null,
                     h('span', { className: 'pmb-sub' }, String(it.hash || '').slice(0, 12)),
-                    h('button', { className: 'pmb-btn', disabled: busy, onClick: () => act('session-suppress', { hashes: [it.hash] }, '已屏蔽，本会话不再注入') }, '屏蔽'),
+                    suppressedSet.has(it.hash)
+                      ? h('button', { className: 'pmb-btn', disabled: busy, onClick: () => act('session-unsuppress', { hashes: [it.hash] }, '已解除屏蔽') }, '解除屏蔽')
+                      : h('button', { className: 'pmb-btn', disabled: busy, onClick: () => act('session-suppress', { hashes: [it.hash] }, '已屏蔽，本会话不再注入') }, '屏蔽'),
                     h('button', { className: 'pmb-btn', disabled: busy, onClick: () => act('session-delete', { hash: it.hash }, '已删除（已归档）') }, '删掉'),
                   ),
                   h('div', { className: 'pmb-item-text' }, it.summary || ''),
