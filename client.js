@@ -571,10 +571,16 @@ window.__ModuleLoader__.load({
       // 删除不可逆（有归档但要翻文件），点一次只问「确定？」，再点才真删
       const [confirmHash, setConfirmHash] = useState('')
       const [openHash, setOpenHash] = useState('')
+      // 翻页：接口一页 100 条，更早的靠「加载更早」往前接，接过的攒在 older 里
+      const [older, setOlder] = useState([])
+      const [loadingMore, setLoadingMore] = useState(false)
+      const [moreDone, setMoreDone] = useState(false)
 
       const load = useCallback(async (session) => {
         setBusy(true)
         setError('')
+        setOlder([])
+        setMoreDone(false)
         try {
           const q = session ? '&session=' + encodeURIComponent(session) : ''
           const res = await callApi('session-memory' + q)
@@ -641,7 +647,19 @@ window.__ModuleLoader__.load({
         }
       }, [load, data && data.session])
 
-      const allEntries = (data && Array.isArray(data.entries)) ? data.entries : []
+      const serverEntries = (data && Array.isArray(data.entries)) ? data.entries : []
+      const total = data && Number.isFinite(data.total) ? data.total : serverEntries.length
+      // 已加载：更早的页 + 服务端这一页，按 hash 去重
+      const seen = new Set()
+      const allEntries = [...older, ...serverEntries]
+        .filter((it) => {
+          const k = String(it.hash || it.ts)
+          if (seen.has(k)) return false
+          seen.add(k)
+          return true
+        })
+        .sort((a, b) => String(a.ts).localeCompare(String(b.ts)))
+      const hasMore = !moreDone && allEntries.length < total
       const suppressed = (data && data.overview && Array.isArray(data.overview.suppressed)) ? data.overview.suppressed : []
       const suppressedSet = new Set(suppressed)
       const sessions = (data && Array.isArray(data.sessions)) ? data.sessions : []
@@ -654,6 +672,35 @@ window.__ModuleLoader__.load({
       const blockedBlocks = suppressed.filter((x) => BLOCK_LABELS[x])
       const blockedHashes = suppressed.filter((x) => !BLOCK_LABELS[x])
       const latestEntry = allEntries.length ? allEntries[allEntries.length - 1] : null
+
+      // 加载更早：拿当前最早一条的时间当游标，往前取一页
+      const loadMore = async () => {
+        if (!data || !data.session || loadingMore || !hasMore) return
+        setLoadingMore(true)
+        setError('')
+        try {
+          const cursor = allEntries.length ? allEntries[0].ts : ''
+          const res = await callApi(
+            'session-memory&session=' + encodeURIComponent(data.session) +
+              (cursor ? '&before=' + encodeURIComponent(cursor) : ''),
+          )
+          if (!res || res.ok !== true) throw new Error((res && res.error) || '加载更早失败')
+          const got = Array.isArray(res.entries) ? res.entries : []
+          if (!got.length) {
+            setMoreDone(true)
+          } else {
+            setOlder((prev) => {
+              const have = new Set([...prev, ...serverEntries].map((it) => String(it.hash || it.ts)))
+              return [...prev, ...got.filter((it) => !have.has(String(it.hash || it.ts)))]
+            })
+            if (got.length < 100) setMoreDone(true)
+          }
+        } catch (err) {
+          setError(err && err.message ? err.message : String(err))
+        } finally {
+          setLoadingMore(false)
+        }
+      }
 
       const actions = h(
         Actions,
@@ -706,7 +753,7 @@ window.__ModuleLoader__.load({
             h('div', { className: 'pmb-row' },
               h('span', { className: 'pmb-tag' }, data.disabled ? '本会话已暂停注入' : '注入正常'),
               h('span', { className: 'pmb-tag' }, '屏蔽 ' + String(suppressed.length) + ' 项'),
-              h('span', { className: 'pmb-tag' }, '片段 ' + String(allEntries.length) + ' 条'),
+              h('span', { className: 'pmb-tag' }, '片段 ' + String(allEntries.length) + (total > allEntries.length ? ' / 共 ' + String(total) + ' 条' : ' 条')),
               latestEntry ? h('span', { className: 'pmb-hint' }, '最近一条：' + (relTime(latestEntry.ts) || fmtLocal(latestEntry.ts))) : null,
               data.disabled ? h('span', { className: 'pmb-tag pmb-tag-warn' }, '注意：暂停注入后，这里的操作仍然有效') : null,
             ),
@@ -720,8 +767,12 @@ window.__ModuleLoader__.load({
                 onChange: (ev) => setQuery(ev.target.value),
               }),
               h('button', { className: 'pmb-btn', disabled: busy, onClick: () => setNewestFirst(!newestFirst) }, newestFirst ? '新的在前' : '旧的在前'),
+              hasMore
+                ? h('button', { className: 'pmb-btn', disabled: busy || loadingMore, onClick: () => loadMore() },
+                    loadingMore ? '加载中…' : '加载更早（还有 ' + String(total - allEntries.length) + ' 条）')
+                : null,
               hiddenByFilter > 0 ? h('span', { className: 'pmb-hint' }, '筛掉 ' + hiddenByFilter + ' 条') : null,
-              allEntries.length > 100 ? h('span', { className: 'pmb-hint' }, '（接口只给最近 100 条）') : null,
+              !hasMore && total > 100 ? h('span', { className: 'pmb-hint' }, '更早的都加载完了（共 ' + String(total) + ' 条）') : null,
             ),
           )
         : null
@@ -801,6 +852,13 @@ window.__ModuleLoader__.load({
                   )
                 }),
               ),
+        hasMore || loadingMore
+          ? h('div', { className: 'pmb-row' },
+              h('button', { className: 'pmb-btn', disabled: busy || loadingMore, onClick: () => loadMore() },
+                loadingMore ? '加载中…' : '加载更早（还有 ' + String(Math.max(0, total - allEntries.length)) + ' 条）'),
+              h('span', { className: 'pmb-hint' }, '一页 100 条，更早的要自己往前翻——数据都在，不会因为没显示就丢'),
+            )
+          : null,
       )
 
       return h('div', { className: 'pmb' },
