@@ -585,6 +585,8 @@ window.__ModuleLoader__.load({
       const [error, setError] = useState('')
       const [query, setQuery] = useState('')
       const [newestFirst, setNewestFirst] = useState(true)
+      // 加载更早之后要滚到衔接处，否则「新的在前」时内容长在看不见的底部
+      const [pendingScroll, setPendingScroll] = useState('')
       // 删除不可逆（有归档但要翻文件），点一次只问「确定？」，再点才真删
       const [confirmHash, setConfirmHash] = useState('')
       // 展开 / 菜单：每条只留一个「⋯」，点开才看到展开、屏蔽、删掉
@@ -696,8 +698,11 @@ window.__ModuleLoader__.load({
         if (!data || !data.session || loadingMore || !hasMore) return
         setLoadingMore(true)
         setError('')
+        setNotice('')
         try {
-          const cursor = allEntries.length ? allEntries[0].ts : ''
+          const oldest = allEntries.length ? allEntries[0] : null
+          const cursor = oldest ? oldest.ts : ''
+          const boundary = oldest ? String(oldest.hash || oldest.ts) : ''
           const res = await callApi('session-memory', undefined, {
             session: data.session,
             ...(cursor ? { before: cursor } : {}),
@@ -706,12 +711,16 @@ window.__ModuleLoader__.load({
           const got = Array.isArray(res.entries) ? res.entries : []
           if (!got.length) {
             setMoreDone(true)
+            setNotice('没有更早的了')
           } else {
             setOlder((prev) => {
               const have = new Set([...prev, ...serverEntries].map((it) => String(it.hash || it.ts)))
               return [...prev, ...got.filter((it) => !have.has(String(it.hash || it.ts)))]
             })
             if (got.length < 100) setMoreDone(true)
+            // 滚到衔接处：新的在前时，新加载的在下面，不滚过去看起来就像没加载
+            setPendingScroll(boundary)
+            setNotice('已加载更早 ' + String(got.length) + ' 条（接在' + (newestFirst ? '列表下方' : '列表上方') + '）')
           }
         } catch (err) {
           setError(err && err.message ? err.message : String(err))
@@ -719,6 +728,16 @@ window.__ModuleLoader__.load({
           setLoadingMore(false)
         }
       }
+
+      // 加载完再滚：等这一帧渲染出来，元素才存在
+      useEffect(() => {
+        if (!pendingScroll) return
+        const el = typeof document !== 'undefined'
+          ? document.querySelector('[data-pmb-hash="' + pendingScroll + '"]')
+          : null
+        if (el && typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'center' })
+        setPendingScroll('')
+      }, [pendingScroll, older])
 
       const askDelete = (hash) => {
         if (confirmHash !== hash) {
@@ -839,7 +858,7 @@ window.__ModuleLoader__.load({
                   const isSuppressed = suppressedSet.has(it.hash)
                   const isOpen = openHash === it.hash
                   const isMenu = menuHash === it.hash
-                  return h('div', { key: it.hash || it.ts, className: 'pmb-item' },
+                  return h('div', { key: it.hash || it.ts, className: 'pmb-item', 'data-pmb-hash': String(it.hash || it.ts) },
                     h('div', { className: 'pmb-item-head' },
                       h('span', { className: 'pmb-v', title: fmtLocal(it.ts) }, relTime(it.ts) || fmtLocal(it.ts)),
                       h('span', { className: 'pmb-tag' }, it.kind === 'auto-summary' ? '摘要' : '对话'),
