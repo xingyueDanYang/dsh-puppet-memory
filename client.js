@@ -117,8 +117,16 @@ window.__ModuleLoader__.load({
       return BLOCK_LABELS[k] ? BLOCK_LABELS[k] + '（' + k + '）' : k
     }
 
-    async function callApi(action, payload) {
-      const url = API + '?action=' + encodeURIComponent(action)
+    // query 必须单独传：以前把 `&session=…` 拼进 action，会被 encodeURIComponent 编成
+    // %26session%3D…，服务端拿到的 action 不再是纯动作名 —— 翻页和切会话都会 404。
+    async function callApi(action, payload, query) {
+      let url = API + '?action=' + encodeURIComponent(action)
+      if (query && typeof query === 'object') {
+        for (const [k, v] of Object.entries(query)) {
+          if (v === undefined || v === null || v === '') continue
+          url += '&' + encodeURIComponent(k) + '=' + encodeURIComponent(String(v))
+        }
+      }
       const init = payload === undefined
         ? { method: 'GET' }
         : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }
@@ -594,8 +602,7 @@ window.__ModuleLoader__.load({
         setMoreDone(false)
         setMenuHash('')
         try {
-          const qs = session ? '&session=' + encodeURIComponent(session) : ''
-          const res = await callApi('session-memory' + qs)
+          const res = await callApi('session-memory', undefined, session ? { session } : undefined)
           if (!res || res.ok !== true) throw new Error((res && res.error) || '读取会话记忆失败')
           setData(res)
         } catch (err) {
@@ -691,10 +698,10 @@ window.__ModuleLoader__.load({
         setError('')
         try {
           const cursor = allEntries.length ? allEntries[0].ts : ''
-          const res = await callApi(
-            'session-memory&session=' + encodeURIComponent(data.session) +
-              (cursor ? '&before=' + encodeURIComponent(cursor) : ''),
-          )
+          const res = await callApi('session-memory', undefined, {
+            session: data.session,
+            ...(cursor ? { before: cursor } : {}),
+          })
           if (!res || res.ok !== true) throw new Error((res && res.error) || '加载更早失败')
           const got = Array.isArray(res.entries) ? res.entries : []
           if (!got.length) {
