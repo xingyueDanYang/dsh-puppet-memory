@@ -77,6 +77,13 @@ window.__ModuleLoader__.load({
       '.pmb-line-label{font-size:13px;color:var(--dsw-alias-label-primary)}',
       '.pmb-line-note{font-size:12px;line-height:1.55;color:var(--dsw-alias-label-secondary)}',
       '.pmb-line-ctl{flex:0 0 auto;display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end;max-width:60%}',
+      // 按天折叠：每天一行标题，点开才展开当天条目
+      '.pmb-day{display:flex;flex-direction:column;gap:6px}',
+      '.pmb-day-head{display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:8px;background:var(--dsw-alias-bg-layer-2);cursor:pointer;user-select:none}',
+      '.pmb-day-head:hover{filter:brightness(1.04)}',
+      '.pmb-day-arrow{font-size:11px;color:var(--dsw-alias-label-secondary);width:10px}',
+      '.pmb-day-label{font-size:12px;font-weight:600;color:var(--dsw-alias-label-primary)}',
+      '.pmb-day-body{display:flex;flex-direction:column;gap:8px;padding:2px 0 4px 10px;border-left:2px solid var(--dsw-alias-border-l1);margin-left:6px}',
     ].join('\n')
 
     function fmtLocal(iso) {
@@ -592,6 +599,8 @@ window.__ModuleLoader__.load({
       // 展开 / 菜单：每条只留一个「⋯」，点开才看到展开、屏蔽、删掉
       const [openHash, setOpenHash] = useState('')
       const [menuHash, setMenuHash] = useState('')
+      // 按天折叠：key 是 2026-10-23 这种日期，没记录时默认只展开最新一天
+      const [openDays, setOpenDays] = useState({})
       // 翻页：接口一页 100 条，更早的靠「加载更早」往前接
       const [older, setOlder] = useState([])
       const [loadingMore, setLoadingMore] = useState(false)
@@ -690,6 +699,42 @@ window.__ModuleLoader__.load({
         .slice()
         .sort((a, b) => (newestFirst ? String(b.ts).localeCompare(String(a.ts)) : String(a.ts).localeCompare(String(b.ts))))
       const hiddenByFilter = allEntries.length - entries.length
+      // 按天分组：条目太多时翻页也找不着，折叠成「每天一行」才看得清分布
+      const dayKeyOf = (iso) => {
+        const t = Date.parse(iso)
+        if (!Number.isFinite(t)) return '未知日期'
+        const d = new Date(t)
+        return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate()
+      }
+      const dayLabelOf = (iso) => {
+        const t = Date.parse(iso)
+        if (!Number.isFinite(t)) return '未知日期'
+        const d = new Date(t)
+        const week = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][d.getDay()]
+        return (d.getMonth() + 1) + ' 月 ' + d.getDate() + ' 日 · ' + week
+      }
+      const dayGroups = []
+      for (const it of entries) {
+        const key = dayKeyOf(it.ts)
+        const last = dayGroups[dayGroups.length - 1]
+        if (last && last.key === key) last.items.push(it)
+        else dayGroups.push({ key, label: dayLabelOf(it.ts), items: [it] })
+      }
+      // 默认只展开最上面那天；搜索时全部展开（不然命中被折叠看不见）
+      const isDayOpen = (key) => (q ? true : (openDays[key] !== undefined ? openDays[key] : key === (dayGroups[0] && dayGroups[0].key)))
+      const toggleDay = (key) => setOpenDays({ ...openDays, [key]: !isDayOpen(key) })
+      const allDaysOpen = dayGroups.length > 0 && dayGroups.every((g) => isDayOpen(g.key))
+      const toggleAllDays = () => {
+        if (allDaysOpen) {
+          const next = {}
+          for (const g of dayGroups) next[g.key] = false
+          setOpenDays(next)
+        } else {
+          const next = {}
+          for (const g of dayGroups) next[g.key] = true
+          setOpenDays(next)
+        }
+      }
       const blockedBlocks = suppressed.filter((x) => BLOCK_LABELS[x])
       const blockedHashes = suppressed.filter((x) => !BLOCK_LABELS[x])
       const latestEntry = allEntries.length ? allEntries[allEntries.length - 1] : null
@@ -848,38 +893,62 @@ window.__ModuleLoader__.load({
               disabled: busy,
               onChange: (ev) => setQuery(ev.target.value),
             }),
-            h('button', { className: 'pmb-btn', disabled: busy, onClick: () => setNewestFirst(!newestFirst) }, newestFirst ? '新的在前' : '旧的在前'))),
+            h('button', { className: 'pmb-btn', disabled: busy, onClick: () => setNewestFirst(!newestFirst) }, newestFirst ? '新的在前' : '旧的在前'),
+            dayGroups.length > 1
+              ? h('button', { className: 'pmb-btn', disabled: busy, onClick: () => toggleAllDays() }, allDaysOpen ? '全部收起' : '全部展开')
+              : null)),
         allEntries.length === 0
           ? h(NOTE, null, data ? '这个会话还没有片段（回合要跑过才写，或者本会话还没触发过摘要）。' : '读不到会话记忆接口。')
           : entries.length === 0
             ? h(NOTE, null, '没有匹配「' + query.trim() + '」的片段。')
             : h('div', { className: 'pmb-list' },
-                entries.map((it) => {
-                  const isSuppressed = suppressedSet.has(it.hash)
-                  const isOpen = openHash === it.hash
-                  const isMenu = menuHash === it.hash
-                  return h('div', { key: it.hash || it.ts, className: 'pmb-item', 'data-pmb-hash': String(it.hash || it.ts) },
-                    h('div', { className: 'pmb-item-head' },
-                      h('span', { className: 'pmb-v', title: fmtLocal(it.ts) }, relTime(it.ts) || fmtLocal(it.ts)),
-                      h('span', { className: 'pmb-tag' }, it.kind === 'auto-summary' ? '摘要' : '对话'),
-                      it.kind === 'auto-summary' && it.reason ? h('span', { className: 'pmb-tag' }, reasonLabel(it.reason)) : null,
-                      isSuppressed ? h('span', { className: 'pmb-tag pmb-tag-warn' }, '已屏蔽') : null,
-                      h('span', { className: 'pmb-sub', title: it.hash }, String(it.hash || '').slice(0, 10)),
-                      h('div', { className: 'pmb-line-ctl' },
-                        h('button', { className: 'pmb-btn', disabled: busy, onClick: () => setMenuHash(isMenu ? '' : it.hash) }, isMenu ? '收起' : '⋯'))),
-                    isMenu
-                      ? h('div', { className: 'pmb-row' },
-                          h('button', { className: 'pmb-btn', disabled: busy, onClick: () => setOpenHash(isOpen ? '' : it.hash) }, isOpen ? '收起正文' : '展开正文'),
-                          isSuppressed
-                            ? h('button', { className: 'pmb-btn', disabled: busy, onClick: () => act('session-unsuppress', { hashes: [it.hash] }, '已解除屏蔽') }, '解除屏蔽')
-                            : h('button', { className: 'pmb-btn', disabled: busy, onClick: () => act('session-suppress', { hashes: [it.hash] }, '已屏蔽，本会话不再注入') }, '屏蔽这条'),
-                          h('button', {
-                            className: 'pmb-btn' + (confirmHash === it.hash ? ' pmb-btn-danger' : ''),
-                            disabled: busy,
-                            onClick: () => askDelete(it.hash),
-                          }, confirmHash === it.hash ? '确认删除？' : '删掉这条'))
+                dayGroups.map((g) => {
+                  const open = isDayOpen(g.key)
+                  return h('div', { key: 'day-' + g.key, className: 'pmb-day' },
+                    h('div', {
+                      className: 'pmb-day-head',
+                      role: 'button',
+                      tabIndex: 0,
+                      onClick: () => toggleDay(g.key),
+                      onKeyDown: (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); toggleDay(g.key) } },
+                    },
+                      h('span', { className: 'pmb-day-arrow' }, open ? '▾' : '▸'),
+                      h('span', { className: 'pmb-day-label' }, g.label),
+                      h('span', { className: 'pmb-sub' }, String(g.items.length) + ' 条'),
+                      open ? null : h('span', { className: 'pmb-hint' }, '点开'),
+                    ),
+                    open
+                      ? h('div', { className: 'pmb-day-body' },
+                          g.items.map((it) => {
+                            const isSuppressed = suppressedSet.has(it.hash)
+                            const isOpen = openHash === it.hash
+                            const isMenu = menuHash === it.hash
+                            return h('div', { key: it.hash || it.ts, className: 'pmb-item', 'data-pmb-hash': String(it.hash || it.ts) },
+                              h('div', { className: 'pmb-item-head' },
+                                h('span', { className: 'pmb-v', title: fmtLocal(it.ts) }, relTime(it.ts) || fmtLocal(it.ts)),
+                                h('span', { className: 'pmb-tag' }, it.kind === 'auto-summary' ? '摘要' : '对话'),
+                                it.kind === 'auto-summary' && it.reason ? h('span', { className: 'pmb-tag' }, reasonLabel(it.reason)) : null,
+                                isSuppressed ? h('span', { className: 'pmb-tag pmb-tag-warn' }, '已屏蔽') : null,
+                                h('span', { className: 'pmb-sub', title: it.hash }, String(it.hash || '').slice(0, 10)),
+                                h('div', { className: 'pmb-line-ctl' },
+                                  h('button', { className: 'pmb-btn', disabled: busy, onClick: () => setMenuHash(isMenu ? '' : it.hash) }, isMenu ? '收起' : '⋯'))),
+                              isMenu
+                                ? h('div', { className: 'pmb-row' },
+                                    h('button', { className: 'pmb-btn', disabled: busy, onClick: () => setOpenHash(isOpen ? '' : it.hash) }, isOpen ? '收起正文' : '展开正文'),
+                                    isSuppressed
+                                      ? h('button', { className: 'pmb-btn', disabled: busy, onClick: () => act('session-unsuppress', { hashes: [it.hash] }, '已解除屏蔽') }, '解除屏蔽')
+                                      : h('button', { className: 'pmb-btn', disabled: busy, onClick: () => act('session-suppress', { hashes: [it.hash] }, '已屏蔽，本会话不再注入') }, '屏蔽这条'),
+                                    h('button', {
+                                      className: 'pmb-btn' + (confirmHash === it.hash ? ' pmb-btn-danger' : ''),
+                                      disabled: busy,
+                                      onClick: () => askDelete(it.hash),
+                                    }, confirmHash === it.hash ? '确认删除？' : '删掉这条'))
+                                : null,
+                              h('div', { className: 'pmb-item-text' + (isOpen ? ' pmb-open' : '') }, it.summary || ''),
+                            )
+                          }),
+                        )
                       : null,
-                    h('div', { className: 'pmb-item-text' + (isOpen ? ' pmb-open' : '') }, it.summary || ''),
                   )
                 }),
               ),
