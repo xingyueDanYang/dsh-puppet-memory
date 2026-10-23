@@ -601,6 +601,8 @@ window.__ModuleLoader__.load({
       const [menuHash, setMenuHash] = useState('')
       // 按天折叠：key 是 2026-10-23 这种日期，没记录时默认只展开最新一天
       const [openDays, setOpenDays] = useState({})
+      // 视图：event=只看摘要/事件（默认），raw=只看原始回合，all=全看
+      const [kindMode, setKindMode] = useState('event')
       // 翻页：接口一页 100 条，更早的靠「加载更早」往前接
       const [older, setOlder] = useState([])
       const [loadingMore, setLoadingMore] = useState(false)
@@ -694,11 +696,18 @@ window.__ModuleLoader__.load({
       const suppressedSet = new Set(suppressed)
       const sessions = (data && Array.isArray(data.sessions)) ? data.sessions : []
       const q = query.trim().toLowerCase()
-      const entries = allEntries
+      // 视图层：默认只看「摘要 / 事件」，原始回合收进另一种视图——一回合一条是流水账，不是记忆
+      const kindPool = allEntries.filter((it) => {
+        if (kindMode === 'all') return true
+        if (kindMode === 'raw') return it.kind === 'turn'
+        return it.kind !== 'turn' // 摘要 + 将来的事件条目
+      })
+      const hiddenByKind = allEntries.length - kindPool.length
+      const entries = kindPool
         .filter((it) => !q || String(it.summary || '').toLowerCase().includes(q) || String(it.hash || '').toLowerCase().includes(q))
         .slice()
         .sort((a, b) => (newestFirst ? String(b.ts).localeCompare(String(a.ts)) : String(a.ts).localeCompare(String(b.ts))))
-      const hiddenByFilter = allEntries.length - entries.length
+      const hiddenByFilter = kindPool.length - entries.length
       // 按天分组：条目太多时翻页也找不着，折叠成「每天一行」才看得清分布
       const dayKeyOf = (iso) => {
         const t = Date.parse(iso)
@@ -882,9 +891,26 @@ window.__ModuleLoader__.load({
         ),
         h('div', { className: 'pmb-line' },
           h('div', { className: 'pmb-line-main' },
-            h('div', { className: 'pmb-line-label' }, '找一条'),
-            h('div', { className: 'pmb-line-note' }, hiddenByFilter > 0 ? '筛掉 ' + String(hiddenByFilter) + ' 条' : '搜文字或 hash；一页 100 条，更早的往下翻')),
+            h('div', { className: 'pmb-line-label' }, '看哪些'),
+            h('div', { className: 'pmb-line-note' },
+              (kindMode === 'event'
+                ? '默认只显示摘要与事件——一回合一条是流水账，原始回合收在「原始回合」里'
+                : kindMode === 'raw'
+                  ? '现在显示的是原始回合（每个回合一条），这里条目最多'
+                  : '全部条目，含原始回合') +
+                (hiddenByFilter > 0 ? '；筛掉 ' + String(hiddenByFilter) + ' 条' : ''))),
           h('div', { className: 'pmb-line-ctl' },
+            h('select', {
+              className: 'pmb-input',
+              value: kindMode,
+              disabled: busy,
+              onChange: (ev) => setKindMode(ev.target.value),
+              style: { width: 'auto', minWidth: '132px' },
+            },
+              h('option', { value: 'event' }, '摘要与事件（' + String(allEntries.filter((it) => it.kind !== 'turn').length) + '）'),
+              h('option', { value: 'raw' }, '原始回合（' + String(allEntries.filter((it) => it.kind === 'turn').length) + '）'),
+              h('option', { value: 'all' }, '全部（' + String(allEntries.length) + '）'),
+            ),
             h('input', {
               className: 'pmb-search',
               type: 'search',
@@ -897,10 +923,21 @@ window.__ModuleLoader__.load({
             dayGroups.length > 1
               ? h('button', { className: 'pmb-btn', disabled: busy, onClick: () => toggleAllDays() }, allDaysOpen ? '全部收起' : '全部展开')
               : null)),
+        // 事件层还没做：条目几乎全是原始回合时，说清楚为什么这页看起来这么空
+        kindMode === 'event' && allEntries.length > 0 && allEntries.length - hiddenByKind <= Math.max(2, allEntries.length * 0.1)
+          ? h('div', { className: 'pmb-line' },
+              h('div', { className: 'pmb-line-main' },
+                h('div', { className: 'pmb-line-note' },
+                  '这个会话 ' + String(allEntries.length) + ' 条里只有 ' + String(allEntries.length - hiddenByKind) +
+                    ' 条是摘要/事件——事件条目要等 0.30 数据层（同话题多回合合成一条）。现在可以先切到「原始回合」。')))
+          : null,
         allEntries.length === 0
           ? h(NOTE, null, data ? '这个会话还没有片段（回合要跑过才写，或者本会话还没触发过摘要）。' : '读不到会话记忆接口。')
           : entries.length === 0
-            ? h(NOTE, null, '没有匹配「' + query.trim() + '」的片段。')
+            ? h(NOTE, null,
+                hiddenByKind > 0 && !q
+                  ? '这个会话只有原始回合（' + String(hiddenByKind) + ' 条），还没有摘要或事件条目。切到「原始回合」就能看到它们。'
+                  : '没有匹配「' + query.trim() + '」的片段。')
             : h('div', { className: 'pmb-list' },
                 dayGroups.map((g) => {
                   const open = isDayOpen(g.key)
