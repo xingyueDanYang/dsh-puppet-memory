@@ -67,6 +67,15 @@ window.__ModuleLoader__.load({
       '.pmb-btn-danger{border-color:#b42318;color:#b42318}',
       '.pmb-tag-warn{background:rgba(181,71,8,.12);color:#b54708}',
       '.pmb-hint{font-size:11px;color:var(--dsw-alias-label-secondary)}',
+      // 分组 + 一行一件事：左边标题/说明，右边控件（跟宿主自带设置页同一个排版语言）
+      '.pmb-sec{display:flex;flex-direction:column;gap:2px;border:1px solid var(--dsw-alias-border-l1);border-radius:10px;padding:6px 14px 10px;background:var(--dsw-alias-bg-layer-1)}',
+      '.pmb-sec-h{font-size:12px;font-weight:600;color:var(--dsw-alias-label-secondary);padding:8px 0 6px;letter-spacing:.3px}',
+      '.pmb-line{display:flex;align-items:flex-start;gap:16px;padding:9px 0;border-top:1px solid var(--dsw-alias-border-l1)}',
+      '.pmb-line:first-of-type{border-top:0}',
+      '.pmb-line-main{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:3px}',
+      '.pmb-line-label{font-size:13px;color:var(--dsw-alias-label-primary)}',
+      '.pmb-line-note{font-size:12px;line-height:1.55;color:var(--dsw-alias-label-secondary)}',
+      '.pmb-line-ctl{flex:0 0 auto;display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end;max-width:60%}',
     ].join('\n')
 
     function fmtLocal(iso) {
@@ -565,13 +574,14 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = useState(false)
       const [notice, setNotice] = useState('')
       const [error, setError] = useState('')
-      // 一屏最多 100 条：不加筛选/排序，找一条旧片段就得滚到底
       const [query, setQuery] = useState('')
       const [newestFirst, setNewestFirst] = useState(true)
       // 删除不可逆（有归档但要翻文件），点一次只问「确定？」，再点才真删
       const [confirmHash, setConfirmHash] = useState('')
+      // 展开 / 菜单：每条只留一个「⋯」，点开才看到展开、屏蔽、删掉
       const [openHash, setOpenHash] = useState('')
-      // 翻页：接口一页 100 条，更早的靠「加载更早」往前接，接过的攒在 older 里
+      const [menuHash, setMenuHash] = useState('')
+      // 翻页：接口一页 100 条，更早的靠「加载更早」往前接
       const [older, setOlder] = useState([])
       const [loadingMore, setLoadingMore] = useState(false)
       const [moreDone, setMoreDone] = useState(false)
@@ -581,9 +591,10 @@ window.__ModuleLoader__.load({
         setError('')
         setOlder([])
         setMoreDone(false)
+        setMenuHash('')
         try {
-          const q = session ? '&session=' + encodeURIComponent(session) : ''
-          const res = await callApi('session-memory' + q)
+          const qs = session ? '&session=' + encodeURIComponent(session) : ''
+          const res = await callApi('session-memory' + qs)
           if (!res || res.ok !== true) throw new Error((res && res.error) || '读取会话记忆失败')
           setData(res)
         } catch (err) {
@@ -606,10 +617,10 @@ window.__ModuleLoader__.load({
           const res = await callApi(action, { session: sid, ...(payload || {}) })
           if (!res || res.ok !== true) throw new Error((res && res.error) || '操作失败')
           setNotice(res.message || okText || '完成')
-          // 先本地改列表：界面立刻动，不去等下一次拉取（否则看起来像"点了没反应"）
           if (action === 'session-delete' && payload && payload.hash) {
             const drop = payload.hash
             setData((prev) => (prev && Array.isArray(prev.entries) ? { ...prev, entries: prev.entries.filter((e) => e.hash !== drop) } : prev))
+            setOlder((prev) => prev.filter((e) => e.hash !== drop))
           }
           if (action === 'session-suppress' && payload && Array.isArray(payload.hashes)) {
             setData((prev) => {
@@ -626,6 +637,7 @@ window.__ModuleLoader__.load({
               return { ...prev, overview: { ...ov, suppressed: drop ? (ov.suppressed || []).filter((x) => !drop.has(x)) : [] } }
             })
           }
+          setMenuHash('')
           await load(sid)
         } catch (err) {
           setError(err && err.message ? err.message : String(err))
@@ -633,7 +645,7 @@ window.__ModuleLoader__.load({
         }
       }
 
-      // 切回页面 / 窗口重新聚焦时重拉一次：别的标签页或工具改过之后，这里不会停在旧列表
+      // 切回页面 / 窗口重新聚焦时重拉一次，不停在旧列表
       useEffect(() => {
         const reload = () => {
           if (typeof document !== 'undefined' && document.hidden) return
@@ -649,7 +661,6 @@ window.__ModuleLoader__.load({
 
       const serverEntries = (data && Array.isArray(data.entries)) ? data.entries : []
       const total = data && Number.isFinite(data.total) ? data.total : serverEntries.length
-      // 已加载：更早的页 + 服务端这一页，按 hash 去重
       const seen = new Set()
       const allEntries = [...older, ...serverEntries]
         .filter((it) => {
@@ -673,7 +684,6 @@ window.__ModuleLoader__.load({
       const blockedHashes = suppressed.filter((x) => !BLOCK_LABELS[x])
       const latestEntry = allEntries.length ? allEntries[allEntries.length - 1] : null
 
-      // 加载更早：拿当前最早一条的时间当游标，往前取一页
       const loadMore = async () => {
         if (!data || !data.session || loadingMore || !hasMore) return
         setLoadingMore(true)
@@ -702,113 +712,6 @@ window.__ModuleLoader__.load({
         }
       }
 
-      const actions = h(
-        Actions,
-        null,
-        h('button', { className: 'pmb-btn', disabled: busy || !data, onClick: () => load(data && data.session) }, '刷新'),
-        h('button', { className: 'pmb-btn', disabled: busy || !data, onClick: () => act('session-toggle', { enabled: !!data.disabled }) }, data && data.disabled ? '恢复本会话注入' : '暂停本会话注入'),
-        h('button', { className: 'pmb-btn', disabled: busy || !data || !suppressed.length, onClick: () => act('session-unsuppress', {}, '已解除全部屏蔽') }, '解除全部屏蔽'),
-      )
-
-      // 整块屏蔽：以前只能手写 core/state/social/persona，页面上点不到
-      const blockBar = data
-        ? h('div', { className: 'pmb-row' },
-            h('span', { className: 'pmb-sub' }, '整块屏蔽：'),
-            ['core', 'state', 'social', 'persona'].map((key) => {
-              const on = suppressedSet.has(key)
-              return h('button', {
-                key,
-                className: 'pmb-btn' + (on ? ' pmb-btn-danger' : ''),
-                disabled: busy,
-                onClick: () => act(on ? 'session-unsuppress' : 'session-suppress', on ? { hashes: [key] } : { hashes: [key] }, on ? '已解除 ' + blockLabel(key) : '已屏蔽 ' + blockLabel(key)),
-              }, on ? blockLabel(key) + '（已屏蔽，点此解除）' : '屏蔽 ' + blockLabel(key))
-            }),
-          )
-        : null
-
-      const head = h(
-        'div',
-        { className: 'pmb-head' },
-        h('div', { className: 'pmb-title' }, '会话记忆'),
-        h('div', { className: 'pmb-sub' }, '脏记忆一旦进了注入，会跟着每个回合走——这里能把它从「当前会话」里屏蔽（数据不删，随时解除），或删掉本会话自己写下的片段（删前归档，可找回）。'),
-      )
-
-      const sessionCard = data
-        ? h(
-            'div',
-            { className: 'pmb-card' },
-            h('div', { className: 'pmb-title' }, '当前会话'),
-            h(Row, { label: '会话' },
-              h('select', {
-                className: 'pmb-input pmb-input-wide',
-                value: data.session,
-                disabled: busy,
-                onChange: (ev) => load(ev.target.value),
-                style: { width: 'min(100%,380px)' },
-              },
-                sessions.map((x) => h('option', { key: x.id, value: x.id }, x.id + (x.ts ? '  ' + fmtLocal(x.ts) : ''))),
-                sessions.some((x) => x.id === data.session) ? null : h('option', { value: data.session }, data.session || '（还没有会话）'),
-              ),
-            ),
-            h('div', { className: 'pmb-row' },
-              h('span', { className: 'pmb-tag' }, data.disabled ? '本会话已暂停注入' : '注入正常'),
-              h('span', { className: 'pmb-tag' }, '屏蔽 ' + String(suppressed.length) + ' 项'),
-              h('span', { className: 'pmb-tag' }, '片段 ' + String(allEntries.length) + (total > allEntries.length ? ' / 共 ' + String(total) + ' 条' : ' 条')),
-              latestEntry ? h('span', { className: 'pmb-hint' }, '最近一条：' + (relTime(latestEntry.ts) || fmtLocal(latestEntry.ts))) : null,
-              data.disabled ? h('span', { className: 'pmb-tag pmb-tag-warn' }, '注意：暂停注入后，这里的操作仍然有效') : null,
-            ),
-            h('div', { className: 'pmb-filter' },
-              h('input', {
-                className: 'pmb-search',
-                type: 'search',
-                placeholder: '在片段里搜文字或 hash',
-                value: query,
-                disabled: busy,
-                onChange: (ev) => setQuery(ev.target.value),
-              }),
-              h('button', { className: 'pmb-btn', disabled: busy, onClick: () => setNewestFirst(!newestFirst) }, newestFirst ? '新的在前' : '旧的在前'),
-              hasMore
-                ? h('button', { className: 'pmb-btn', disabled: busy || loadingMore, onClick: () => loadMore() },
-                    loadingMore ? '加载中…' : '加载更早（还有 ' + String(total - allEntries.length) + ' 条）')
-                : null,
-              hiddenByFilter > 0 ? h('span', { className: 'pmb-hint' }, '筛掉 ' + hiddenByFilter + ' 条') : null,
-              !hasMore && total > 100 ? h('span', { className: 'pmb-hint' }, '更早的都加载完了（共 ' + String(total) + ' 条）') : null,
-            ),
-          )
-        : null
-
-      const suppressedCard = suppressed.length
-        ? h(
-            'div',
-            { className: 'pmb-card' },
-            h('div', { className: 'pmb-title' }, '本会话屏蔽中（' + String(suppressed.length) + ' 项）'),
-            blockedBlocks.length
-              ? h('div', { className: 'pmb-row' },
-                  h('span', { className: 'pmb-sub' }, '整块：'),
-                  blockedBlocks.map((key) =>
-                    h('span', { key, className: 'pmb-tag pmb-tag-warn' },
-                      blockLabel(key) + ' ',
-                      h('button', { className: 'pmb-btn', disabled: busy, onClick: () => act('session-unsuppress', { hashes: [key] }, '已解除 ' + blockLabel(key)) }, '解除'),
-                    ),
-                  ),
-                )
-              : null,
-            blockedHashes.length
-              ? h('div', { className: 'pmb-row' },
-                  h('span', { className: 'pmb-sub' }, '片段：'),
-                  blockedHashes.map((hash) =>
-                    h('span', { key: hash, className: 'pmb-tag' },
-                      hash.slice(0, 12) + ' ',
-                      h('button', { className: 'pmb-btn', disabled: busy, onClick: () => act('session-unsuppress', { hashes: [hash] }, '已解除 ' + hash) }, '解除'),
-                    ),
-                  ),
-                )
-              : null,
-            h('div', { className: 'pmb-sub' }, '屏蔽只影响本会话注入，不删数据；数据和归档都还在，下次会话照常注入。'),
-          )
-        : null
-
-      // 删除要问一次：删了虽然会归档，但要翻文件才能找回，误点代价不小
       const askDelete = (hash) => {
         if (confirmHash !== hash) {
           setConfirmHash(hash)
@@ -819,45 +722,138 @@ window.__ModuleLoader__.load({
         act('session-delete', { hash }, '已删除（归档里可找回）')
       }
 
-      const entriesCard = h(
+      // 布局零件：分组 + 「一行一件事」（左边标题和说明，右边控件）
+      const sec = (title, ...kids) =>
+        h('div', { className: 'pmb-sec' }, title ? h('div', { className: 'pmb-sec-h' }, title) : null, kids)
+      const line = (label, note, control) =>
+        h('div', { className: 'pmb-line' },
+          h('div', { className: 'pmb-line-main' },
+            h('div', { className: 'pmb-line-label' }, label),
+            note ? h('div', { className: 'pmb-line-note' }, note) : null),
+          h('div', { className: 'pmb-line-ctl' }, control))
+
+      const head = h(
         'div',
-        { className: 'pmb-card' },
-        h('div', { className: 'pmb-title' }, '本会话写下的片段（' + String(entries.length) + ' / ' + String(allEntries.length) + '）'),
+        { className: 'pmb-head' },
+        h('div', { className: 'pmb-title' }, '会话记忆'),
+        h('div', { className: 'pmb-sub' }, '这里是本会话自己写下的片段。屏蔽只影响本会话注入，数据不删；删掉会先归档，可从归档找回。'),
+      )
+
+      const sessionSec = sec('当前会话',
+        data
+          ? h('div', { style: { display: 'contents' } },
+              line('会话', '换会话＝换一张名单，下面的片段和屏蔽跟着换',
+                h('select', {
+                  className: 'pmb-input pmb-input-wide',
+                  value: data.session,
+                  disabled: busy,
+                  onChange: (ev) => load(ev.target.value),
+                  style: { width: 'min(100%,320px)' },
+                },
+                  sessions.map((x) => h('option', { key: x.id, value: x.id }, x.id + (x.ts ? '  ' + fmtLocal(x.ts) : ''))),
+                  sessions.some((x) => x.id === data.session) ? null : h('option', { value: data.session }, data.session || '（还没有会话）'),
+                )),
+              line('状态', null,
+                h('span', { className: 'pmb-line-note' },
+                  (data.disabled ? '已暂停注入' : '注入正常') +
+                    ' · 片段 ' + String(allEntries.length) + (total > allEntries.length ? ' / 共 ' + String(total) : '') + ' 条' +
+                    (latestEntry ? ' · 最近一条 ' + (relTime(latestEntry.ts) || fmtLocal(latestEntry.ts)) : '') +
+                    (suppressed.length ? ' · 屏蔽 ' + String(suppressed.length) + ' 项' : ''))),
+              line('本会话注入', '暂停后这个会话不再注入记忆，但下面的操作仍然有效',
+                h('button', { className: 'pmb-btn', disabled: busy, onClick: () => act('session-toggle', { enabled: !!data.disabled }) },
+                  data.disabled ? '恢复注入' : '暂停注入')),
+              line('刷新', '别的窗口改过之后，这里不会自动变',
+                h('button', { className: 'pmb-btn', disabled: busy, onClick: () => load(data.session) }, '重新读取')),
+            )
+          : h(NOTE, null, '读取中…'),
+      )
+
+      const blockSec = data
+        ? sec('屏蔽整块',
+            h('div', { className: 'pmb-line' },
+              h('div', { className: 'pmb-line-main' },
+                h('div', { className: 'pmb-line-label' }, '整块记忆'),
+                h('div', { className: 'pmb-line-note' }, '不想让某一整块进这个会话，就点一下；再点解除。')),
+              h('div', { className: 'pmb-line-ctl' },
+                ['core', 'state', 'social', 'persona'].map((key) => {
+                  const on = suppressedSet.has(key)
+                  return h('button', {
+                    key,
+                    className: 'pmb-btn' + (on ? ' pmb-btn-danger' : ''),
+                    disabled: busy,
+                    onClick: () => act(on ? 'session-unsuppress' : 'session-suppress', { hashes: [key] }, on ? '已解除 ' + blockLabel(key) : '已屏蔽 ' + blockLabel(key)),
+                  }, on ? blockLabel(key) + '·已屏蔽' : blockLabel(key))
+                }))),
+            blockedHashes.length
+              ? h('div', { className: 'pmb-line' },
+                  h('div', { className: 'pmb-line-main' },
+                    h('div', { className: 'pmb-line-label' }, '已屏蔽的片段'),
+                    h('div', { className: 'pmb-line-note' }, '这些片段不进本会话注入，点「解除」放回去。')),
+                  h('div', { className: 'pmb-line-ctl' },
+                    blockedHashes.map((hash) =>
+                      h('span', { key: hash, className: 'pmb-tag' },
+                        hash.slice(0, 8) + ' ',
+                        h('button', { className: 'pmb-btn', disabled: busy, onClick: () => act('session-unsuppress', { hashes: [hash] }, '已解除 ' + hash) }, '解除')))))
+              : null)
+        : null
+
+      const entriesSec = h('div', { className: 'pmb-sec' },
+        h('div', { className: 'pmb-sec-h' }, '片段' + (allEntries.length ? '（' + String(allEntries.length) + (total > allEntries.length ? ' / ' + String(total) : '') + '）' : '')),
+        h('div', { className: 'pmb-line' },
+          h('div', { className: 'pmb-line-main' },
+            h('div', { className: 'pmb-line-label' }, '找一条'),
+            h('div', { className: 'pmb-line-note' }, hiddenByFilter > 0 ? '筛掉 ' + String(hiddenByFilter) + ' 条' : '搜文字或 hash；一页 100 条，更早的往下翻')),
+          h('div', { className: 'pmb-line-ctl' },
+            h('input', {
+              className: 'pmb-search',
+              type: 'search',
+              placeholder: '搜文字或 hash',
+              value: query,
+              disabled: busy,
+              onChange: (ev) => setQuery(ev.target.value),
+            }),
+            h('button', { className: 'pmb-btn', disabled: busy, onClick: () => setNewestFirst(!newestFirst) }, newestFirst ? '新的在前' : '旧的在前'))),
         allEntries.length === 0
-          ? h(NOTE, null, data ? '这个会话还没有日记片段（回合要跑过才写，或者本会话还没触发过摘要）。' : '读不到会话记忆接口。')
+          ? h(NOTE, null, data ? '这个会话还没有片段（回合要跑过才写，或者本会话还没触发过摘要）。' : '读不到会话记忆接口。')
           : entries.length === 0
             ? h(NOTE, null, '没有匹配「' + query.trim() + '」的片段。')
             : h('div', { className: 'pmb-list' },
                 entries.map((it) => {
                   const isSuppressed = suppressedSet.has(it.hash)
                   const isOpen = openHash === it.hash
+                  const isMenu = menuHash === it.hash
                   return h('div', { key: it.hash || it.ts, className: 'pmb-item' },
                     h('div', { className: 'pmb-item-head' },
                       h('span', { className: 'pmb-v', title: fmtLocal(it.ts) }, relTime(it.ts) || fmtLocal(it.ts)),
-                      h('span', { className: 'pmb-tag' }, it.kind === 'auto-summary' ? '自动摘要' : '回合'),
+                      h('span', { className: 'pmb-tag' }, it.kind === 'auto-summary' ? '摘要' : '对话'),
                       it.kind === 'auto-summary' && it.reason ? h('span', { className: 'pmb-tag' }, reasonLabel(it.reason)) : null,
                       isSuppressed ? h('span', { className: 'pmb-tag pmb-tag-warn' }, '已屏蔽') : null,
-                      h('span', { className: 'pmb-sub', title: it.hash }, String(it.hash || '').slice(0, 12)),
-                      h('button', { className: 'pmb-btn', disabled: busy, onClick: () => setOpenHash(isOpen ? '' : it.hash) }, isOpen ? '收起' : '展开'),
-                      isSuppressed
-                        ? h('button', { className: 'pmb-btn', disabled: busy, onClick: () => act('session-unsuppress', { hashes: [it.hash] }, '已解除屏蔽') }, '解除屏蔽')
-                        : h('button', { className: 'pmb-btn', disabled: busy, onClick: () => act('session-suppress', { hashes: [it.hash] }, '已屏蔽，本会话不再注入') }, '屏蔽'),
-                      h('button', {
-                        className: 'pmb-btn' + (confirmHash === it.hash ? ' pmb-btn-danger' : ''),
-                        disabled: busy,
-                        onClick: () => askDelete(it.hash),
-                      }, confirmHash === it.hash ? '确认删除？' : '删掉'),
-                    ),
+                      h('span', { className: 'pmb-sub', title: it.hash }, String(it.hash || '').slice(0, 10)),
+                      h('div', { className: 'pmb-line-ctl' },
+                        h('button', { className: 'pmb-btn', disabled: busy, onClick: () => setMenuHash(isMenu ? '' : it.hash) }, isMenu ? '收起' : '⋯'))),
+                    isMenu
+                      ? h('div', { className: 'pmb-row' },
+                          h('button', { className: 'pmb-btn', disabled: busy, onClick: () => setOpenHash(isOpen ? '' : it.hash) }, isOpen ? '收起正文' : '展开正文'),
+                          isSuppressed
+                            ? h('button', { className: 'pmb-btn', disabled: busy, onClick: () => act('session-unsuppress', { hashes: [it.hash] }, '已解除屏蔽') }, '解除屏蔽')
+                            : h('button', { className: 'pmb-btn', disabled: busy, onClick: () => act('session-suppress', { hashes: [it.hash] }, '已屏蔽，本会话不再注入') }, '屏蔽这条'),
+                          h('button', {
+                            className: 'pmb-btn' + (confirmHash === it.hash ? ' pmb-btn-danger' : ''),
+                            disabled: busy,
+                            onClick: () => askDelete(it.hash),
+                          }, confirmHash === it.hash ? '确认删除？' : '删掉这条'))
+                      : null,
                     h('div', { className: 'pmb-item-text' + (isOpen ? ' pmb-open' : '') }, it.summary || ''),
                   )
                 }),
               ),
         hasMore || loadingMore
-          ? h('div', { className: 'pmb-row' },
-              h('button', { className: 'pmb-btn', disabled: busy || loadingMore, onClick: () => loadMore() },
-                loadingMore ? '加载中…' : '加载更早（还有 ' + String(Math.max(0, total - allEntries.length)) + ' 条）'),
-              h('span', { className: 'pmb-hint' }, '一页 100 条，更早的要自己往前翻——数据都在，不会因为没显示就丢'),
-            )
+          ? h('div', { className: 'pmb-line' },
+              h('div', { className: 'pmb-line-main' },
+                h('div', { className: 'pmb-line-note' }, '更早的还没拉：数据都在，只是没显示')),
+              h('div', { className: 'pmb-line-ctl' },
+                h('button', { className: 'pmb-btn', disabled: busy || loadingMore, onClick: () => loadMore() },
+                  loadingMore ? '加载中…' : '加载更早（还有 ' + String(Math.max(0, total - allEntries.length)) + ' 条）')))
           : null,
       )
 
@@ -865,11 +861,9 @@ window.__ModuleLoader__.load({
         head,
         error ? h('div', { className: 'pmb-err' }, error) : null,
         notice ? h('div', { className: 'pmb-ok' }, notice) : null,
-        actions,
-        blockBar,
-        sessionCard,
-        suppressedCard,
-        entriesCard,
+        sessionSec,
+        blockSec,
+        entriesSec,
       )
     }
 
