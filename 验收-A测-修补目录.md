@@ -33,6 +33,7 @@
 | A-14 | 主人 QQ 号硬编码在 `social.js` 默认值里，README 示例和测试夹具里也各有一处——公开仓库等于把号挂出去 | 默认值改 `ownerIds: []`（改由 `config.social.ownerIds` 提供）；README 示例换 `<你的QQ号>` / `<你的家目录>`；测试夹具换成假号（10000001 / 90000000x）；本地 `~/.dsh/memory/config.json` 补 `social.ownerIds` 保持主人识别 | 跑 `test/social-model.mjs`、`test/social-acceptance.mjs` 全通过；`node 脱敏检查.mjs` 无命中 | `git revert`；本地 config 里的 ownerIds 需同时保留 |
 | A-15 | 没有机制防止以后再把私人信息推上公开仓库 | 新增 `脱敏检查.mjs`（扫 QQ 号/群号/token/绝对路径/内网 IP/凭证文件名）+ `.git/hooks/pre-push` 钩子 + `过程/` 目录（devlog 与开源边界说明）+ npm script `check:privacy` | `node 脱敏检查.mjs` 退出码 0；故意塞一个号进去应报错 | 删 `.git/hooks/pre-push` 即停用；`脱敏检查.mjs` 可单独删 |
 | A-16 | 会话记忆面板只给最新 100 条，本会话实际 354 条——剩下 254 条在界面上没有任何入口（用户看到「100/100」时发现） | 接口加 `before` 游标 + 返回 `total`；`sessionmem.entries(sid, limit, before)` 支持往前取；新增 `countEntries()`；面板加「加载更早（还有 N 条）」、显示「片段 M / 共 N 条」、翻完提示「更早的都加载完了」 | 直调模块自测：354 条 → 100/100/100/54 四页无重叠；面板清单 #17~19 | `git revert`（旧行为是固定返回最新 100 条） |
+| A-18 | 「加载更早」点了没反应、「切会话」也不生效——`callApi` 把 `&session=…` 拼进 action 再 encodeURIComponent，`&` 变 `%26`，服务端拿到 `session-memory&session=…` 直接 404（老 bug，默认会话不传参所以没暴露） | `callApi(action, payload, query)` 加第三个参数单独传查询参数；会话读取/翻页改用它；新增静态守门测试 `test/api-query.mjs`（禁止 `callApi('动作&参数')` 写法） | HTTP 端到端：一页 100 条 + before 第二页 100 条、无重叠；`test/api-query.mjs` 4 项通过 | `git revert` |
 | A-17 | 整页按「功能清单」堆出来的：顶部按钮墙、同权重卡片、每条三个按钮并排、一屏术语（用户 2026-10-23 22:1x 原话「这页面做的确实不行」） | 按宿主自带设置页的排版语言重做：分成「当前会话 / 屏蔽整块 / 片段」三组，每组「一行一件事」（左标题+说明、右控件）；每条片段只留「⋯」，展开/屏蔽/删掉收进菜单；分页只留列表底部一处；「回合」改「对话」 | 点清单 v2（20 项） | `git revert` 该提交（旧版备份 `~/.dsh/client.js.bak`） |
 
 ## 回滚通用规则
