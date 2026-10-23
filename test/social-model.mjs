@@ -42,7 +42,8 @@ try {
   const def = socialConfigDefaults();
   ok("默认不启用注入", def.enabled === false);
   ok("默认 inject=true 但受 enabled 管", def.inject === true && def.autoMerge === false);
-  ok("默认主人 id 有值", Array.isArray(def.ownerIds) && def.ownerIds.includes("1138873335"));
+  ok("默认不硬编码主人 id（改由 config.social.ownerIds 提供）", Array.isArray(def.ownerIds) && def.ownerIds.length === 0);
+  const defWithOwner = { ...def, ownerIds: ["10000001"] };
   ok("social 目录在 <memDir>/social", PATHS.dir === path.join(TMP, "social"));
 
   // ---- 2. 实体：person ----
@@ -56,9 +57,9 @@ try {
   ok("平台 id 键统一小写", p1again.platform_ids.qq === "2001" && p1again.platform_ids.QQ === undefined);
   ok("按平台 id 找人", social.findPersonByPlatform("qq", "2001")?.id === p1.id);
 
-  const g1 = social.upsertGroup({ id: "528623163", name: "游戏群", culture: { tone: "短、直", medianLen: 9 } });
+  const g1 = social.upsertGroup({ id: "900000001", name: "游戏群", culture: { tone: "短、直", medianLen: 9 } });
   ok("群档案落盘", g1.kind === "group" && g1.culture.medianLen === 9);
-  const g1b = social.upsertGroup({ id: "528623163", culture: { topics: ["游戏", "吐槽"] } });
+  const g1b = social.upsertGroup({ id: "900000001", culture: { topics: ["游戏", "吐槽"] } });
   ok("群档案是合并不是覆盖", g1b.culture.tone === "短、直" && g1b.culture.topics.includes("游戏"));
   const s1 = social.upsertSelf({ name: "大肥鱼·鲸鱼娘", style: "直" });
   const s2 = social.upsertSelf({ style: "直、稳" });
@@ -66,8 +67,8 @@ try {
 
   // ---- 3. 关系边 ----
   social.addEdge({ from: "self", rel: "familiarity", to: p1.id, level: 1 });
-  social.addEdge({ from: p1.id, rel: "member", to: "528623163", group: "528623163" });
-  social.addEdge({ from: p1.id, rel: "role", to: "528623163", group: "528623163", note: "梗王" });
+  social.addEdge({ from: p1.id, rel: "member", to: "900000001", group: "900000001" });
+  social.addEdge({ from: p1.id, rel: "role", to: "900000001", group: "900000001", note: "梗王" });
   ok("边写入", social.listEdges({ to: p1.id }).length === 1 && social.listEdges({ from: p1.id }).length === 2);
   social.addEdge({ from: "self", rel: "familiarity", to: p1.id, level: 2 });
   ok("同 key 的边是更新", social.listEdges({ to: p1.id, rel: "familiarity" }).length === 1 && social.listEdges({ to: p1.id, rel: "familiarity" })[0].level === 2);
@@ -75,8 +76,8 @@ try {
 
   // ---- 4. 分区事实 ----
   const fSelf = social.addFact({ scope: { kind: "self" }, text: "主人说最近睡眠不好", source: "私聊" });
-  const fA = social.addFact({ scope: { kind: "person", personId: p1.id, groupId: "528623163" }, text: "在游戏群说自己挂科了" });
-  const fG = social.addFact({ scope: { kind: "group", groupId: "528623163" }, text: "本群不许发外链" });
+  const fA = social.addFact({ scope: { kind: "person", personId: p1.id, groupId: "900000001" }, text: "在游戏群说自己挂科了" });
+  const fG = social.addFact({ scope: { kind: "group", groupId: "900000001" }, text: "本群不许发外链" });
   const fShared = social.addFact({ scope: { kind: "shared" }, text: "阿青喜欢白米饭", shared: true });
   ok("四条事实分别落盘", social.listFacts().length === 4);
   ok("person 分区必须带 personId", throws(() => social.addFact({ scope: { kind: "person" }, text: "x" })));
@@ -85,25 +86,25 @@ try {
   const dup = social.addFact({ scope: { kind: "self" }, text: "主人说最近睡眠不好", source: "私聊", ts: fSelf.ts });
   ok("同内容同时间不重复写", dup.id === fSelf.id && social.listFacts().length === 4);
   ok("按分区过滤", social.listFacts({ kind: "person", personId: p1.id }).length === 1);
-  ok("按群过滤", social.listFacts({ groupId: "528623163" }).length === 2);
+  ok("按群过滤", social.listFacts({ groupId: "900000001" }).length === 2);
   const moved = social.updateFactScope(fSelf.id, { scope: { kind: "person", personId: p1.id } });
   ok("改分区", moved?.scope.kind === "person" && social.getFact(fSelf.id).scope.personId === p1.id);
   social.updateFactScope(fSelf.id, { scope: { kind: "self" } });
   ok("删除事实", social.deleteFact(social.addFact({ scope: { kind: "shared" }, text: "临时" }).id) === true);
 
   // ---- 5. 事件 ----
-  social.addEvent({ scene: { type: "group", groupId: "528623163" }, speakerId: p1.id, summary: "问我在干嘛", replied: true });
+  social.addEvent({ scene: { type: "group", groupId: "900000001" }, speakerId: p1.id, summary: "问我在干嘛", replied: true });
   social.addEvent({ scene: { type: "dm", personId: p1.id }, summary: "私聊说想换工作" });
   ok("事件写入", social.listEvents().length === 2);
   ok("按事件人过滤", social.listEvents({ speakerId: p1.id }).length === 2);
-  ok("按群过滤事件", social.listEvents({ groupId: "528623163" }).length === 1);
+  ok("按群过滤事件", social.listEvents({ groupId: "900000001" }).length === 1);
 
   // ---- 6. 身份归一：命中 / 提案 / 不自动合并 / 人工合并 / 拆分 ----
   ok("同平台 id 直接命中", social.resolveIdentity({ platformIds: { qq: "2001" } }).status === "matched");
   const p2 = social.upsertPerson({ nickname: "阿青", platform_ids: { qq_openid: "OPENID-1" }, avatar_hash: "av1" });
-  social.addEdge({ from: p2.id, rel: "member", to: "528623163", group: "528623163" });
+  social.addEdge({ from: p2.id, rel: "member", to: "900000001", group: "900000001" });
   const before = social.listEntities("person").length;
-  const res = social.resolveIdentity({ nickname: "阿青", avatarHash: "av1", platformIds: { qq_openid: "OPENID-2" }, seenGroups: ["528623163"] });
+  const res = social.resolveIdentity({ nickname: "阿青", avatarHash: "av1", platformIds: { qq_openid: "OPENID-2" }, seenGroups: ["900000001"] });
   ok("无稳定 id 只提案不合并", res.status === "pending" && social.listEntities("person").length === before, res.status);
   ok("候选进 pending 表", social.listPending().length === 1 && social.listPending()[0].score >= 0.8, String(social.listPending()[0]?.score));
   ok("候选理由可读", (social.listPending()[0].reasons || []).length >= 2);
@@ -123,23 +124,23 @@ try {
   social.mergePersons({ keep: p1.id, absorb: split.created.id });
 
   // 候选可以被拒
-  social.resolveIdentity({ nickname: "阿青", platformIds: { qq_openid: "OPENID-9" }, seenGroups: ["528623163"] });
+  social.resolveIdentity({ nickname: "阿青", platformIds: { qq_openid: "OPENID-9" }, seenGroups: ["900000001"] });
   const cand = social.listPending()[0];
   ok("能拒绝候选", Boolean(cand) && social.rejectIdentity(cand.id)?.status === "rejected" && social.listPending().length === 0);
 
   // ---- 7. 场景识别 ----
-  const sc = detectScene({ origin: "qq", meta: { groupId: "528623163", senderId: "1138873335" } }, def);
-  ok("从 header.meta 认出群聊", sc?.type === "group" && sc.groupId === "528623163");
+  const sc = detectScene({ origin: "qq", meta: { groupId: "900000001", senderId: "10000001" } }, defWithOwner);
+  ok("从 header.meta 认出群聊", sc?.type === "group" && sc.groupId === "900000001");
   ok("认出主人", sc?.isOwner === true);
-  ok("私聊场景", detectScene({ peer: { userId: "2001" } }, def)?.type === "dm");
+  ok("私聊场景", detectScene({ peer: { userId: "2001" } }, defWithOwner)?.type === "dm");
   ok("空 header 不认", detectScene({}, def) === null);
   ok("认不出就 null（不猜）", detectScene({ origin: "web", cwd: "E:/x" }, def) === null);
   social.recordScene("sess-1", sc);
-  ok("场景可回读", social.lastScene("sess-1")?.groupId === "528623163");
+  ok("场景可回读", social.lastScene("sess-1")?.groupId === "900000001");
 
   // 宿主 header 里给的是平台号（uin/openid），不是内部 person id：场景要能自己换过来
   social.addFact({ scope: { kind: "person", personId: p1.id }, text: "私聊说想换工作" });
-  const byPlatform = social.buildInjection({ type: "group", groupId: "528623163", speakerId: "2001" });
+  const byPlatform = social.buildInjection({ type: "group", groupId: "900000001", speakerId: "2001" });
   ok("场景用平台号也能认出发言人", byPlatform.includes("挂科"), byPlatform);
   const dmByPlatform = social.buildInjection({ type: "dm", personId: "2001" });
   ok("私聊用平台号也能认出对方", dmByPlatform.includes("想换工作"), dmByPlatform);

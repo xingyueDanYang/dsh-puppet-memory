@@ -105,7 +105,7 @@ try {
   ok("localhost:1 是本机", hostIsLoopback({ headers: { host: "localhost:1" } }) === true);
   ok("[::1]:587 是本机", hostIsLoopback({ headers: { host: "[::1]:587" } }) === true);
   ok("evil.example:80 不是本机", hostIsLoopback({ headers: { host: "evil.example:80" } }) === false);
-  ok("192.168.1.5:80 不是本机", hostIsLoopback({ headers: { host: "192.168.1.5:80" } }) === false);
+  ok("203.0.113.9:80 不是本机", hostIsLoopback({ headers: { host: "203.0.113.9:80" } }) === false);
 
   // ---------- 2. GET status ----------
   const s1 = await call(handler(), { method: "GET", url: "/dsh-puppet-memory-api?action=status", headers: { host: "127.0.0.1:63624" } });

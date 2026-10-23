@@ -466,7 +466,7 @@ memory_doctor
     "mode": "first-step",
     "core": { "enabled": true, "maxChars": 600, "everyStep": true }
   },
-  "backup": { "enabled": true, "dir": "C:\\Users\\你\\.dsh\\memory-backups", "sessions": true },
+  "backup": { "enabled": true, "dir": "<你的家目录>\\.dsh\\memory-backups", "sessions": true },
   "sessions": { "disabled": [] },
   "autoSummary": {
     "enabled": false,
@@ -715,7 +715,7 @@ v0.21 先立**数据模型 + 分区 + 注入出口**，把这三件事变成测�
     "pendingThreshold": 0.8,
     "autoMerge": false,
     "recordEvents": false,
-    "ownerIds": ["1138873335"]
+    "ownerIds": ["<你的QQ号>"]
   }
 }
 ```

@@ -50,5 +50,9 @@
     "memory",
     "puppet"
   ],
-  "icon": "./icon.png"
+  "icon": "./icon.png",
+  "scripts": {
+    "check:privacy": "node 脱敏检查.mjs",
+    "test": "node test/smoke.mjs"
+  }
 }
