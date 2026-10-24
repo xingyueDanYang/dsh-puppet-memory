@@ -1,6 +1,6 @@
 # 木偶记忆（Puppet Memory）
 
-> ⚠️ **main 分支是开发中的版本（当前 `0.30.0-dev`，会话记忆页正在重做，还没验收）**。想用稳定版请装 Release 里的 `0.29.x`。开发过程记录在 `过程/` 目录。
+> ⚠️ **main 分支是开发中的版本，可能比 Release 新**。当前最新发布为 `0.32.0`（2026-10-24，兼容 DSH 0.2.1-rc.3），新增**值班台**。历史稳定版见 Release 列表。开发过程记录在 `过程/` 目录。
 
 > 原名 `dsh-memory`，2026-10-20 更名。DSH（DeepSeek Harness）的跨会话记忆插件：三层记忆打底，外加常驻核心卡、三线状态、多人多群、会话级记忆管理。
 
@@ -8,7 +8,7 @@
 
 > 同目录还有三份偏人读的材料，按需要看：《给人类的说明书》（怎么装）、《怎么用-给大肥鱼》（怎么用）、《前辈经验》（可看可不看的踩坑清单：本地小模型路由、怎么让 agent 真看见画面、发布避坑）。
 
-## 现在有什么（v0.29）
+## 现在有什么（v0.32）
 
 | 能力 | 一句话 |
 |---|---|
@@ -19,6 +19,7 @@
 | **会话记忆管理** | 脏片段可在当前会话屏蔽（数据不删）或删掉（先归档），也可整会话暂停注入 |
 | **自动摘要 / 事实候选** | 压缩后/会话结束压摘要；事实只提案，`accept` 才写记忆 |
 | **小模型路由** | 摘要/提炼可用独立 provider/model（本地 Ollama 等），失败自动回退主会话模型 |
+| **值班台** | 侧栏一屏看三样心跳：QQ 观察器 / B站值班 / 记忆（每 30 秒自动刷新，只读文件、不花模型钱） |
 | **可移植性** | 默认备份到家目录、目录不可写自动回退、`memory_doctor` 一键自检 |
 
 > 定位从「三层记忆」变成「三层 + 一张常驻卡 + 一套状态与隔离机制」：三层管「存在哪」，其余管「怎么用、不滥用、不串台」。
@@ -789,10 +790,7 @@ Copy-Item 'D:\Documents\deepseek-harness\backups\dsh-profile-20261020b\*' 'C:\Us
 插件自身异常只影响它自己（工具不注册 / 注入为空），宿主启动时会记录错误但继续跑；排查看 `~/.dsh/memory/diag.log`。
 
 ## 版本历史
-- **0.32.1-dev（2026-10-24，未发布）**：修值班台「白屏 + 加不进侧栏」——根因是注册错了 slot：`sidebar.panellist.actions` 只是「更多」菜单里的**自定义行**，不是侧栏面板本身；侧栏面板列表（以及固定/收起状态）读的是 `sidebar.panellist`。改动：①面板注册到 `sidebar.panellist`（id `puppet-duty-board`，order 40，label 值班台，occupant 画 16/18px SVG 图标）；②「更多」里的行改用宿主 `MenuItemButton`（之前自己画 `button`，在菜单里就是一块白块），动作走 owner props `entries/pinned/onOpen/onPinnedChange` 做「打开 / 收进更多 / 固定到侧栏」；③`main` 面板补 `height:100% + overflow:auto + 内边距`（宿主 main 面板页要自己负责，之前是贴窗口边缘的裸 div）；④日志尾部的时间戳本来是 UTC（`toISOString` 写的），上屏前换成本地 `MM-DD HH:mm`——之前 15:01 的扫描显示成「07:01Z」，看着像 8 小时前。记在 A-32。
-- **0.32.0-dev（2026-10-24，未发布）**：新增「值班台」——一屏看 QQ 观察器（额度/最近扫描/告警/开机自启）、B站值班（配置/最近报告/日志尾）、记忆（版本/核心卡字数/各层条数/累计压缩/压缩后自检）；入口挂侧栏「更多」（`sidebar.panellist.actions`）+ 独立主面板（`main` key=`puppet-duty-board`），每 30 秒自动刷新。另一个修复：`dsh-bili-scroll` 的 `DEFAULTS.pythonPath` 单反斜杠导致 MCP 一直 initialize 超时（不是本插件的改动，记在同日 01 册）。
-（近期）
-
+- **0.32.0（2026-10-24，已发布，兼容 DSH 0.2.1-rc.3）**：新增**值班台**——侧栏点一下，一屏看三样心跳：QQ 观察器（今日额度 / 观察器 pid / 最近扫描 / 开机自启 / 未清告警）、B站值班（配置 / 最近报告及多久前 / 日志尾）、记忆（版本 / 核心卡字数 / 关系·用户·便签·笔记条数 / 累计压缩 / 压缩后自检）；每 30 秒自动刷新，只读文件不花模型钱。注册按宿主新契约走：面板 `sidebar.panellist`（id `puppet-duty-board`、order 40、16/18px SVG 图标）+ `main` keyed 面板 + 「更多」菜单里两行宿主 `MenuItemButton`（打开 / 收进「更多」/ 固定回侧栏，状态走 owner props `entries·pinned·onOpen·onPinnedChange`）。同一轮修掉三个坑：①面板一开始误注册进 `sidebar.panellist.actions`（那只是「更多」里的自定义行，不是面板本身），表现为**白屏 + 侧栏加不进去**（A-32）；②`index.js` 里 `const compactionPending = new Map()` 被上轮补丁粘进注释行，导致每次压缩事件 `ReferenceError`、压缩记录整条链断掉（A-33，`test/compaction-records` 从抛错恢复 24 项全过）；③日志尾部是 UTC（`toISOString`），15:01 的扫描显示成「07:01Z」像 8 小时前，现在统一换成本地 `MM-DD HH:mm`。另一个修复（不在本插件）：`dsh-bili-scroll` 的 `DEFAULTS.pythonPath` 单反斜杠导致 MCP initialize 一直超时，记在同日 01 册。
 - **0.29.2（2026-10-23）**：会话记忆面板补完交互——①本会话片段列表对**已屏蔽**条目显示「已屏蔽」标签、按钮变「解除屏蔽」（以前看不出哪条屏蔽过）；②删除/屏蔽后**先在本地改列表再回拉**，点完立刻看见变化，不再像“点了没反应”；③窗口重新聚焦 / 切回页面时自动重拉一次（别的标签页或工具改过之后不会停在旧列表）。只是面板交互修复，注入与数据格式没动。
 - **0.29.0（2026-10-23）**：**移除数值化好感度**（v0.27 的 `affinity`）——用户指出「每次都是好感度 100 的你还是你吗」：把关系压成分数，等于把「亲近」变成可以刷的指标，注意力会跑到数字上、离开当下。现在关系只记**具体发生的事**（facts / events / 群角色 / 熟悉度等级），不做任何自动加减分、不设「亲密值」；`memory_person` 去掉 `action=affinity` 与相关字段；旧数据里的 `affinity` 字段忽略不读，不迁移、不删除（留着也不影响）。核心卡新增一条红线：「关系不做好感度/分数，不为刷亲近表演」。
 - **0.28.0（2026-10-23）**：会话记忆管理——防止脏记忆污染上下文。新增 `state/session-memory.json` 屏蔽表（只影响本会话注入，数据不删）；`memory_forget` 工具（list / overview / suppress / unsuppress / delete）；删除只动本会话片段（turn 日记、自动摘要），删前归档到 `behavior/archive/deleted-*.jsonl` 并摘掉索引/引导指针；注入层支持条目与整块（core / state / social / persona）屏蔽；API 加 `session-memory` / `session-suppress` / `session-unsuppress` / `session-delete` / `session-toggle`；设置页新增第三页 **会话记忆**（选会话、逐条屏蔽/删除、暂停注入）；新增 `test/session-memory.mjs`（27 项，含 pre-step 端到端）。
