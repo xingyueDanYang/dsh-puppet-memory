@@ -279,6 +279,13 @@ try {
   writeCore("【称呼】大肥鱼\n");
   const statsText = buildStats();
   ok("记忆统计里有核心卡一行", statsText.includes("behavior/core.md: ") && statsText.includes("/600 字"), statsText.slice(0, 120));
+  // A-48：报表不能再拿「三张卡合起来的长度」除以 core 的 600 预算——实测 310+187+116 会被报成「619/600 超预算」
+  writeRules("【说话】先结论后解释\n");
+  writeState("【主线】木偶记忆\n");
+  const statsSplit = buildStats();
+  const coreLen = coreInjection(defaultConfig()).coreText.length;
+  ok("核心卡那行报的是它自己的字数", statsSplit.includes(`behavior/core.md: ${coreLen}/600 字`), statsSplit.match(/behavior\/core\.md: [^\n]*/)?.[0] || "");
+  ok("规则卡、状态卡各有自己一行", statsSplit.includes("behavior/core-rules.md: ") && statsSplit.includes("behavior/core-state.md: "), "");
 
   // ---- 9. 红线：核心卡不污染旧层 ----
   ok("红线：没往 relations 里写核心卡", !fs.readFileSync(path.join(TMP, "behavior", "relations.jsonl"), "utf8").includes("不傲娇"));

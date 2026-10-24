@@ -2649,7 +2649,15 @@ function buildStats() {
   }
   try {
     const core = coreInjection(loadConfig());
-    fileStats.push(`behavior/core.md: ${core.length}/${core.budget} 字（核心记忆，${core.everyStep ? "每步注入" : "按 mode 注入"}${core.clipped ? "，超预算已截断" : ""}）`);
+    // A-48：拆成三张卡之后，core.length 是「三张卡合起来」的长度，拿它跟 core 的 600 预算比会骗人
+    // （实测 310+187+116=613，报表显示 619/600「超预算」，实际每张都没超）。这里分别报各自的字数与预算。
+    fileStats.push(`behavior/core.md: ${core.coreText.length}/${core.budget} 字（核心记忆，${core.everyStep ? "每步注入" : "按 mode 注入"}${core.clipped ? "，超预算已截断" : ""}）`);
+    if (core.rulesText) {
+      fileStats.push(`behavior/core-rules.md: ${core.rulesText.length}/${core.rulesBudget} 字（行为规则，改过或压缩后补一次${core.rulesClipped ? "，超预算已截断" : ""}）`);
+    }
+    if (core.stateText) {
+      fileStats.push(`behavior/core-state.md: ${core.stateText.length}/${core.stateBudget} 字（当前状态，每步注入${core.stateClipped ? "，超预算已截断" : ""}）`);
+    }
   } catch {
     /* 核心记忆统计失败不影响其它统计 */
   }

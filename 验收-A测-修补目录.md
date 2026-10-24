@@ -7,6 +7,7 @@
 
 | # | 现象 | 修法 | 怎么验 | 回滚 |
 |---|---|---|---|---|
+| A-48 | `memory_stats` 说「behavior/core.md: 619/600 字」，看着核心卡超预算了——实际三份文件是 310 / 187 / 116，**每张都没超**。根因：A-36/A-37 把核心卡拆成三份后，统计那行仍拿 `coreInjection().length`（三张卡合起来的长度）去比 `core.budget`（600），口径错了，报表在骗人 | `buildStats` 改成分开报：`behavior/core.md` 只报 `coreText.length/600`，另加两行 `behavior/core-rules.md: N/400`、`behavior/core-state.md: N/150`（各自超预算才标「已截断」）。不动注入逻辑，只改报表 | `test/core-memory.mjs` **83 项全过**（新增 2 项：核心卡那行报的是它自己的字数、规则卡与状态卡各有一行）；其余 20 套全过；真实记忆统计应为 310/600 + 187/400 + 116/150 | `git revert` 该提交（回到只报一行、且用合计长度的旧版） |
 | A-47 | 行为跑偏了只能靠用户打一大段话纠正，或者干脆重开会话清空上下文——没有「一句话把助手拉回来」的口子（B-47，2026-10-24 从别人的角色卡里借来的手法：那边的【锚定】【复位】【重载】就是干这个的） | `memory_core` 加 `action=reset`：①清本会话四个注入指纹（core / rules / core-state / 三线状态）和整体摘要指纹，下一步三张卡全部重注一次；②`text` 可选，作为**一次性临时约束**：下一步以 `<puppet_reset>` 块注入一次即删，不写任何文件、不影响其它会话；③工具 schema 与描述同步（action 枚举加 reset，text 说明补 reset 用途）。只动内存里的指纹表，文件一个字节都不改 | `test/core-memory.mjs` **81 项全过**（新增 10 项：无会话时明确拒绝、复位前三张卡不重复注入、复位后核心卡与规则卡重新注入、不带 text 时没有 `<puppet_reset>` 块、带 text 时回执带上它、临时约束只注入一次、第二次不再注入、临时约束没写进任何核心卡文件）；其余 20 套测试全过；profile 副本 md5 与源码一致；preflight 17/17。**生效待下次重启**（宿主启动时装配插件） | `git revert` 该提交；或删掉 memory_core 里的 reset 分支与 pre-step 的 resetNote 几行，即回到「没有复位」的旧行为 |
 | A-01 | 会话记忆页里被屏蔽的条目没有「已屏蔽」标记，看起来跟正常条目一样 | `client.js` 渲染时按 `suppressedSet.has(it.hash)` 打标签，按钮切成「解除屏蔽」 | 点「屏蔽」→条目标签变橙、按钮变「解除屏蔽」 | `git revert add7291` |
 | A-02 | 点「删掉」后条目还留在列表里，像点了没反应 | 先本地乐观删除，再 `await load()`；另加 `focus` / `visibilitychange` 重拉 | 点删掉→立刻消失；切走再切回→不残留 | `git revert add7291` |
