@@ -31,6 +31,8 @@ function ok(name, cond, extra = "") {
 const CORE = path.join(TMP, "behavior", "core.md");
 const readCore = () => (fs.existsSync(CORE) ? fs.readFileSync(CORE, "utf8") : "");
 const writeCore = (text) => fs.writeFileSync(CORE, text, "utf8");
+const STATE = path.join(TMP, "behavior", "core-state.md");
+const writeState = (text) => fs.writeFileSync(STATE, text, "utf8");
 const cfgOn = () => ({ inject: { maxChars: 1200, mode: "first-step", core: { enabled: true, maxChars: 600, everyStep: true } } });
 
 try {
@@ -58,6 +60,31 @@ try {
   const c2 = coreInjection(cfgOn());
   ok("超预算被截断到 600", c2.text.length === 600 && c2.clipped === true, String(c2.text.length));
   ok("预算可配置", coreInjection({ inject: { core: { enabled: true, maxChars: 200 } } }).text.length === 200);
+
+  // ---- 4b. v0.33 核心卡拆两半：稳定内容 core.md + 会变的状态 core-state.md，分开预算 ----
+  ok("默认带状态段", def.inject.core.state && def.inject.core.state.enabled === true);
+  ok("状态段默认 150 字", def.inject.core.state.maxChars === 150);
+  ok("coreOptions 带出状态预算", coreOptions({ inject: {} }).state.budget === 150);
+  writeCore("【称呼】大肥鱼\n【红线】不傲娇\n");
+  writeState("【主线】值班台已发布\n");
+  const cs1 = coreInjection(cfgOn());
+  ok("状态段进注入且带标题", cs1.text.includes("【当前状态】") && cs1.text.includes("值班台已发布"));
+  ok("稳定段与状态段分开返回", cs1.stateText.includes("值班台已发布") && !cs1.text.startsWith("【当前状态】"));
+  ok("状态没超预算不截断", cs1.stateClipped === false && cs1.stateLength === cs1.stateText.length);
+  ok("稳定段不含状态内容", !cs1.text.split("【当前状态】")[0].includes("值班台已发布"));
+
+  // 状态变长不会吃掉核心卡的 600 字预算
+  writeCore("核".repeat(800));
+  writeState("状".repeat(300));
+  const cs2 = coreInjection(cfgOn());
+  ok("核心卡仍按自己的预算截断到 600", cs2.text.startsWith("核".repeat(600)) && cs2.clipped === true, String(cs2.text.length));
+  ok("状态段按自己的预算截断到 150", cs2.stateText.length === 150 && cs2.stateClipped === true, String(cs2.stateText.length));
+  ok("总长度 = 600 + 标题 + 150", cs2.text.length === 600 + "\n【当前状态】\n".length + 150, String(cs2.text.length));
+
+  // 状态段可以单独关掉，也可以单独配预算
+  ok("状态段能关", coreInjection({ inject: { core: { state: { enabled: false } } } }).stateText === "");
+  ok("状态预算可配", coreInjection({ inject: { core: { state: { maxChars: 60 } } } }).stateText.length === 60);
+  writeState("");
 
   // ---- 5. 核心卡从总预算里扣，注入总量不变长 ----
   const spamRelations = Array.from({ length: 30 }, (_, i) => ({

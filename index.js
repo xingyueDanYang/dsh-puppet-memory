@@ -69,6 +69,9 @@ const PATHS = {
   persona: path.join(MEM_DIR, "behavior", "persona.md"),
   // v0.22 核心记忆小文件：600 字预算，每步（缺就补）注入，优先级高于其它记忆
   core: path.join(MEM_DIR, "behavior", "core.md"),
+  // v0.33：核心卡拆两半——core.md 放稳定内容（称呼/红线/约定），core-state.md 放会变的状态（主线/正在进行的事），
+  // 分开文件、分开预算，状态变来变去也不会把 600 字预算吃光。
+  coreState: path.join(MEM_DIR, "behavior", "core-state.md"),
   // v0.23 三线状态：工作/陪伴/学习的连续权重与轨迹（只写 state/）
   stateDir: path.join(MEM_DIR, "state"),
   relations: path.join(MEM_DIR, "behavior", "relations.jsonl"),
@@ -456,7 +459,7 @@ function defaultConfig() {
       mode: "every-step",
       // v0.22 核心记忆：behavior/core.md 小文件，默认「缺就补」地每步注入，600 字预算。
       // 它先从 maxChars 总预算里扣，开核心卡不会让注入总量变长；关掉不影响旧行为。
-      core: { enabled: true, maxChars: 600, everyStep: true },
+      core: { enabled: true, maxChars: 600, everyStep: true, state: { enabled: true, maxChars: 150 } },
     },
     // 备份（v0.12.0）：行为记忆也纳入；自动备份一天最多一次；30 天前的快照自动删。
     backup: {
@@ -783,22 +786,29 @@ function archiveRelationOverflow(cfg) {
 function coreOptions(cfg) {
   const opt = { ...defaultConfig().inject.core, ...((cfg && cfg.inject && cfg.inject.core) || {}) };
   const budget = Math.max(100, Number(opt.maxChars) || 600);
-  return { enabled: opt.enabled !== false, budget, everyStep: opt.everyStep !== false };
+  const stateOpt = { ...(defaultConfig().inject.core.state || {}), ...((opt && opt.state) || {}) };
+  const state = { enabled: stateOpt.enabled !== false, budget: Math.max(60, Number(stateOpt.maxChars) || 150) };
+  return { enabled: opt.enabled !== false, budget, everyStep: opt.everyStep !== false, state };
 }
 
 function coreInjection(cfg) {
   const opt = coreOptions(cfg);
-  if (!opt.enabled) return { text: "", length: 0, clipped: false, budget: opt.budget, everyStep: opt.everyStep };
-  let raw = "";
-  try {
-    if (fs.existsSync(PATHS.core)) raw = readText(PATHS.core).replace(/\r\n/g, "\n").trim();
-  } catch {
-    raw = "";
-  }
-  if (!raw) return { text: "", length: 0, clipped: false, budget: opt.budget, everyStep: opt.everyStep };
-  const clipped = raw.length > opt.budget;
-  const text = clipped ? raw.slice(0, opt.budget).trimEnd() : raw;
-  return { text, length: text.length, clipped, budget: opt.budget, everyStep: opt.everyStep };
+  const empty = { text: "", length: 0, clipped: false, budget: opt.budget, stateText: "", stateLength: 0, stateClipped: false, stateBudget: opt.state.budget, everyStep: opt.everyStep };
+  if (!opt.enabled) return empty;
+  const readMd = (file) => { try { return fs.existsSync(file) ? readText(file).replace(/\r\n/g, "\n").trim() : ""; } catch { return ""; } };
+  const rawCore = readMd(PATHS.core);
+  const rawState = opt.state.enabled ? readMd(PATHS.coreState) : "";
+  if (!rawCore && !rawState) return empty;
+  const clipped = rawCore.length > opt.budget;
+  const coreText = clipped ? rawCore.slice(0, opt.budget).trimEnd() : rawCore;
+  const stateClipped = rawState.length > opt.state.budget;
+  const stateText = stateClipped ? rawState.slice(0, opt.state.budget).trimEnd() : rawState;
+  // v0.33：稳定内容与状态分文件、分预算；注入时拼成一块，字数各算各的
+  const parts = [];
+  if (coreText) parts.push(coreText);
+  if (stateText) parts.push(`【当前状态】\n${stateText}`);
+  const text = parts.join("\n");
+  return { text, length: text.length, clipped, budget: opt.budget, stateText, stateLength: stateText.length, stateClipped, stateBudget: opt.state.budget, everyStep: opt.everyStep };
 }
 
 // v0.28：会话记忆管理单例（屏蔽表 + 本会话片段删除）。MEM_DIR 在模块加载时固定，单例安全。
@@ -4117,7 +4127,7 @@ function apply(ctx) {
           : null;
         const coreMessage = coreText
           ? injectionMessage(
-              `<puppet_core>\n以下是核心记忆（behavior/core.md 小文件，每次注入；和其它记忆冲突时以它为准）：\n${coreText}${core.clipped ? `\n（核心记忆超 ${core.budget} 字预算，已截断；用 memory_core action=get 看全文，精简后 action=set 覆盖）` : ""}\n</puppet_core>`,
+              `<puppet_core>\n以下是核心记忆（behavior/core.md 放稳定内容，behavior/core-state.md 放当前状态；每次注入，和其它记忆冲突时以它为准）：\n${coreText}${core.clipped ? `\n（核心记忆超 ${core.budget} 字预算，已截断；用 memory_core action=get 看全文，精简后 action=set 覆盖）` : ""}${core.stateClipped ? `\n（当前状态超 ${core.stateBudget} 字预算，已截断；用 memory_core action=get target=state 看全文）` : ""}\n</puppet_core>`,
             )
           : null;
         const socialMessage = socialText
@@ -4408,11 +4418,12 @@ function apply(ctx) {
     register({
       name: "memory_core",
       description:
-        "核心记忆（behavior/core.md）：一个 600 字预算的小文件，**每次都注入上下文**（压缩后也会自动补回），比 memory_write 更短、更常驻，优先级高于其它记忆。只放：称呼约定、风格红线、当前主线、绝对不能忘的事；不要写成日记或流水账。action=get 读全文+字数 | set 覆盖写（text，超过硬上限 2×预算会被拒）| append 追加一行 | clear 清空（先归档到 behavior/archive/core-*.md）。",
+        "核心记忆拆两个文件（都**每次注入**、压缩后自动补回，优先级高于其它记忆）：①behavior/core.md = 稳定内容（称呼约定、风格红线、约定、绝对不能忘的事），600 字预算；②behavior/core-state.md = 会变的状态（当前主线、正在进行的事、临时规则），150 字预算——状态改来改去不会吃光核心卡的预算。两份分开截断、分开报字数。action=get 读 | set 覆盖写（text，超过硬上限 2×预算会被拒）| append 追加一行 | clear 清空（先归档到 behavior/archive/core*.md）；target=core（默认）或 state。不要写成日记或流水账。",
       parameters: {
         type: "object",
         properties: {
           action: { type: "string", enum: ["get", "set", "append", "clear"] },
+          target: { type: "string", enum: ["core", "state"], description: "动哪个文件：core=稳定内容（默认），state=当前状态（会变的那部分）" },
           text: { type: "string", description: "set=全文覆盖；append=追加一行（不要以 - 开头，会自动处理）" },
         },
       },
@@ -4422,34 +4433,40 @@ function apply(ctx) {
           ensureDirs();
           const opt = coreOptions(loadConfig());
           const action = String(args?.action || "get");
-          const cur = fs.existsSync(PATHS.core) ? readText(PATHS.core).replace(/\r\n/g, "\n") : "";
+          const target = String(args?.target || "core") === "state" ? "state" : "core";
+          const file = target === "state" ? PATHS.coreState : PATHS.core;
+          const budget = target === "state" ? opt.state.budget : opt.budget;
+          const label = target === "state" ? "核心状态（behavior/core-state.md）" : "核心记忆（behavior/core.md）";
+          const cur = fs.existsSync(file) ? readText(file).replace(/\r\n/g, "\n") : "";
           if (action === "get") {
-            if (!cur.trim()) return `核心记忆是空的（budget ${opt.budget} 字）。用 action=set 写第一条：称呼约定/风格红线/当前主线。`;
+            if (!cur.trim()) return target === "state"
+              ? `核心状态是空的（budget ${budget} 字）。用 action=set target=state 写「当前主线 / 正在做什么」这类会变的事。`
+              : `核心记忆是空的（budget ${budget} 字）。用 action=set 写第一条：称呼约定/风格红线/约定。`;
             const len = cur.trim().length;
-            return `核心记忆（${len}/${opt.budget} 字${len > opt.budget ? "，超预算，注入时会截断" : ""}${opt.everyStep ? "，每步注入" : ""}）：\n----\n${cur.trim()}\n----`;
+            return `${label}（${len}/${budget} 字${len > budget ? "，超预算，注入时会截断" : ""}${opt.everyStep ? "，每步注入" : ""}）：\n----\n${cur.trim()}\n----`;
           }
           if (action === "clear") {
             if (cur.trim()) {
               const dir = PATHS.archive;
               fs.mkdirSync(dir, { recursive: true });
               const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-              fs.writeFileSync(path.join(dir, `core-${stamp}.md`), cur, "utf8");
+              fs.writeFileSync(path.join(dir, `${target === "state" ? "core-state" : "core"}-${stamp}.md`), cur, "utf8");
             }
-            fs.writeFileSync(PATHS.core, "", "utf8");
-            return `已清空核心记忆${cur.trim() ? "（原文已归档到 behavior/archive/）" : ""}。`;
+            fs.writeFileSync(file, "", "utf8");
+            return `已清空${label}${cur.trim() ? "（原文已归档到 behavior/archive/）" : ""}。`;
           }
           const body = String(args?.text ?? "").trim();
           if (!body) return action === "append" ? "append 需要 text" : "set 需要 text（要清空用 action=clear）";
-          const hardLimit = opt.budget * 2;
+          const hardLimit = budget * 2;
           if (action === "append") {
             const next = cur.trim() ? `${cur.trim()}\n${body}` : body;
-            if (next.length > hardLimit) return `太长：追加后 ${next.length} 字，硬上限 ${hardLimit}（预算 ${opt.budget}）。先精简或 action=set 重写。`;
-            fs.writeFileSync(PATHS.core, `${next}\n`, "utf8");
-            return `已追加核心记忆：${next.length}/${opt.budget} 字${next.length > opt.budget ? "（超预算，注入时会截断）" : ""}`;
+            if (next.length > hardLimit) return `太长：追加后 ${next.length} 字，硬上限 ${hardLimit}（预算 ${budget}）。先精简或 action=set 重写。`;
+            fs.writeFileSync(file, `${next}\n`, "utf8");
+            return `已追加${label}：${next.length}/${budget} 字${next.length > budget ? "（超预算，注入时会截断）" : ""}`;
           }
-          if (body.length > hardLimit) return `太长：${body.length} 字，硬上限 ${hardLimit}（预算 ${opt.budget}）。核心卡必须短，请先精简再 set。`;
-          fs.writeFileSync(PATHS.core, `${body}\n`, "utf8");
-          return `已写入核心记忆：${body.length}/${opt.budget} 字${body.length > opt.budget ? "（超预算，注入时会截断）" : ""}`;
+          if (body.length > hardLimit) return `太长：${body.length} 字，硬上限 ${hardLimit}（预算 ${budget}）。核心卡必须短，请先精简再 set。`;
+          fs.writeFileSync(file, `${body}\n`, "utf8");
+          return `已写入${label}：${body.length}/${budget} 字${body.length > budget ? "（超预算，注入时会截断）" : ""}`;
         } catch (err) {
           return `核心记忆操作失败：${err?.message || err}`;
         }
