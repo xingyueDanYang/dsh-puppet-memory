@@ -33,6 +33,8 @@ const readCore = () => (fs.existsSync(CORE) ? fs.readFileSync(CORE, "utf8") : ""
 const writeCore = (text) => fs.writeFileSync(CORE, text, "utf8");
 const STATE = path.join(TMP, "behavior", "core-state.md");
 const writeState = (text) => fs.writeFileSync(STATE, text, "utf8");
+const RULES = path.join(TMP, "behavior", "core-rules.md");
+const writeRules = (text) => fs.writeFileSync(RULES, text, "utf8");
 const cfgOn = () => ({ inject: { maxChars: 1200, mode: "first-step", core: { enabled: true, maxChars: 600, everyStep: true } } });
 
 try {
@@ -84,6 +86,24 @@ try {
   // 状态段可以单独关掉，也可以单独配预算
   ok("状态段能关", coreInjection({ inject: { core: { state: { enabled: false } } } }).stateText === "");
   ok("状态预算可配", coreInjection({ inject: { core: { state: { maxChars: 60 } } } }).stateText.length === 60);
+  writeState("");
+
+  // ---- 4c. v0.33.1 规则单独一份：跟状态分开算，状态变化不会把规则再提醒一遍 ----
+  ok("默认带规则段", def.inject.core.rules && def.inject.core.rules.enabled === true);
+  ok("规则段默认 400 字", def.inject.core.rules.maxChars === 400);
+  ok("coreOptions 带出规则预算", coreOptions({ inject: {} }).rules.budget === 400);
+  writeCore("【称呼】大肥鱼\n");
+  writeRules("【红线】不傲娇\n");
+  writeState("【主线】在做规则拆分\n");
+  const cr1 = coreInjection(cfgOn());
+  ok("规则段能读到", cr1.rulesText.includes("不傲娇") && cr1.rulesLength === cr1.rulesText.length);
+  ok("规则排在稳定内容前面", cr1.text.startsWith("【红线】"));
+  ok("三段都在 text 里", cr1.text.includes("【红线】") && cr1.text.includes("【称呼】") && cr1.text.includes("【当前状态】"));
+  writeRules("规".repeat(500));
+  const cr2 = coreInjection(cfgOn());
+  ok("规则段按自己的预算截断到 400", cr2.rulesText.length === 400 && cr2.rulesClipped === true, String(cr2.rulesText.length));
+  ok("规则段能单独关", coreInjection({ inject: { core: { rules: { enabled: false } } } }).rulesText === "");
+  writeRules("");
   writeState("");
 
   // ---- 5. 核心卡从总预算里扣，注入总量不变长 ----
@@ -167,6 +187,35 @@ try {
   const afterCompaction = await run(mkAgent("core-s2"), drop);
   ok("压缩后：核心卡重新注入", afterCompaction.joined.includes("<puppet_core>"));
   ok("压缩后：完整摘要也重新注入", afterCompaction.joined.includes("<puppet_memory>"));
+
+  // ---- 6b. 规则只注入一次：状态变不会带出规则，规则变才补 ----
+  writeCore("【称呼】大肥鱼\n");
+  writeRules("【红线】不傲娇\n");
+  writeState("【主线】第一步\n");
+  const fresh = await run(mkAgent("core-r1"));
+  ok("首步：规则块出现", fresh.joined.includes("<puppet_rules>"));
+  ok("首步：核心块出现", fresh.joined.includes("<puppet_core>"));
+  ok("首步：状态块出现", fresh.joined.includes("<puppet_core_state>"));
+  ok("规则块排在核心块前面", fresh.joined.indexOf("<puppet_rules>") < fresh.joined.indexOf("<puppet_core>"));
+  const noop = await run(mkAgent("core-r1"));
+  ok("什么都没变：一条都不重复", noop.texts.length === 0, String(noop.texts.length));
+
+  writeState("【主线】第二步\n");
+  const stateOnly = await run(mkAgent("core-r1"));
+  ok("只改状态：补状态块", stateOnly.joined.includes("<puppet_core_state>"));
+  ok("只改状态：规则不跟着重复", !stateOnly.joined.includes("<puppet_rules>"));
+  ok("只改状态：核心块也不重复", !stateOnly.joined.includes("<puppet_core>"));
+
+  writeRules("【红线】不傲娇、不装雌小鬼\n");
+  const rulesOnly = await run(mkAgent("core-r1"));
+  ok("改规则：补规则块", rulesOnly.joined.includes("<puppet_rules>") && rulesOnly.joined.includes("不装雌小鬼"));
+  ok("改规则：状态块不重复", !rulesOnly.joined.includes("<puppet_core_state>"));
+
+  // 压缩后：规则和状态都要补回来
+  await run(mkAgent("core-r2"), big);
+  const rc = await run(mkAgent("core-r2"), drop);
+  ok("压缩后：规则重新注入", rc.joined.includes("<puppet_rules>"), rc.joined.slice(0, 160));
+  ok("压缩后：状态重新注入", rc.joined.includes("<puppet_core_state>"));
 
   // 关掉核心卡 → pre-step 里不再出现 puppet_core
   const cfgPath = path.join(TMP, "config.json");
