@@ -227,13 +227,38 @@ try {
 
   // ---- 7. memory_core 工具 ----
   const coreTool = tools.find((t) => t.name === "memory_core");
-  const call = (args) => coreTool.execute(args);
+  const call = (args, exec) => coreTool.execute(args, exec);
   const t0 = await call({ action: "get" });
   ok("工具 get 能读", t0.includes("【称呼】") && t0.includes("/600 字"), t0.slice(0, 60));
   // A-40：规则卡的节奏文案——它不是每步注入（digest 没变就跳过），别写成「每步注入」
   await call({ action: "set", target: "rules", text: "【说话】先结论后解释" });
   const tRules = await call({ action: "get", target: "rules" });
   ok("规则卡 get 标的是「改过或压缩后补一次」", tRules.includes("规则改过或上下文压缩后补一次") && !tRules.includes("每步注入"), tRules.slice(0, 80));
+  // ---- 7b. B-47 一句话复位 ----
+  // 前面第 6 节末尾把核心卡关了（用来验「关掉后不注入」），这里先打开——复位验的是注入指纹，不是开关
+  cfg.inject.core = { enabled: true, maxChars: 600, everyStep: true };
+  fs.writeFileSync(cfgPath, JSON.stringify(cfg), "utf8");
+  const execOf = (id) => ({ agent: mkAgent(id) });
+  const noSess = await call({ action: "reset" });
+  ok("复位没会话时明确拒绝", noSess.includes("需要在会话里调用"), noSess.slice(0, 60));
+  await call({ action: "set", text: "【称呼】大肥鱼\n【约定】不可逆先问\n" });
+  await run(mkAgent("core-reset"));
+  const stable = await run(mkAgent("core-reset"));
+  ok("复位前：没变化就不重复注入", stable.texts.length === 0, String(stable.texts.length));
+  const r1 = await call({ action: "reset" }, execOf("core-reset"));
+  ok("复位返回已复位", r1.includes("已复位"), r1.slice(0, 50));
+  const afterReset = await run(mkAgent("core-reset"));
+  ok("复位后：核心卡重新注入", afterReset.joined.includes("<puppet_core>"));
+  ok("复位后：规则卡也重新注入", afterReset.joined.includes("<puppet_rules>"));
+  ok("复位不带 text 时没有临时约束块", !afterReset.joined.includes("<puppet_reset>"));
+  const r2 = await call({ action: "reset", text: "别用「你应该」，改说「人家觉得」" }, execOf("core-reset"));
+  ok("复位带临时约束时回执里带上它", r2.includes("人家觉得"), r2.slice(0, 80));
+  const noteRun = await run(mkAgent("core-reset"));
+  ok("临时约束注入一次", noteRun.joined.includes("<puppet_reset>") && noteRun.joined.includes("人家觉得"));
+  const noteGone = await run(mkAgent("core-reset"));
+  ok("临时约束不会重复注入", !noteGone.joined.includes("<puppet_reset>"));
+  const filesText = [readCore(), fs.existsSync(RULES) ? fs.readFileSync(RULES, "utf8") : "", fs.existsSync(STATE) ? fs.readFileSync(STATE, "utf8") : ""].join("\n");
+  ok("临时约束没写进任何核心卡文件", !filesText.includes("人家觉得"));
   const t1 = await call({ action: "set", text: "【称呼】大肥鱼\n【约定】不可逆先问\n" });
   ok("工具 set 覆盖写", t1.includes("已写入") && readCore().includes("不可逆先问") && !readCore().includes("雌小鬼"));
   const t2 = await call({ action: "append", text: "【主线】木偶记忆" });

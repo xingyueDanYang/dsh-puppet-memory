@@ -3887,6 +3887,8 @@ function apply(ctx) {
   const lastCoreInjected = new Map();
   const lastRulesInjected = new Map();
   const lastCoreStateInjected = new Map();
+  // v0.33（B-47）：一句话复位的一次性临时约束，按会话存、注入一次即删，不落任何文件
+  const sessionResetNotes = new Map();
   // v0.23：三线状态上次注入的指纹（取向没变就不重复）
   const lastStateInjected = new Map();
 
@@ -4100,6 +4102,8 @@ function apply(ctx) {
         const rulesForInject = rulesDigest && lastRulesInjected.get(sessionId) !== rulesDigest ? core.rulesText : "";
         const coreText = coreDigest && lastCoreInjected.get(sessionId) !== coreDigest ? core.coreText : "";
         const coreStateForInject = coreStateDigest && lastCoreStateInjected.get(sessionId) !== coreStateDigest ? core.stateText : "";
+        // B-47：复位时若带了一句临时约束，这一步跟着三张卡一起注入，之后删除（只生效一次）
+        const resetNote = sessionResetNotes.get(sessionId) || "";
         // v0.23 三线状态：先吃这条用户发言的信号（衰减/锚点/工作日志都在里面），再决定取向
         let linesView = null;
         let lineSignal = null;
@@ -4128,8 +4132,8 @@ function apply(ctx) {
         } catch (err) {
           diag(`社交档案注入失败：${err?.message || err}`);
         }
-        if (!text && !socialText && !rulesForInject && !coreText && !coreStateForInject && !stateForInject) return decision;
-        const digest = sha1(`${text}\u0000${socialText}\u0000${rulesForInject}\u0000${coreText}\u0000${coreStateForInject}\u0000${stateForInject}`);
+        if (!text && !socialText && !rulesForInject && !coreText && !coreStateForInject && !stateForInject && !resetNote) return decision;
+        const digest = sha1(`${text}\u0000${socialText}\u0000${rulesForInject}\u0000${coreText}\u0000${coreStateForInject}\u0000${stateForInject}\u0000${resetNote}`);
         if (lastInjected.get(sessionId) === digest) {
           if (injectMode === "first-step") injectedOnce.add(sessionId);
           return decision;
@@ -4140,6 +4144,11 @@ function apply(ctx) {
         if (coreStateForInject) lastCoreStateInjected.set(sessionId, coreStateDigest);
         if (stateForInject) lastStateInjected.set(sessionId, stateDigest);
         if (injectMode === "first-step") injectedOnce.add(sessionId);
+        // B-47：复位带的临时约束注入一次就删——不能每轮念，也不许写进任何文件
+        const resetMessage = resetNote
+          ? injectionMessage(`<puppet_reset>\n用户刚按了复位，这一轮起按下面这条走（一次性的临时约束，不进任何文件，之后不再重复）：\n${resetNote}\n</puppet_reset>`)
+          : null;
+        if (resetNote) sessionResetNotes.delete(sessionId);
         // 注入装不下的旧关系转存深层引导（带日期标注），避免记忆只靠检索才找得回
         archiveRelationOverflow(cfg);
         const stateMessage = stateForInject
@@ -4167,7 +4176,7 @@ function apply(ctx) {
           : null;
         return {
           kind: "enter",
-          messages: [...(decision.messages || []), ...(rulesMessage ? [rulesMessage] : []), ...(coreMessage ? [coreMessage] : []), ...(coreStateMessage ? [coreStateMessage] : []), ...(stateMessage ? [stateMessage] : []), ...(text ? [injectionMessage(text)] : []), ...(socialMessage ? [socialMessage] : [])],
+          messages: [...(decision.messages || []), ...(resetMessage ? [resetMessage] : []), ...(rulesMessage ? [rulesMessage] : []), ...(coreMessage ? [coreMessage] : []), ...(coreStateMessage ? [coreStateMessage] : []), ...(stateMessage ? [stateMessage] : []), ...(text ? [injectionMessage(text)] : []), ...(socialMessage ? [socialMessage] : [])],
         };
       } catch (err) {
         log("warn", `pre-step 注入失败：${err?.message || err}`);
@@ -4452,22 +4461,38 @@ function apply(ctx) {
     register({
       name: "memory_core",
       description:
-        "核心记忆拆三个文件（都常驻注入、压缩后自动补回，优先级高于其它记忆）：①behavior/core.md = 不会经常变的内容（称呼约定、用户、能力），600 字预算；②behavior/core-rules.md = 行为规则（说话方式、红线、约定），400 字预算，**只在规则改过或压缩后各注入一次**，状态变化不会把规则再提醒一遍；③behavior/core-state.md = 会变的状态（当前主线、进度、待办），150 字预算。三份分开截断、分开报字数。action=get 读 | set 覆盖写（text，超过硬上限 2×预算会被拒）| append 追加一行 | clear 清空（先归档到 behavior/archive/core*.md）；target=core（默认）| rules | state。不要写成日记或流水账。",
+        "核心记忆拆三个文件（都常驻注入、压缩后自动补回，优先级高于其它记忆）：①behavior/core.md = 不会经常变的内容（称呼约定、用户、能力），600 字预算；②behavior/core-rules.md = 行为规则（说话方式、红线、约定），400 字预算，**只在规则改过或压缩后各注入一次**，状态变化不会把规则再提醒一遍；③behavior/core-state.md = 会变的状态（当前主线、进度、待办），150 字预算。三份分开截断、分开报字数。action=get 读 | set 覆盖写（text，超过硬上限 2×预算会被拒）| append 追加一行 | clear 清空（先归档到 behavior/archive/core*.md）| **reset 一句话复位**（清本会话注入指纹→下一步把三张卡重新注入一次；text 可带一句临时约束，只对本次会话生效、注入一次即弃、不写任何文件）。target=core（默认）| rules | state。不要写成日记或流水账。",
       parameters: {
         type: "object",
         properties: {
-          action: { type: "string", enum: ["get", "set", "append", "clear"] },
+          action: { type: "string", enum: ["get", "set", "append", "clear", "reset"] },
           target: { type: "string", enum: ["core", "rules", "state"], description: "动哪个文件：core=稳定内容（默认），rules=行为规则（说话/红线/约定），state=当前状态（主线/进度/待办）" },
-          text: { type: "string", description: "set=全文覆盖；append=追加一行（不要以 - 开头，会自动处理）" },
+          text: { type: "string", description: "set=全文覆盖；append=追加一行（不要以 - 开头，会自动处理）；reset=可选的一次性临时约束（只对本次会话生效）" },
         },
       },
       output,
-      execute(args) {
+      execute(args, exec) {
         try {
           ensureDirs();
           const opt = coreOptions(loadConfig());
           const action = String(args?.action || "get");
           const wanted = String(args?.target || "core");
+          // B-47 一句话复位：只动本会话的注入指纹，不动任何文件
+          if (action === "reset") {
+            const sid = String(exec?.agent?.session?.header?.id || "");
+            if (!sid) return "复位需要在会话里调用（拿不到会话 id，本轮不生效）。";
+            lastCoreInjected.delete(sid);
+            lastRulesInjected.delete(sid);
+            lastCoreStateInjected.delete(sid);
+            lastStateInjected.delete(sid);
+            lastInjected.delete(sid);
+            const note = String(args?.text || "").trim().slice(0, 200);
+            if (note) sessionResetNotes.set(sid, note);
+            else sessionResetNotes.delete(sid);
+            return note
+              ? `已复位：下一步把核心卡、规则卡、状态卡重新注入一次，并附一句临时约束（只对本次会话生效，注入一次就丢，不写进任何文件）：「${note}」`
+              : "已复位：下一步把核心卡、规则卡、状态卡重新注入一次（文件内容一个都没动）。";
+          }
           const target = wanted === "state" || wanted === "rules" ? wanted : "core";
           const targetSpec = {
             core: { file: PATHS.core, budget: opt.budget, label: "核心记忆（behavior/core.md）", empty: "核心记忆是空的（budget %B 字）。用 action=set 写第一条：称呼约定 / 用户 / 能力。" },
