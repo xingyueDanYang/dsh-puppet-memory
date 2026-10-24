@@ -18,7 +18,7 @@ const sent = sendHandoff({
   summary: '在做会话记忆面板的 B-02（摘要覆盖范围），做到一半',
   next_steps: ['补覆盖范围字段', '跑一遍测试'],
   blockers: ['要重启宿主'],
-  files: ['D:\\Documents\\deepseek-harness\\plugins\\dsh-puppet-memory\\index.js'],
+  files: ['plugins/dsh-puppet-memory/index.js'],
   from: 'session-A',
 })
 ok('send 返回交接 id', /ho-/.test(sent), sent.slice(0, 60))
