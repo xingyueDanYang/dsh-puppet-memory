@@ -192,7 +192,8 @@ try {
   ok("backup 真的落了快照", created.length === 1, JSON.stringify(created));
   if (created.length === 1) {
     const snapDir = path.join(dir, created[0]);
-    for (const sub of ["deep", "array", "behavior", "assets", "config"]) {
+    // A-50：social/ 以前没进快照，恢复时群/人档案整层丢——现在必须一起备
+    for (const sub of ["deep", "array", "behavior", "assets", "config", "social"]) {
       ok(`快照含 ${sub}/`, fs.existsSync(path.join(snapDir, sub)));
     }
     ok("快照含 config/runtime.json", fs.existsSync(path.join(snapDir, "config", "runtime.json")));

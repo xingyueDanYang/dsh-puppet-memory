@@ -1091,6 +1091,11 @@ function backupNow(reason, options = {}) {
     if (fs.existsSync(PATHS.assets)) {
       fs.cpSync(PATHS.assets, path.join(dest, "assets"), { recursive: true });
     }
+    // A-50（B-40 演练发现）：多人记忆 / 群档案没进备份——恢复时 social 整层会丢，而 stats 里也没提它。
+    const socialDir = socialPaths(MEM_DIR).dir;
+    if (fs.existsSync(socialDir)) {
+      fs.cpSync(socialDir, path.join(dest, "social"), { recursive: true });
+    }
     if (backup.sessions !== false && fs.existsSync(SESSION_DIR)) {
       fs.cpSync(SESSION_DIR, path.join(dest, "sessions"), { recursive: true });
     }
@@ -2731,7 +2736,7 @@ function buildStats() {
     `- 注入溢出：被裁掉的旧关系会自动转存到 deep/guide.jsonl（带日期标注）`,
     `- 备份：${cfg.backup.enabled ? "开启" : "关闭"} → ${resolveBackupDir(cfg.backup || {}).dir || "不可用"}；最近：${state.lastBackupAt || "从未"}`,
     `- 备份节奏：自动最多每 ${cfg.backup.minIntervalHours || 24} 小时一次（手动 memory_backup 不受限）；保留 ${cfg.backup.keepDays || 30} 天`,
-    `- 备份内容：deep/、array/、behavior/、assets/、config+state${cfg.backup.sessions === false ? "" : "、sessions/"}`,
+    `- 备份内容：deep/、array/、behavior/、assets/${fs.existsSync(socialPaths(MEM_DIR).dir) ? "、social/" : ""}、config+state${cfg.backup.sessions === false ? "" : "、sessions/"}`,
     ...fileStats.map((s) => `- ${s}`),
   ].join("\n");
 }
