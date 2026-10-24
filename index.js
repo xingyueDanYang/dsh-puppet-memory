@@ -1570,7 +1570,8 @@ function compactionSelfCheck(sessionId) {
   return record
 }
 
-// 等 compaction/end 时才落记录：把 compaction/summary 里的事实先按 id 暂存const compactionPending = new Map();
+// 等 compaction/end 时才落记录：把 compaction/summary 里的事实先按 id 暂存
+const compactionPending = new Map();
 
 function ingestCompactionEvent(ev, sessionId) {
   const type = String(ev?.type || "");

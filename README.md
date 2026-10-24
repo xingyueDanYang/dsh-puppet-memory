@@ -789,6 +789,7 @@ Copy-Item 'D:\Documents\deepseek-harness\backups\dsh-profile-20261020b\*' 'C:\Us
 插件自身异常只影响它自己（工具不注册 / 注入为空），宿主启动时会记录错误但继续跑；排查看 `~/.dsh/memory/diag.log`。
 
 ## 版本历史
+- **0.32.1-dev（2026-10-24，未发布）**：修值班台「白屏 + 加不进侧栏」——根因是注册错了 slot：`sidebar.panellist.actions` 只是「更多」菜单里的**自定义行**，不是侧栏面板本身；侧栏面板列表（以及固定/收起状态）读的是 `sidebar.panellist`。改动：①面板注册到 `sidebar.panellist`（id `puppet-duty-board`，order 40，label 值班台，occupant 画 16/18px SVG 图标）；②「更多」里的行改用宿主 `MenuItemButton`（之前自己画 `button`，在菜单里就是一块白块），动作走 owner props `entries/pinned/onOpen/onPinnedChange` 做「打开 / 收进更多 / 固定到侧栏」；③`main` 面板补 `height:100% + overflow:auto + 内边距`（宿主 main 面板页要自己负责，之前是贴窗口边缘的裸 div）。记在 A-32。
 - **0.32.0-dev（2026-10-24，未发布）**：新增「值班台」——一屏看 QQ 观察器（额度/最近扫描/告警/开机自启）、B站值班（配置/最近报告/日志尾）、记忆（版本/核心卡字数/各层条数/累计压缩/压缩后自检）；入口挂侧栏「更多」（`sidebar.panellist.actions`）+ 独立主面板（`main` key=`puppet-duty-board`），每 30 秒自动刷新。另一个修复：`dsh-bili-scroll` 的 `DEFAULTS.pythonPath` 单反斜杠导致 MCP 一直 initialize 超时（不是本插件的改动，记在同日 01 册）。
 （近期）
 

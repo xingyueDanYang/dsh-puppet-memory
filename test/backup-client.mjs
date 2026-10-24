@@ -17,8 +17,7 @@ const ctx = {
 };
 function inject(name, cb) {
   injected.push(name);
-  if (name === "settings.section") return cb();
-  return undefined;
+  return cb();
 }
 function register(spec, comp) {
   registered.push({ spec, comp });
@@ -40,6 +39,12 @@ const fakeReact = {
   useRef: (v) => ({ current: v }),
 };
 
+// 假宿主原语：菜单行/图标各给一个可断言的占位组件
+const fakePrimitives = {
+  MenuItemButton: (props) => ({ type: "MenuItemButton", props }),
+  IconCheckOutlineRegular: (props) => ({ type: "IconCheck", props }),
+};
+
 const sandbox = {
   window: {
     __ModuleLoader__: {
@@ -50,6 +55,7 @@ const sandbox = {
   },
   require: (name) => {
     if (name === "react") return fakeReact;
+    if (name === "@deepseek-ai/dsh-client-ui-primitives") return fakePrimitives;
     throw new Error("unexpected require: " + name);
   },
   console,
@@ -170,6 +176,89 @@ const idxBackupCard = backupText.findIndex((t) => t === "当前状态");
 check("备份页按钮在卡片前面", idxBackupBtn >= 0 && idxBackupCard >= 0 && idxBackupBtn < idxBackupCard, `${idxBackupBtn} vs ${idxBackupCard}`);
 const idxAutoBtn = autoText.findIndex((t) => t === "保存自动摘要设置");
 check("自动摘要页按钮在列表前面", idxAutoBtn >= 0 && idxAutoBtn < autoText.length, String(idxAutoBtn));
+
+// ---- 值班台：侧栏面板行 +「更多」菜单行 + main 面板（A-32 回归） ----
+check("注入了 sidebar.panellist", injected.includes("sidebar.panellist"), JSON.stringify(injected));
+check("注入了 sidebar.panellist.actions", injected.includes("sidebar.panellist.actions"), JSON.stringify(injected));
+check("注入了 main", injected.includes("main"), JSON.stringify(injected));
+
+const panelReg = registered.find((r) => r.spec && r.spec.name === "sidebar.panellist");
+check("面板注册进 sidebar.panellist（不是 actions）", !!panelReg);
+check("面板 id = puppet-duty-board", panelReg?.spec?.id === "puppet-duty-board", panelReg?.spec?.id);
+check("面板 label = 值班台", panelReg?.spec?.label === "值班台", panelReg?.spec?.label);
+check("面板 order = 40", panelReg?.spec?.order === 40, String(panelReg?.spec?.order));
+check("面板 occupant 是组件", typeof panelReg?.comp === "function");
+
+let iconTree = null;
+try {
+  iconTree = panelReg.comp({ size: 18, active: true });
+} catch (err) {
+  failed += 1;
+  console.log("  ✗ 面板图标渲染抛错：" + err.message);
+}
+check("面板图标是 svg", iconTree?.type === "svg", iconTree?.type);
+check("面板图标跟随宿主 size", iconTree?.props?.width === 18 && iconTree?.props?.height === 18);
+
+const actionsReg = registered.find((r) => r.spec && r.spec.name === "sidebar.panellist.actions");
+check("「更多」行注册进 sidebar.panellist.actions", !!actionsReg);
+let calls = [];
+let nextTree = null;
+try {
+  nextTree = actionsReg.comp({
+    entries: [{ id: "puppet-duty-board", label: "值班台", pinned: true, active: false }],
+    onOpen: (id) => calls.push(["open", id]),
+    onPinnedChange: (id, pinned) => calls.push(["pin", id, pinned]),
+    onDismiss: () => calls.push(["dismiss"]),
+  });
+} catch (err) {
+  failed += 1;
+  console.log("  ✗ 「更多」行渲染抛错：" + err.message);
+}
+const rows = (nextTree?.props?.children || []).filter(Boolean);
+check("「更多」里两行", rows.length === 2, String(rows.length));
+check("两行都是宿主 MenuItemButton", rows.every((r) => r?.type === "MenuItemButton"));
+const openRow = rows[0];
+const pinRow = rows[1];
+check("第一行带对勾图标", openRow?.props?.icon?.type === "IconCheck", openRow?.props?.icon?.type);
+openRow?.props?.onSelect?.();
+check("点第一行先关菜单再开面板", JSON.stringify(calls) === JSON.stringify([["dismiss"], ["open", "puppet-duty-board"]]), JSON.stringify(calls));
+check("第一行文案「打开值班台」", textOf(openRow).join("") === "打开值班台", textOf(openRow).join(""));
+calls = [];
+pinRow?.props?.onSelect?.();
+check("点第二行切换固定状态", JSON.stringify(calls) === JSON.stringify([["pin", "puppet-duty-board", false]]), JSON.stringify(calls));
+check("已固定时文案是「收进更多」", textOf(pinRow).join("").includes("收进"), textOf(pinRow).join(""));
+
+let unpinnedTree = null;
+try {
+  unpinnedTree = actionsReg.comp({
+    entries: [{ id: "puppet-duty-board", label: "值班台", pinned: false, active: true }],
+    onOpen: () => {},
+    onPinnedChange: () => {},
+    onDismiss: () => {},
+  });
+} catch (err) {
+  failed += 1;
+  console.log("  ✗ 「更多」行（未固定态）渲染抛错：" + err.message);
+}
+const unpinnedRows = (unpinnedTree?.props?.children || []).filter(Boolean);
+check("未固定时第二行文案是「固定到侧栏」", textOf(unpinnedRows[1]).join("").includes("固定到侧栏"), textOf(unpinnedRows[1]).join(""));
+check("当前页时第一行标「当前页」", textOf(unpinnedRows[0]).join("").includes("当前页"), textOf(unpinnedRows[0]).join(""));
+
+const mainReg = registered.find((r) => r.spec && r.spec.name === "main");
+check("面板注册进 main", !!mainReg);
+check("main key = puppet-duty-board", mainReg?.spec?.key === "puppet-duty-board", mainReg?.spec?.key);
+let mainTree = null;
+try {
+  mainTree = mainReg.comp({});
+} catch (err) {
+  failed += 1;
+  console.log("  ✗ 值班台面板渲染抛错：" + err.message);
+}
+check("面板根节点是 .pmb-page（自带滚动与内边距）", mainTree?.props?.className === "pmb-page", mainTree?.props?.className);
+const mainText = textOf(mainTree).join("|");
+check("面板有标题「值班台」", mainText.includes("值班台"));
+check("面板三块心跳都在", mainText.includes("QQ 观察器") && mainText.includes("B站值班") && mainText.includes("记忆"));
+check("面板有刷新按钮", mainText.includes("刷新"));
 
 console.log(failed === 0 ? "\n全部通过" : `\n失败 ${failed} 项`);
 process.exitCode = failed === 0 ? 0 : 1;

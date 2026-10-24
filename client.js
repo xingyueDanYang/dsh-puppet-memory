@@ -32,6 +32,10 @@ window.__ModuleLoader__.load({
     const h = React.createElement
     const API = '/dsh-puppet-memory-api'
 
+    // 宿主自带的菜单行/图标原语：侧栏「更多」里要长得像原生行就得用它
+    let primitives = null
+    try { primitives = require('@deepseek-ai/dsh-client-ui-primitives') } catch (err) { primitives = null }
+
     const CSS = [
       '.pmb{display:flex;flex-direction:column;gap:16px;padding:4px 0;font-size:13px;color:var(--dsw-alias-label-primary)}',
       '.pmb-sub{font-size:12px;line-height:1.6;color:var(--dsw-alias-label-secondary)}',
@@ -65,6 +69,9 @@ window.__ModuleLoader__.load({
       '.pmb-search{width:min(100%,240px);padding:4px 8px;border:1px solid var(--dsw-alias-border-l1);border-radius:6px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font-size:13px}',
       '.pmb-item-text.pmb-open{max-height:none}',
       '.pmb-btn-danger{border-color:#b42318;color:#b42318}',
+      // 主面板页（main slot 里的面板要自己负责 100% 高度、滚动和内边距）
+      '.pmb-page{box-sizing:border-box;height:100%;overflow:auto;padding:28px clamp(20px,4vw,48px) 48px;color:var(--dsw-alias-label-primary)}',
+      '.pmb-page-inner{width:100%;max-width:960px;margin:0 auto}',
       '.pmb-tag-warn{background:rgba(181,71,8,.12);color:#b54708}',
       '.pmb-hint{font-size:11px;color:var(--dsw-alias-label-secondary)}',
       // 分组 + 一行一件事：左边标题/说明，右边控件（跟宿主自带设置页同一个排版语言）
@@ -1047,7 +1054,9 @@ window.__ModuleLoader__.load({
       const mem = (data && data.memory) || {}
       const quota = qq.quota || {}
 
-      return h('div', { className: 'pmb' },
+      return h('div', { className: 'pmb-page' },
+        h('div', { className: 'pmb-page-inner' },
+        h('div', { className: 'pmb' },
         h('div', { className: 'pmb-head' },
           h('div', { className: 'pmb-title' }, '值班台'),
           h('div', { className: 'pmb-sub' }, '一屏看三样心跳：QQ 观察器 / B站值班 / 记忆。每 30 秒自动刷新。'),
@@ -1075,7 +1084,48 @@ window.__ModuleLoader__.load({
           ['累计压缩', (mem.compactions || 0) + ' 次' + (mem.lastCompactionAt ? ('（最近 ' + fmtLocal(mem.lastCompactionAt) + '）') : '')],
           ['压缩后自检', mem.compactionCheck ? (mem.compactionCheck.ok ? '通过' : '未通过') : '（还没触发过）'],
         ], '数据在 ~/.dsh/memory，纯文本'),
-      )
+        )))
+    }
+
+    // 侧栏面板图标（sidebar.panellist 的 occupant 只画图标，label 由宿主读注册项）
+    function DutyBoardIcon(props) {
+      const size = (props && typeof props.size === 'number') ? props.size : 16
+      return h('svg', {
+        width: size, height: size, viewBox: '0 0 16 16', fill: 'none',
+        'aria-hidden': 'true', style: { display: 'block' },
+      },
+      h('rect', { x: 2.2, y: 2.2, width: 11.6, height: 11.6, rx: 2.6, stroke: 'currentColor', strokeWidth: 1.2 }),
+      h('path', { d: 'M4.9 6.1h3.4M4.9 8.5h2.4', stroke: 'currentColor', strokeWidth: 1.2, strokeLinecap: 'round' }),
+      h('path', { d: 'M9.2 9.4l1.3 1.4 2.1-2.4', stroke: 'currentColor', strokeWidth: 1.35, strokeLinecap: 'round', strokeLinejoin: 'round' }))
+    }
+
+    // 侧栏「更多」里的一行：打开值班台 + 固定/收起。
+    // 行必须用宿主的 MenuItemButton 画，否则放进菜单里就是一块白底按钮；
+    // 固定状态和打开动作都走 owner props（entries/pinned/onOpen/onPinnedChange）。
+    function DutyBoardMenuRow(props) {
+      const MenuItemButton = primitives && primitives.MenuItemButton
+      const IconCheck = primitives && primitives.IconCheckOutlineRegular
+      const list = (props && props.entries) || []
+      const mine = list.find((entry) => entry && entry.id === 'puppet-duty-board') ||
+        { id: 'puppet-duty-board', label: '值班台', pinned: true, active: false }
+      const openPanel = () => {
+        if (props && props.onDismiss) props.onDismiss()
+        if (props && props.onOpen) props.onOpen('puppet-duty-board')
+      }
+      const togglePin = () => {
+        if (props && props.onPinnedChange) props.onPinnedChange('puppet-duty-board', !mine.pinned)
+      }
+      const row = (label, onSelect, icon) => MenuItemButton
+        ? h(MenuItemButton, icon ? { onSelect, icon } : { onSelect }, label)
+        : h('button', {
+          type: 'button', className: 'pmb-btn',
+          style: { width: '100%', textAlign: 'left' },
+          onClick: onSelect,
+        }, label)
+      return h(React.Fragment, null,
+        row(mine.active === true ? '值班台（当前页）' : '打开值班台', openPanel,
+          IconCheck ? h(IconCheck, { size: 16, style: { opacity: mine.pinned ? 1 : 0 } }) : null),
+        row(mine.pinned ? '值班台：收进「更多」' : '值班台：固定到侧栏', togglePin))
     }
 
     function apply(ctx) {
@@ -1106,19 +1156,20 @@ window.__ModuleLoader__.load({
           () => h(SessionMemoryPanel),
         )
 
-        // 值班台：侧栏「更多」入口 + 独立主面板
-        slots.inject('sidebar.panellist.actions', () => slots.register(
-          { name: 'sidebar.panellist.actions', id: 'puppet-duty-board', order: 40, label: '值班台' },
-          () => h('button', {
-            type: 'button',
-            className: 'pmb-btn',
-            style: { width: '100%', textAlign: 'left' },
-            onClick: () => { try { ctx.layout && ctx.layout.selectPanel && ctx.layout.selectPanel('puppet-duty-board') } catch (e) {} },
-          }, '值班台'),
+        // 值班台：侧栏面板行（sidebar.panellist 才进侧栏列表、才有固定状态）
+        slots.inject('sidebar.panellist', () => slots.register(
+          { name: 'sidebar.panellist', id: 'puppet-duty-board', order: 40, label: '值班台' },
+          DutyBoardIcon,
         ))
+        // 「更多」菜单里的入口，行样式用宿主原语
+        slots.inject('sidebar.panellist.actions', () => slots.register(
+          { name: 'sidebar.panellist.actions', id: 'puppet-duty-board.actions', order: 40, label: '值班台' },
+          DutyBoardMenuRow,
+        ))
+        // 面板本体：main 是 keyed slot，key 必须与上面 id 一致
         slots.inject('main', () => slots.register(
           { name: 'main', key: 'puppet-duty-board' },
-          () => h(DutyBoardPanel),
+          DutyBoardPanel,
         ))
       })
     }
