@@ -1009,6 +1009,75 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // ---------------------------------------------------------------
+    // 页：值班台（sidebar「更多」入口 + 独立主面板 key = puppet-duty-board）
+    // ---------------------------------------------------------------
+    function DutyBoardPanel() {
+      const { useState, useEffect, useCallback } = React
+      const [data, setData] = useState(null)
+      const [busy, setBusy] = useState(false)
+      const [error, setError] = useState('')
+      const load = useCallback(async () => {
+        setBusy(true)
+        setError('')
+        try {
+          const res = await callApi('duty-board')
+          if (!res || res.ok !== true) throw new Error((res && res.error) || '读取值班台失败')
+          setData(res)
+        } catch (err) {
+          setError(err && err.message ? err.message : String(err))
+        } finally {
+          setBusy(false)
+        }
+      }, [])
+      useEffect(() => { load() }, [load])
+      useEffect(() => {
+        const t = setInterval(() => { if (typeof document === 'undefined' || !document.hidden) load() }, 30000)
+        return () => clearInterval(t)
+      }, [load])
+
+      const card = (title, rows, note) =>
+        h('div', { className: 'pmb-card' },
+          h('div', { className: 'pmb-title' }, title),
+          h('div', { className: 'pmb-grid' }, rows.map((r) => h('div', { key: r[0], className: 'pmb-kv' }, h('div', { className: 'pmb-k' }, r[0]), h('div', { className: 'pmb-v' }, String(r[1]))))),
+          note ? h('div', { className: 'pmb-sub' }, note) : null)
+
+      const qq = (data && data.qq) || {}
+      const bili = (data && data.bili) || {}
+      const mem = (data && data.memory) || {}
+      const quota = qq.quota || {}
+
+      return h('div', { className: 'pmb' },
+        h('div', { className: 'pmb-head' },
+          h('div', { className: 'pmb-title' }, '值班台'),
+          h('div', { className: 'pmb-sub' }, '一屏看三样心跳：QQ 观察器 / B站值班 / 记忆。每 30 秒自动刷新。'),
+        ),
+        error ? h('div', { className: 'pmb-err' }, error) : null,
+        h('div', { className: 'pmb-actions' },
+          h('button', { className: 'pmb-btn', disabled: busy, onClick: () => load() }, busy ? '读取中…' : '刷新'),
+          data ? h('span', { className: 'pmb-sub' }, '更新于 ' + fmtLocal(data.at)) : null,
+        ),
+        card('QQ 观察器', [
+          ['今日额度', (quota.sent || 0) + ' / ' + (quota.max || '-')],
+          ['观察器 pid', qq.watcherPid || '（无）'],
+          ['最近扫描', qq.lastScan ? String(qq.lastScan).slice(0, 90) : '（暂无）'],
+          ['开机自启', qq.lastBoot ? String(qq.lastBoot).slice(0, 90) : '（暂无）'],
+        ], qq.alert ? ('⚠️ 有未清告警：' + qq.alert.ago + '，连续失败 ' + qq.alert.failures + ' 次') : '无未清告警'),
+        card('B站值班', [
+          ['配置', bili.configured ? '已配置' : '未配置'],
+          ['最近报告', bili.lastReport ? (bili.lastReport.file + '（' + bili.lastReport.ago + '）') : '（还没跑过）'],
+          ['最近日志', bili.lastLog ? String(bili.lastLog).slice(0, 90) : '（暂无）'],
+        ], '报告在 ~/.dsh/bili-duty/out/'),
+        card('记忆', [
+          ['版本', mem.version || '?'],
+          ['核心卡', (mem.coreChars || 0) + ' 字'],
+          ['关系/用户/便签/笔记', (mem.relations || 0) + ' / ' + (mem.user || 0) + ' / ' + (mem.memo || 0) + ' / ' + (mem.notes || 0)],
+          ['累计压缩', (mem.compactions || 0) + ' 次' + (mem.lastCompactionAt ? ('（最近 ' + fmtLocal(mem.lastCompactionAt) + '）') : '')],
+          ['压缩后自检', mem.compactionCheck ? (mem.compactionCheck.ok ? '通过' : '未通过') : '（还没触发过）'],
+        ], '数据在 ~/.dsh/memory，纯文本'),
+      )
+    }
+
     function apply(ctx) {
       if (typeof document !== 'undefined') {
         const style = document.createElement('style')
@@ -1036,6 +1105,21 @@ window.__ModuleLoader__.load({
           { name: 'settings.section', id: 'puppet-session', order: 28, label: '会话记忆' },
           () => h(SessionMemoryPanel),
         )
+
+        // 值班台：侧栏「更多」入口 + 独立主面板
+        slots.inject('sidebar.panellist.actions', () => slots.register(
+          { name: 'sidebar.panellist.actions', id: 'puppet-duty-board', order: 40, label: '值班台' },
+          () => h('button', {
+            type: 'button',
+            className: 'pmb-btn',
+            style: { width: '100%', textAlign: 'left' },
+            onClick: () => { try { ctx.layout && ctx.layout.selectPanel && ctx.layout.selectPanel('puppet-duty-board') } catch (e) {} },
+          }, '值班台'),
+        ))
+        slots.inject('main', () => slots.register(
+          { name: 'main', key: 'puppet-duty-board' },
+          () => h(DutyBoardPanel),
+        ))
       })
     }
 

@@ -1321,6 +1321,7 @@ function registerBackupApi(service) {
         if (action === "autosummary") {
           return sendJson(res, autoSummaryConfigView());
         }
+        if (action === "duty-board") return sendJson(res, dutyBoardData());
         if (action === "session-memory") {
           const mem = sessionMemory();
           const wanted = normalizeSessionId(url.searchParams.get("session") || "");
@@ -3700,6 +3701,78 @@ function listHandoffs(args = {}) {
     .join("\n")
 }
 
+// ---- 值班台（2026-10-24 加）----
+// 一屏看三样心跳：QQ 观察器 / B站值班 / 记忆本身。宿主侧只读文件，不调外部接口，永不抛错。
+function dutyBoardData() {
+  const H = os.homedir();
+  const qqDir = path.join(H, ".dsh", "qq-watch");
+  const biliDir = path.join(H, ".dsh", "bili-duty");
+  const readJsonSafe = (p) => { try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return null; } };
+  const readTextSafe = (p) => { try { return fs.readFileSync(p, "utf8"); } catch { return ""; } };
+  const tailLines = (p, n = 2) => { try { return fs.readFileSync(p, "utf8").trim().split("\n").filter(Boolean).slice(-n); } catch { return []; } };
+  const countLines = (p) => { try { return fs.readFileSync(p, "utf8").trim().split("\n").filter(Boolean).length; } catch { return 0; } };
+  const ago = (iso) => { const t = Date.parse(iso || ""); if (!Number.isFinite(t)) return ""; const d = Date.now() - t; if (d < 60000) return "刚刚"; if (d < 3600000) return Math.floor(d / 60000) + " 分钟前"; if (d < 86400000) return Math.floor(d / 3600000) + " 小时前"; return Math.floor(d / 86400000) + " 天前"; };
+
+  // QQ：额度 / 告警 / 最近一次扫描与开机自启
+  const quota = readJsonSafe(path.join(qqDir, "quota.json")) || {};
+  const alert = readJsonSafe(path.join(qqDir, "alert.json"));
+  const watchTail = tailLines(path.join(qqDir, "watch.log"), 2);
+  const bootTail = tailLines(path.join(qqDir, "boot.log"), 1);
+  const pid = Number(readTextSafe(path.join(qqDir, "watcher.pid")).trim()) || 0;
+
+  // B站值班：配置 / 最近报告 / 日志尾
+  const biliCfg = readJsonSafe(path.join(biliDir, "config.json"));
+  let lastReport = null;
+  try {
+    const outDir = path.join(biliDir, "out");
+    const files = fs.readdirSync(outDir).filter((f) => f.endsWith(".md")).sort();
+    if (files.length) {
+      const f = files[files.length - 1];
+      const st = fs.statSync(path.join(outDir, f));
+      lastReport = { file: f, at: st.mtime.toISOString(), ago: ago(st.mtime.toISOString()) };
+    }
+  } catch {}
+  const dutyTail = tailLines(path.join(biliDir, "duty.log"), 1);
+
+  // 记忆：核心卡字数 / 各层条数 / 压缩与自检
+  const coreText = readTextSafe(PATHS.core);
+  const state = (() => { try { return loadState(); } catch { return {}; } })();
+  const lastCheck = tailLines(path.join(PATHS.deep, "compaction-check.jsonl"), 1)[0] || "";
+  let compactionCheck = null;
+  try { compactionCheck = lastCheck ? JSON.parse(lastCheck) : null; } catch {}
+  let version = "";
+  try { version = JSON.parse(readTextSafe(path.join(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")), "package.json"))).version || ""; } catch {}
+
+  return {
+    ok: true,
+    at: nowISO(),
+    qq: {
+      quota,
+      alert: alert ? { at: alert.at, failures: alert.failures, ago: ago(alert.at) } : null,
+      watcherPid: pid,
+      lastScan: watchTail[watchTail.length - 1] || "",
+      lastBoot: bootTail[0] || "",
+    },
+    bili: {
+      configured: Boolean(biliCfg),
+      schedule: biliCfg ? { perDay: biliCfg.perDay, peakValley: biliCfg.peakValley, autoComment: biliCfg.autoComment } : null,
+      lastReport,
+      lastLog: dutyTail[0] || "",
+    },
+    memory: {
+      version,
+      coreChars: coreText.replace(/\s+/g, "").length,
+      relations: countLines(PATHS.relations),
+      user: countLines(PATHS.user),
+      memo: countLines(PATHS.memo),
+      notes: countLines(PATHS.notes),
+      compactions: Number(state.compaction && state.compaction.count) || 0,
+      lastCompactionAt: (state.compaction && state.compaction.lastAt) || "",
+      compactionCheck,
+    },
+  };
+}
+
 function apply(ctx) {
   diag(`apply 开始：tools=${typeof ctx?.tools} inject=${typeof ctx?.inject} node=${process.version}`);
   // v0.25：目录写不了不能让整个插件死掉——记诊断、继续注册工具，让 memory_doctor 能报出来
@@ -4868,6 +4941,6 @@ const plugin = {
   apply,
 };
 
-export { apply, loadState, saveState, STATE_PATH, buildInjectionText, buildStateInjection, modelRouteOf, sessionMemory, createSessionMemory, sessionMemoryPaths, normalizeSessionId, isSpecialKey, doctorReport, renderDoctor, resolveBackupDir, probeWritable, coreInjection, coreOptions, createLines, lexicalScore, linesConfigDefaults, linesPaths, qualitativeOf, topicTokens, behaviorHint, createSocial, detectScene, normalizeName, personIdOf, registerSocialTools, sceneLabel, socialConfigDefaults, socialPaths, searchSocialContext, backupPolicySummary, compactionStats, compactionStatusLine, noteCompaction, noteAutoSummary, compressCallsIn, nativeCompactionsIn, compressToolCallsIn, compressionKindOf, readCompactionLog, appendCompactionRecord, ingestCompactionEvent, compactionRecords, compactionSelfCheck, sendHandoff, pullHandoff, listHandoffs, compactionSuiteDetected, listAutoSummaries, deleteAutoSummary, setFactCaller, factOptions, readFactCandidates, writeFactCandidates, pendingFactCandidates, factCandidateStats, factStatusLine, parseFactCandidates, buildFactPrompt, factInventory, isDuplicateFact, extractFactCandidates, acceptFactCandidate, rejectFactCandidate, updateBackupPolicy, updateAutoSummaryPolicy, autoSummaryConfigView, registerBackupApi, hostIsLoopback, readRequestBody, searchMemory, writeMemory, backupNow, pruneOldSnapshots, shouldSkipBackup, backupStampOf, writeTurnDiary, isCompressionEvent, renameAssetImage, listAssetImages, buildStats, tagsOf, validateTags, checkedTags, TAG_VOCAB, clearMemos, recallSession, decodeSessionFile, relationInjectionLines, archiveRelationOverflow, locateMemory, jsonlHasHash, rebuildGuide, guideStats, guideLinks, guideNodes, addSource, listSources, findSources, sourceStats, loadSources, sourceTag, entryProvenance, sourceIndex, runAutoSummary, pendingTurns, autoSummaryOptions, buildAutoSummaryEntry, buildSummaryPrompt, summaryStyleLine, parseSummaryText, summaryInputOf, callWithThinkingRetry, setAutoSummaryCaller, defaultConfig, loadConfig, AUTO_SUMMARY_PREFIX };
+export { apply, loadState, saveState, STATE_PATH, buildInjectionText, buildStateInjection, modelRouteOf, sessionMemory, createSessionMemory, sessionMemoryPaths, normalizeSessionId, isSpecialKey, doctorReport, renderDoctor, resolveBackupDir, probeWritable, coreInjection, coreOptions, createLines, lexicalScore, linesConfigDefaults, linesPaths, qualitativeOf, topicTokens, behaviorHint, createSocial, detectScene, normalizeName, personIdOf, registerSocialTools, sceneLabel, socialConfigDefaults, socialPaths, searchSocialContext, backupPolicySummary, compactionStats, compactionStatusLine, noteCompaction, noteAutoSummary, compressCallsIn, nativeCompactionsIn, compressToolCallsIn, compressionKindOf, readCompactionLog, appendCompactionRecord, ingestCompactionEvent, compactionRecords, compactionSelfCheck, dutyBoardData, sendHandoff, pullHandoff, listHandoffs, compactionSuiteDetected, listAutoSummaries, deleteAutoSummary, setFactCaller, factOptions, readFactCandidates, writeFactCandidates, pendingFactCandidates, factCandidateStats, factStatusLine, parseFactCandidates, buildFactPrompt, factInventory, isDuplicateFact, extractFactCandidates, acceptFactCandidate, rejectFactCandidate, updateBackupPolicy, updateAutoSummaryPolicy, autoSummaryConfigView, registerBackupApi, hostIsLoopback, readRequestBody, searchMemory, writeMemory, backupNow, pruneOldSnapshots, shouldSkipBackup, backupStampOf, writeTurnDiary, isCompressionEvent, renameAssetImage, listAssetImages, buildStats, tagsOf, validateTags, checkedTags, TAG_VOCAB, clearMemos, recallSession, decodeSessionFile, relationInjectionLines, archiveRelationOverflow, locateMemory, jsonlHasHash, rebuildGuide, guideStats, guideLinks, guideNodes, addSource, listSources, findSources, sourceStats, loadSources, sourceTag, entryProvenance, sourceIndex, runAutoSummary, pendingTurns, autoSummaryOptions, buildAutoSummaryEntry, buildSummaryPrompt, summaryStyleLine, parseSummaryText, summaryInputOf, callWithThinkingRetry, setAutoSummaryCaller, defaultConfig, loadConfig, AUTO_SUMMARY_PREFIX };
 export default plugin;
 
