@@ -1,6 +1,6 @@
 {
   "name": "dsh-puppet-memory",
-  "version": "0.30.0-dev",
+  "version": "0.31.0-dev",
   "description": "木偶记忆（Puppet Memory）：DSH 跨会话记忆插件。三层记忆（行为/深层/阵列）+ 600 字常驻核心卡 + 三线状态（工作/陪伴/学习）+ 多人多群记忆（身份归一、分区可见性、按场景注入）+ 会话级记忆管理（屏蔽/删除脏片段）+ 自动摘要与事实候选 + 小模型路由 + 家目录备份与自检。零依赖、纯文本、MIT。",
   "type": "module",
   "main": "index.js",
