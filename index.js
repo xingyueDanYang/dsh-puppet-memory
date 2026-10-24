@@ -72,6 +72,9 @@ const PATHS = {
   // v0.33：核心卡拆两半——core.md 放稳定内容（称呼/红线/约定），core-state.md 放会变的状态（主线/正在进行的事），
   // 分开文件、分开预算，状态变来变去也不会把 600 字预算吃光。
   coreState: path.join(MEM_DIR, "behavior", "core-state.md"),
+  // v0.33：规则单独一份（说话/红线/约定）。它跟状态分开算指纹——状态变不会把规则再提醒一遍；
+  // 规则只在「内容改过」或「压缩后」各注入一次。
+  coreRules: path.join(MEM_DIR, "behavior", "core-rules.md"),
   // v0.23 三线状态：工作/陪伴/学习的连续权重与轨迹（只写 state/）
   stateDir: path.join(MEM_DIR, "state"),
   relations: path.join(MEM_DIR, "behavior", "relations.jsonl"),
@@ -459,7 +462,7 @@ function defaultConfig() {
       mode: "every-step",
       // v0.22 核心记忆：behavior/core.md 小文件，默认「缺就补」地每步注入，600 字预算。
       // 它先从 maxChars 总预算里扣，开核心卡不会让注入总量变长；关掉不影响旧行为。
-      core: { enabled: true, maxChars: 600, everyStep: true, state: { enabled: true, maxChars: 150 } },
+      core: { enabled: true, maxChars: 600, everyStep: true, state: { enabled: true, maxChars: 150 }, rules: { enabled: true, maxChars: 400 } },
     },
     // 备份（v0.12.0）：行为记忆也纳入；自动备份一天最多一次；30 天前的快照自动删。
     backup: {
@@ -788,27 +791,31 @@ function coreOptions(cfg) {
   const budget = Math.max(100, Number(opt.maxChars) || 600);
   const stateOpt = { ...(defaultConfig().inject.core.state || {}), ...((opt && opt.state) || {}) };
   const state = { enabled: stateOpt.enabled !== false, budget: Math.max(60, Number(stateOpt.maxChars) || 150) };
-  return { enabled: opt.enabled !== false, budget, everyStep: opt.everyStep !== false, state };
+  const rulesOpt = { ...(defaultConfig().inject.core.rules || {}), ...((opt && opt.rules) || {}) };
+  const rules = { enabled: rulesOpt.enabled !== false, budget: Math.max(100, Number(rulesOpt.maxChars) || 400) };
+  return { enabled: opt.enabled !== false, budget, everyStep: opt.everyStep !== false, state, rules };
 }
 
 function coreInjection(cfg) {
   const opt = coreOptions(cfg);
-  const empty = { text: "", length: 0, clipped: false, budget: opt.budget, stateText: "", stateLength: 0, stateClipped: false, stateBudget: opt.state.budget, everyStep: opt.everyStep };
+  const empty = { text: "", length: 0, clipped: false, budget: opt.budget, coreText: "", rulesText: "", stateText: "", rulesLength: 0, stateLength: 0, rulesClipped: false, stateClipped: false, rulesBudget: opt.rules.budget, stateBudget: opt.state.budget, everyStep: opt.everyStep };
   if (!opt.enabled) return empty;
   const readMd = (file) => { try { return fs.existsSync(file) ? readText(file).replace(/\r\n/g, "\n").trim() : ""; } catch { return ""; } };
+  const clipTo = (raw, budget) => ({ text: raw.length > budget ? raw.slice(0, budget).trimEnd() : raw, clipped: raw.length > budget });
   const rawCore = readMd(PATHS.core);
+  const rawRules = opt.rules.enabled ? readMd(PATHS.coreRules) : "";
   const rawState = opt.state.enabled ? readMd(PATHS.coreState) : "";
-  if (!rawCore && !rawState) return empty;
-  const clipped = rawCore.length > opt.budget;
-  const coreText = clipped ? rawCore.slice(0, opt.budget).trimEnd() : rawCore;
-  const stateClipped = rawState.length > opt.state.budget;
-  const stateText = stateClipped ? rawState.slice(0, opt.state.budget).trimEnd() : rawState;
-  // v0.33：稳定内容与状态分文件、分预算；注入时拼成一块，字数各算各的
+  if (!rawCore && !rawRules && !rawState) return empty;
+  const corePart = clipTo(rawCore, opt.budget);
+  const rulesPart = clipTo(rawRules, opt.rules.budget);
+  const statePart = clipTo(rawState, opt.state.budget);
+  // v0.33：规则 / 稳定内容 / 状态三份，各自预算、各自截断；调用方也按三段各自算指纹
   const parts = [];
-  if (coreText) parts.push(coreText);
-  if (stateText) parts.push(`【当前状态】\n${stateText}`);
+  if (rulesPart.text) parts.push(rulesPart.text);
+  if (corePart.text) parts.push(corePart.text);
+  if (statePart.text) parts.push(`【当前状态】\n${statePart.text}`);
   const text = parts.join("\n");
-  return { text, length: text.length, clipped, budget: opt.budget, stateText, stateLength: stateText.length, stateClipped, stateBudget: opt.state.budget, everyStep: opt.everyStep };
+  return { text, length: text.length, clipped: corePart.clipped, budget: opt.budget, coreText: corePart.text, rulesText: rulesPart.text, stateText: statePart.text, rulesLength: rulesPart.text.length, stateLength: statePart.text.length, rulesClipped: rulesPart.clipped, stateClipped: statePart.clipped, rulesBudget: opt.rules.budget, stateBudget: opt.state.budget, everyStep: opt.everyStep };
 }
 
 // v0.28：会话记忆管理单例（屏蔽表 + 本会话片段删除）。MEM_DIR 在模块加载时固定，单例安全。
@@ -3876,6 +3883,8 @@ function apply(ctx) {
   const compactionProbeDone = new Set();
   // v0.22：核心卡上次注入的指纹（内容没变就不重复往上下文里塞同一条）
   const lastCoreInjected = new Map();
+  const lastRulesInjected = new Map();
+  const lastCoreStateInjected = new Map();
   // v0.23：三线状态上次注入的指纹（取向没变就不重复）
   const lastStateInjected = new Map();
 
@@ -3900,6 +3909,8 @@ function apply(ctx) {
     lastInjected.delete(sessionId);
     injectedOnce.delete(sessionId);
     lastCoreInjected.delete(sessionId);
+    lastRulesInjected.delete(sessionId);
+    lastCoreStateInjected.delete(sessionId);
     lastStateInjected.delete(sessionId);
     backupAsync("compress");
     // 压缩后补一条自动摘要（二期）：上下文刚被压过，说明这段对话长且重要
@@ -4079,9 +4090,14 @@ function apply(ctx) {
         }
         const core = coreInjection(cfg);
         const coreAllowed = core.text && (!firstStepDone || core.everyStep) && !suppressed.has("core");
-        const coreDigest = coreAllowed ? sha1(core.text) : "";
-        // 只有内容变了（或第一次 / 压缩后指纹被清）才真的往上下文里放
-        const coreText = coreAllowed && lastCoreInjected.get(sessionId) !== coreDigest ? core.text : "";
+        // v0.33：规则 / 稳定内容 / 状态三段各自算指纹——状态一变不会把规则再提醒一遍，
+        // 规则只在「内容改过」或「压缩后指纹被清」时各注入一次。
+        const rulesDigest = coreAllowed && core.rulesText ? sha1(core.rulesText) : "";
+        const coreDigest = coreAllowed && core.coreText ? sha1(core.coreText) : "";
+        const coreStateDigest = coreAllowed && core.stateText ? sha1(core.stateText) : "";
+        const rulesForInject = rulesDigest && lastRulesInjected.get(sessionId) !== rulesDigest ? core.rulesText : "";
+        const coreText = coreDigest && lastCoreInjected.get(sessionId) !== coreDigest ? core.coreText : "";
+        const coreStateForInject = coreStateDigest && lastCoreStateInjected.get(sessionId) !== coreStateDigest ? core.stateText : "";
         // v0.23 三线状态：先吃这条用户发言的信号（衰减/锚点/工作日志都在里面），再决定取向
         let linesView = null;
         let lineSignal = null;
@@ -4110,14 +4126,16 @@ function apply(ctx) {
         } catch (err) {
           diag(`社交档案注入失败：${err?.message || err}`);
         }
-        if (!text && !socialText && !coreText && !stateForInject) return decision;
-        const digest = sha1(`${text}\u0000${socialText}\u0000${coreText}\u0000${stateForInject}`);
+        if (!text && !socialText && !rulesForInject && !coreText && !coreStateForInject && !stateForInject) return decision;
+        const digest = sha1(`${text}\u0000${socialText}\u0000${rulesForInject}\u0000${coreText}\u0000${coreStateForInject}\u0000${stateForInject}`);
         if (lastInjected.get(sessionId) === digest) {
           if (injectMode === "first-step") injectedOnce.add(sessionId);
           return decision;
         }
         lastInjected.set(sessionId, digest);
+        if (rulesForInject) lastRulesInjected.set(sessionId, rulesDigest);
         if (coreText) lastCoreInjected.set(sessionId, coreDigest);
+        if (coreStateForInject) lastCoreStateInjected.set(sessionId, coreStateDigest);
         if (stateForInject) lastStateInjected.set(sessionId, stateDigest);
         if (injectMode === "first-step") injectedOnce.add(sessionId);
         // 注入装不下的旧关系转存深层引导（带日期标注），避免记忆只靠检索才找得回
@@ -4125,9 +4143,19 @@ function apply(ctx) {
         const stateMessage = stateForInject
           ? injectionMessage(`<puppet_state>\n${stateForInject}\n（这是当前互动取向，用自然语言体现，不要说出「权重/百分比/取向」这些词。）\n</puppet_state>`)
           : null;
+        const rulesMessage = rulesForInject
+          ? injectionMessage(
+              `<puppet_rules>\n以下是行为规则（behavior/core-rules.md：说话方式 / 红线 / 约定）。只在规则改过或上下文压缩后补一次；已经遵守的规则不必每轮重复念叨，按它做就行。\n${rulesForInject}${core.rulesClipped ? `\n（规则超 ${core.rulesBudget} 字预算，已截断；用 memory_core action=get target=rules 看全文）` : ""}\n</puppet_rules>`,
+            )
+          : null;
         const coreMessage = coreText
           ? injectionMessage(
-              `<puppet_core>\n以下是核心记忆（behavior/core.md 放稳定内容，behavior/core-state.md 放当前状态；每次注入，和其它记忆冲突时以它为准）：\n${coreText}${core.clipped ? `\n（核心记忆超 ${core.budget} 字预算，已截断；用 memory_core action=get 看全文，精简后 action=set 覆盖）` : ""}${core.stateClipped ? `\n（当前状态超 ${core.stateBudget} 字预算，已截断；用 memory_core action=get target=state 看全文）` : ""}\n</puppet_core>`,
+              `<puppet_core>\n以下是核心记忆（behavior/core.md：称呼约定 / 用户 / 能力这些不会经常变的内容；和其它记忆冲突时以它为准）：\n${coreText}${core.clipped ? `\n（核心记忆超 ${core.budget} 字预算，已截断；用 memory_core action=get 看全文，精简后 action=set 覆盖）` : ""}\n</puppet_core>`,
+            )
+          : null;
+        const coreStateMessage = coreStateForInject
+          ? injectionMessage(
+              `<puppet_core_state>\n以下是当前状态（behavior/core-state.md：当前主线 / 进度 / 待办，会变的那部分）。变了才补，不变就不重复：\n${coreStateForInject}${core.stateClipped ? `\n（当前状态超 ${core.stateBudget} 字预算，已截断；用 memory_core action=get target=state 看全文）` : ""}\n</puppet_core_state>`,
             )
           : null;
         const socialMessage = socialText
@@ -4137,7 +4165,7 @@ function apply(ctx) {
           : null;
         return {
           kind: "enter",
-          messages: [...(decision.messages || []), ...(stateMessage ? [stateMessage] : []), ...(coreMessage ? [coreMessage] : []), ...(text ? [injectionMessage(text)] : []), ...(socialMessage ? [socialMessage] : [])],
+          messages: [...(decision.messages || []), ...(rulesMessage ? [rulesMessage] : []), ...(coreMessage ? [coreMessage] : []), ...(coreStateMessage ? [coreStateMessage] : []), ...(stateMessage ? [stateMessage] : []), ...(text ? [injectionMessage(text)] : []), ...(socialMessage ? [socialMessage] : [])],
         };
       } catch (err) {
         log("warn", `pre-step 注入失败：${err?.message || err}`);
@@ -4217,6 +4245,8 @@ function apply(ctx) {
           lastInjected.delete(sid);
           injectedOnce.delete(sid);
           lastCoreInjected.delete(sid);
+          lastRulesInjected.delete(sid);
+          lastCoreStateInjected.delete(sid);
           lastStateInjected.delete(sid);
           const r = res.record;
           diag(`压缩记录：${r.id} ${r.trigger === "command" ? "手动 /compact" : "自动"}，压掉 ${r.items} 条 / 省 ${r.savedTokens} tokens（${r.provider || "?"}/${r.model || "?"}）session=${sid}`);
@@ -4251,6 +4281,8 @@ function apply(ctx) {
     lastInjected.delete(sessionId);
     injectedOnce.delete(sessionId);
     lastCoreInjected.delete(sessionId);
+    lastRulesInjected.delete(sessionId);
+    lastCoreStateInjected.delete(sessionId);
     lastStateInjected.delete(sessionId);
     seenEvents.delete(sessionId);
     lastSizes.delete(sessionId);
@@ -4418,12 +4450,12 @@ function apply(ctx) {
     register({
       name: "memory_core",
       description:
-        "核心记忆拆两个文件（都**每次注入**、压缩后自动补回，优先级高于其它记忆）：①behavior/core.md = 稳定内容（称呼约定、风格红线、约定、绝对不能忘的事），600 字预算；②behavior/core-state.md = 会变的状态（当前主线、正在进行的事、临时规则），150 字预算——状态改来改去不会吃光核心卡的预算。两份分开截断、分开报字数。action=get 读 | set 覆盖写（text，超过硬上限 2×预算会被拒）| append 追加一行 | clear 清空（先归档到 behavior/archive/core*.md）；target=core（默认）或 state。不要写成日记或流水账。",
+        "核心记忆拆三个文件（都常驻注入、压缩后自动补回，优先级高于其它记忆）：①behavior/core.md = 不会经常变的内容（称呼约定、用户、能力），600 字预算；②behavior/core-rules.md = 行为规则（说话方式、红线、约定），400 字预算，**只在规则改过或压缩后各注入一次**，状态变化不会把规则再提醒一遍；③behavior/core-state.md = 会变的状态（当前主线、进度、待办），150 字预算。三份分开截断、分开报字数。action=get 读 | set 覆盖写（text，超过硬上限 2×预算会被拒）| append 追加一行 | clear 清空（先归档到 behavior/archive/core*.md）；target=core（默认）| rules | state。不要写成日记或流水账。",
       parameters: {
         type: "object",
         properties: {
           action: { type: "string", enum: ["get", "set", "append", "clear"] },
-          target: { type: "string", enum: ["core", "state"], description: "动哪个文件：core=稳定内容（默认），state=当前状态（会变的那部分）" },
+          target: { type: "string", enum: ["core", "rules", "state"], description: "动哪个文件：core=稳定内容（默认），rules=行为规则（说话/红线/约定），state=当前状态（主线/进度/待办）" },
           text: { type: "string", description: "set=全文覆盖；append=追加一行（不要以 - 开头，会自动处理）" },
         },
       },
@@ -4433,15 +4465,19 @@ function apply(ctx) {
           ensureDirs();
           const opt = coreOptions(loadConfig());
           const action = String(args?.action || "get");
-          const target = String(args?.target || "core") === "state" ? "state" : "core";
-          const file = target === "state" ? PATHS.coreState : PATHS.core;
-          const budget = target === "state" ? opt.state.budget : opt.budget;
-          const label = target === "state" ? "核心状态（behavior/core-state.md）" : "核心记忆（behavior/core.md）";
+          const wanted = String(args?.target || "core");
+          const target = wanted === "state" || wanted === "rules" ? wanted : "core";
+          const targetSpec = {
+            core: { file: PATHS.core, budget: opt.budget, label: "核心记忆（behavior/core.md）", empty: "核心记忆是空的（budget %B 字）。用 action=set 写第一条：称呼约定 / 用户 / 能力。" },
+            rules: { file: PATHS.coreRules, budget: opt.rules.budget, label: "行为规则（behavior/core-rules.md）", empty: "行为规则是空的（budget %B 字）。用 action=set target=rules 写：说话方式 / 红线 / 约定。" },
+            state: { file: PATHS.coreState, budget: opt.state.budget, label: "核心状态（behavior/core-state.md）", empty: "核心状态是空的（budget %B 字）。用 action=set target=state 写「当前主线 / 正在做什么」这类会变的事。" },
+          }[target];
+          const file = targetSpec.file;
+          const budget = targetSpec.budget;
+          const label = targetSpec.label;
           const cur = fs.existsSync(file) ? readText(file).replace(/\r\n/g, "\n") : "";
           if (action === "get") {
-            if (!cur.trim()) return target === "state"
-              ? `核心状态是空的（budget ${budget} 字）。用 action=set target=state 写「当前主线 / 正在做什么」这类会变的事。`
-              : `核心记忆是空的（budget ${budget} 字）。用 action=set 写第一条：称呼约定/风格红线/约定。`;
+            if (!cur.trim()) return targetSpec.empty.replace("%B", String(budget));
             const len = cur.trim().length;
             return `${label}（${len}/${budget} 字${len > budget ? "，超预算，注入时会截断" : ""}${opt.everyStep ? "，每步注入" : ""}）：\n----\n${cur.trim()}\n----`;
           }
@@ -4450,7 +4486,7 @@ function apply(ctx) {
               const dir = PATHS.archive;
               fs.mkdirSync(dir, { recursive: true });
               const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-              fs.writeFileSync(path.join(dir, `${target === "state" ? "core-state" : "core"}-${stamp}.md`), cur, "utf8");
+              fs.writeFileSync(path.join(dir, `${target === "state" ? "core-state" : target === "rules" ? "core-rules" : "core"}-${stamp}.md`), cur, "utf8");
             }
             fs.writeFileSync(file, "", "utf8");
             return `已清空${label}${cur.trim() ? "（原文已归档到 behavior/archive/）" : ""}。`;
