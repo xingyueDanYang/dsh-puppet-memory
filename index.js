@@ -1355,7 +1355,7 @@ function registerBackupApi(service) {
         if (action === "autosummary") {
           return sendJson(res, autoSummaryConfigView());
         }
-        if (action === "duty-board") return sendJson(res, dutyBoardData());
+        if (action === "duty-board") return sendJson(res, dutyBoardData());
         if (action === "session-memory") {
           const mem = sessionMemory();
           const wanted = normalizeSessionId(url.searchParams.get("session") || "");
@@ -1879,7 +1879,9 @@ function searchMemory(query, layer, limit, tag) {
       // 自动摘要降权：模型压出来的段落不能挤掉手写记忆（不污染检索）
       const autoSummaryPenalty = entry?.kind === "auto-summary" ? 1.5 : 0;
       const score = matched * 2 + recency + useBonus + tagBonus + importantBonus + cueBonus - autoSummaryPenalty;
-      hits.push({ text: `${where}:${index + 1}  ${clip(line, 300)}${hs}${suffix}${provenance ? `  ${provenance}` : ""}`, score, strict: textHit, ts: Number.isFinite(tsMs) ? tsMs : 0 });
+      // A-40：检索结果也带〔做过〕〔没做成〕〔听说〕前缀，和注入保持一致；
+      // 原始 JSONL 行仍附在后面（含 state/proof 字段，可回查依据）。
+      hits.push({ text: `${where}:${index + 1}  ${statePrefixOf(entry)}${clip(line, 300)}${hs}${suffix}${provenance ? `  ${provenance}` : ""}`, score, strict: textHit, ts: Number.isFinite(tsMs) ? tsMs : 0 });
     });
   }
   if (!hits.length) {
@@ -4479,7 +4481,9 @@ function apply(ctx) {
           if (action === "get") {
             if (!cur.trim()) return targetSpec.empty.replace("%B", String(budget));
             const len = cur.trim().length;
-            return `${label}（${len}/${budget} 字${len > budget ? "，超预算，注入时会截断" : ""}${opt.everyStep ? "，每步注入" : ""}）：\n----\n${cur.trim()}\n----`;
+            // A-40：规则卡不是每步注入（digest 相同就跳过），标签不能再写「每步注入」。
+            const cadence = target === "rules" ? "，规则改过或上下文压缩后补一次" : opt.everyStep ? "，每步注入" : "";
+            return `${label}（${len}/${budget} 字${len > budget ? "，超预算，注入时会截断" : ""}${cadence}）：\n----\n${cur.trim()}\n----`;
           }
           if (action === "clear") {
             if (cur.trim()) {

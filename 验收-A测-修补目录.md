@@ -30,6 +30,7 @@
 
 | # | 现象 | 修法 | 怎么验 | 回滚 |
 |---|---|---|---|---|
+| A-40 | 重启验收时发现两处「说的和做的不一样」：①A-34 写着「注入**与检索**统一带〔做过〕〔没做成〕〔听说〕前缀」，但 `memory_search` 返回的是裁剪后的原始 JSONL 行，只有 `"state":"done"` 字段、没有〔做过〕这种能一眼扫到的前缀——检索时仍要自己 parse 才分得清听说/做过；②`memory_core action=get target=rules` 的抬头写着「每步注入」，可规则卡实际是 digest 变了才补（A-37），标签把人带反了 | ①`searchMemory` 的命中行前加 `statePrefixOf(entry)`，原始 JSONL 仍附在后面（含 state/proof，可回查依据）；②`memory_core` 的 get 文案按 target 区分节奏：rules 写「规则改过或上下文压缩后补一次」，其余仍写「每步注入」 | `test/memory-states.mjs` 20 项全过（新增 2 项：检索命中行带〔没做成〕/〔做过〕前缀）；`test/core-memory.mjs` 71 项全过（新增 1 项：规则卡抬头不写「每步注入」）；其余 19 套测试全过 | `git revert` 该提交（退回：检索不带前缀、规则抬头写「每步注入」） |
 | A-14 | 主人 QQ 号硬编码在 `social.js` 默认值里，README 示例和测试夹具里也各有一处——公开仓库等于把号挂出去 | 默认值改 `ownerIds: []`（改由 `config.social.ownerIds` 提供）；README 示例换 `<你的QQ号>` / `<你的家目录>`；测试夹具换成假号（10000001 / 90000000x）；本地 `~/.dsh/memory/config.json` 补 `social.ownerIds` 保持主人识别 | 跑 `test/social-model.mjs`、`test/social-acceptance.mjs` 全通过；`node 脱敏检查.mjs` 无命中 | `git revert`；本地 config 里的 ownerIds 需同时保留 |
 | A-15 | 没有机制防止以后再把私人信息推上公开仓库 | 新增 `脱敏检查.mjs`（扫 QQ 号/群号/token/绝对路径/内网 IP/凭证文件名）+ `.git/hooks/pre-push` 钩子 + `过程/` 目录（devlog 与开源边界说明）+ npm script `check:privacy` | `node 脱敏检查.mjs` 退出码 0；故意塞一个号进去应报错 | 删 `.git/hooks/pre-push` 即停用；`脱敏检查.mjs` 可单独删 |
 | A-16 | 会话记忆面板只给最新 100 条，本会话实际 354 条——剩下 254 条在界面上没有任何入口（用户看到「100/100」时发现） | 接口加 `before` 游标 + 返回 `total`；`sessionmem.entries(sid, limit, before)` 支持往前取；新增 `countEntries()`；面板加「加载更早（还有 N 条）」、显示「片段 M / 共 N 条」、翻完提示「更早的都加载完了」 | 直调模块自测：354 条 → 100/100/100/54 四页无重叠；面板清单 #17~19 | `git revert`（旧行为是固定返回最新 100 条） |

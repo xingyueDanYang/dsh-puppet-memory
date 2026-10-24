@@ -63,6 +63,10 @@ ok("注入含〔听说〕", injText.includes("〔听说〕"));
 // ---- 6. 检索结果里也能看出区别 ----
 const found = String(searchMemory("npm", "all", 10));
 ok("检索结果原文里能看到 state", found.includes('"state":"failed"'), found.slice(0, 120));
+// A-40：检索命中行也带前缀，和注入保持一致（不用先 parse JSON 才看得出是听说还是做过）
+ok("检索结果带〔没做成〕前缀", found.includes("〔没做成〕"), found.slice(0, 120));
+const foundDone = String(searchMemory("值班台面板", "all", 10));
+ok("检索结果带〔做过〕前缀", foundDone.includes("〔做过〕"), foundDone.slice(0, 120));
 
 // ---- 7. diary 也支持，且 unknown layer 不炸 ----
 const d = writeMemory({ layer: "diary", text: "今天把三态标记做完了，自测通过", state: "done", proof: "node test/memory-states.mjs" });

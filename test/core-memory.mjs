@@ -230,6 +230,10 @@ try {
   const call = (args) => coreTool.execute(args);
   const t0 = await call({ action: "get" });
   ok("工具 get 能读", t0.includes("【称呼】") && t0.includes("/600 字"), t0.slice(0, 60));
+  // A-40：规则卡的节奏文案——它不是每步注入（digest 没变就跳过），别写成「每步注入」
+  await call({ action: "set", target: "rules", text: "【说话】先结论后解释" });
+  const tRules = await call({ action: "get", target: "rules" });
+  ok("规则卡 get 标的是「改过或压缩后补一次」", tRules.includes("规则改过或上下文压缩后补一次") && !tRules.includes("每步注入"), tRules.slice(0, 80));
   const t1 = await call({ action: "set", text: "【称呼】大肥鱼\n【约定】不可逆先问\n" });
   ok("工具 set 覆盖写", t1.includes("已写入") && readCore().includes("不可逆先问") && !readCore().includes("雌小鬼"));
   const t2 = await call({ action: "append", text: "【主线】木偶记忆" });
