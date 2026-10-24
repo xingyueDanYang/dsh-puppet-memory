@@ -585,6 +585,8 @@ window.__ModuleLoader__.load({
         policyCard,
         compactionCard,
         factCard,
+        // B-40：说明书不能只活在它要修的那堆文件里——这里写明外置副本的位置。
+        h(NOTE, null, '说明书放在插件目录之外：C:\\Users\\<你的用户名>\\.dsh\\给人类的说明书.md（桌面另有一份副本）。插件装坏、读不到插件目录时，照着那份操作；DSH 整体坏掉看同目录的 DSH-抢修卡.md。'),
       )
     }
 
