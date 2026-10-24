@@ -3713,6 +3713,9 @@ function dutyBoardData() {
   const tailLines = (p, n = 2) => { try { return fs.readFileSync(p, "utf8").trim().split("\n").filter(Boolean).slice(-n); } catch { return []; } };
   const countLines = (p) => { try { return fs.readFileSync(p, "utf8").trim().split("\n").filter(Boolean).length; } catch { return 0; } };
   const ago = (iso) => { const t = Date.parse(iso || ""); if (!Number.isFinite(t)) return ""; const d = Date.now() - t; if (d < 60000) return "刚刚"; if (d < 3600000) return Math.floor(d / 60000) + " 分钟前"; if (d < 86400000) return Math.floor(d / 3600000) + " 小时前"; return Math.floor(d / 86400000) + " 天前"; };
+  const stampLocal = (iso) => { const t = Date.parse(iso || ""); if (!Number.isFinite(t)) return ""; const d = new Date(t); const p2 = (n) => String(n).padStart(2, "0"); return (d.getMonth() + 1) + "-" + p2(d.getDate()) + " " + p2(d.getHours()) + ":" + p2(d.getMinutes()); };
+  // 日志行首是 UTC（toISOString 写的），换成本地 MM-DD HH:mm 再上屏——否则 07:01Z 看着像 8 小时前
+  const localLogLine = (line) => { const s0 = String(line || ""); const m = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)\s*([\s\S]*)$/.exec(s0); if (!m) return s0; const local = stampLocal(m[1]); return local ? (local + " " + m[2]) : s0; };
 
   // QQ：额度 / 告警 / 最近一次扫描与开机自启
   const quota = readJsonSafe(path.join(qqDir, "quota.json")) || {};
@@ -3751,14 +3754,14 @@ function dutyBoardData() {
       quota,
       alert: alert ? { at: alert.at, failures: alert.failures, ago: ago(alert.at) } : null,
       watcherPid: pid,
-      lastScan: watchTail[watchTail.length - 1] || "",
-      lastBoot: bootTail[0] || "",
+      lastScan: localLogLine(watchTail[watchTail.length - 1]),
+      lastBoot: localLogLine(bootTail[0]),
     },
     bili: {
       configured: Boolean(biliCfg),
       schedule: biliCfg ? { perDay: biliCfg.perDay, peakValley: biliCfg.peakValley, autoComment: biliCfg.autoComment } : null,
       lastReport,
-      lastLog: dutyTail[0] || "",
+      lastLog: localLogLine(dutyTail[0]),
     },
     memory: {
       version,
