@@ -681,8 +681,25 @@ function mergeCue(next, old) {
 }
 
 // 注入/检索时把标签显示成 〔第一次·关系〕，让模型一眼看出分类
+// v0.33（B-32）：记忆三态——做过 / 没做成 / 听说。写入时显式标，注入与检索时带上前缀，
+// 不把「听说」「没做成」当既成事实说。
+const STATE_ALIASES = {
+  done: "done", "做过": "done", "完成": "done", "已完成": "done", "成功": "done",
+  failed: "failed", "没做成": "failed", "失败": "failed", "未完成": "failed", "没成功": "failed",
+  heard: "heard", "听说": "heard", "转述": "heard", "未验证": "heard",
+};
+const STATE_LABELS = { done: "做过", failed: "没做成", heard: "听说" };
+function stateOf(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return "";
+  return STATE_ALIASES[raw] || STATE_ALIASES[raw.toLowerCase()] || "";
+}
+function statePrefixOf(entry) {
+  const st = stateOf(entry?.state);
+  return st ? `〔${STATE_LABELS[st]}〕` : "";
+}
 function tagsPrefixOf(entry) {  const tags = Array.isArray(entry?.tags) ? entry.tags.filter(Boolean) : [];
-  return tags.length ? `〔${tags.join("·")}〕` : "";
+  return `${statePrefixOf(entry)}${tags.length ? `〔${tags.join("·")}〕` : ""}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -2843,6 +2860,14 @@ function writeMemory(args) {
   const userNote = String(args.note || "").trim();
   // 原文 / 转述：文字条目和资产出处都存这个标记，显示时用来区分「照抄原话」还是「自己概括」
   const quote = cleanQuote(args.quote);
+  // v0.33（B-32）：三态标记——做过（有回执）/ 没做成（有失败原因）/ 听说（别人转述，未验证）
+  const markState = (entry) => {
+    const st = stateOf(args.state);
+    if (st) entry.state = st;
+    const proof = String(args.proof || "").trim();
+    if (proof) entry.proof = clip(proof, 160);
+    return entry;
+  };
 
   if (layer === "relation") {
     const keyword = String(args.keyword || "").trim();
@@ -2851,6 +2876,7 @@ function writeMemory(args) {
     const hash = sha1(`${keyword}|${meaning}`).slice(0, 16);
     const { tags, note: tagsNote } = checkedTags(args.tags);
     const entry = { kind: "relation", ts, keyword, meaning, links: String(args.links || ""), source: String(args.source || ""), useCount: 0, hash };
+    markState(entry);
     if (quote) entry.quote = quote;
     const cue = cueOf(args.cue);
     if (cue) entry.cue = cue;
@@ -2873,6 +2899,8 @@ function writeMemory(args) {
       if (!entry.links && old.links) entry.links = old.links;
       if (!entry.source && old.source) entry.source = old.source;
       if (!entry.quote && old.quote) entry.quote = old.quote;
+      if (!entry.state && old.state) entry.state = old.state;
+      if (!entry.proof && old.proof) entry.proof = old.proof;
       if (old.hash && old.hash !== entry.hash) {
         const prev = Array.isArray(old.supersedes) ? old.supersedes.filter(Boolean) : [];
         entry.supersedes = [...prev, old.hash].slice(-5);
@@ -2898,6 +2926,7 @@ function writeMemory(args) {
     const hash = sha1(keyword ? `${keyword}|${text}` : text).slice(0, 16);
     const { tags, note: tagsNote } = checkedTags(args.tags);
     const entry = { kind: "user", ts, keyword, text, hash };
+    markState(entry);
     const userSource = String(args.source || "").trim();
     if (userSource) entry.source = userSource;
     if (quote) entry.quote = quote;
@@ -2911,6 +2940,8 @@ function writeMemory(args) {
       if (!userNote && old.note) entry.note = old.note;
       if (!entry.source && old.source) entry.source = old.source;
       if (!entry.quote && old.quote) entry.quote = old.quote;
+      if (!entry.state && old.state) entry.state = old.state;
+      if (!entry.proof && old.proof) entry.proof = old.proof;
       const merged = mergeTags(entry.tags, old.tags);
       if (merged.length) entry.tags = merged; else delete entry.tags;
       rows[at] = entry;
@@ -2929,6 +2960,7 @@ function writeMemory(args) {
     if (!text) return "memo 需要 text（便签内容）";
     const { tags, note: tagsNote } = checkedTags(args.tags);
     const entry = { kind: "memo", ts, text, hash: sha1(text).slice(0, 16) };
+    markState(entry);
     const memoSource = String(args.source || "").trim();
     if (memoSource) entry.source = memoSource;
     if (quote) entry.quote = quote;
@@ -2945,6 +2977,7 @@ function writeMemory(args) {
     if (!text) return "note 需要 text";
     const { tags, note: tagsNote } = checkedTags(args.tags);
     const entry = { kind: "note", ts, text, keywords: keywordsOf(text), hash: sha1(text).slice(0, 16) };
+    markState(entry);
     const noteSource = String(args.source || "").trim();
     if (noteSource) entry.source = noteSource;
     if (quote) entry.quote = quote;
@@ -2967,6 +3000,7 @@ function writeMemory(args) {
     const hash = sha1(`${keyword}|${meaning}`).slice(0, 16);
     const { tags, note: tagsNote } = checkedTags(args.tags);
     const entry = { kind: "saying", ts, keyword, meaning, source: String(args.source || ""), links: String(args.links || ""), useCount: 0, hash };
+    markState(entry);
     if (quote) entry.quote = quote;
     const cue = cueOf(args.cue);
     if (cue) entry.cue = cue;
@@ -2989,6 +3023,8 @@ function writeMemory(args) {
       if (!entry.links && old.links) entry.links = old.links;
       if (!entry.source && old.source) entry.source = old.source;
       if (!entry.quote && old.quote) entry.quote = old.quote;
+      if (!entry.state && old.state) entry.state = old.state;
+      if (!entry.proof && old.proof) entry.proof = old.proof;
       if (old.hash && old.hash !== entry.hash) {
         const prev = Array.isArray(old.supersedes) ? old.supersedes.filter(Boolean) : [];
         entry.supersedes = [...prev, old.hash].slice(-5);
@@ -3027,6 +3063,7 @@ function writeMemory(args) {
     const { tags, note: tagsNote } = checkedTags(args.tags);
     const file = path.join(PATHS.diaryDir, `${monthKey()}.jsonl`);
     const entry = { kind: "manual-diary", ts, text, keywords: keywordsOf(text), hash: sha1(text + ts).slice(0, 16) };
+    markState(entry);
     const diarySource = String(args.source || "").trim();
     if (diarySource) entry.source = diarySource;
     if (quote) entry.quote = quote;
@@ -4235,7 +4272,7 @@ function apply(ctx) {
 
       name: "memory_write",
       description:
-        "写入一条长期记忆。layer=relation（关键词-释义对，如称呼/爱好/旧账，每轮注入，常用的放这里）| user（用户档案：兴趣爱好、习惯、背景资料等，不常注入，需要时用 memory_search layer=user 查）| memo（便签：工作交接、临时草稿，可随时清空）| note（临时笔记）| saying（常言/口头禅的细节解释）| persona（人设设定）| diary（日记条目）。重要的事一定要写进来，否则下次会话不会记得。出处：source 记「谁说的/在哪看到的」（如「UP主@BV号」），quote 标原文（verbatim）还是转述（paraphrase）；找不到出处就留空，不编造。images/audios 可带本地图片或音频路径（音频支持 mp3/wav/m4a/aac/ogg/opus/flac/webm/amr），一起存进记忆资产库（适合人物设定、截图、示意图、语音片段），带 source 时会顺手登记资产出处。tags 可给条目打分类标签（除 persona 外都支持，更新时旧标签自动保留合并；写 -标签 表示删除该标签），只接受固定词表，词表外会被忽略。梗/口头禅/网络传说类请用 saying 层，关系层只放人和关系。diary 可加 important=true 标重要事件。note 可写备注（跟条目一起落盘并写进 guide 索引）；写入返回里的 hash 可用 memory_locate 定位原文。之后用 memory_search 的 tag 参数按标签查。",
+        "写入一条长期记忆。layer=relation（关键词-释义对，如称呼/爱好/旧账，每轮注入，常用的放这里）| user（用户档案：兴趣爱好、习惯、背景资料等，不常注入，需要时用 memory_search layer=user 查）| memo（便签：工作交接、临时草稿，可随时清空）| note（临时笔记）| saying（常言/口头禅的细节解释）| persona（人设设定）| diary（日记条目）。重要的事一定要写进来，否则下次会话不会记得。出处：source 记「谁说的/在哪看到的」（如「UP主@BV号」），quote 标原文（verbatim）还是转述（paraphrase）；找不到出处就留空，不编造。images/audios 可带本地图片或音频路径（音频支持 mp3/wav/m4a/aac/ogg/opus/flac/webm/amr），一起存进记忆资产库（适合人物设定、截图、示意图、语音片段），带 source 时会顺手登记资产出处。tags 可给条目打分类标签（除 persona 外都支持，更新时旧标签自动保留合并；写 -标签 表示删除该标签），只接受固定词表，词表外会被忽略。梗/口头禅/网络传说类请用 saying 层，关系层只放人和关系。diary 可加 important=true 标重要事件。note 可写备注（跟条目一起落盘并写进 guide 索引）；state 标记这条记忆的可信状态（做过 / 没做成 / 听说，配 proof 写依据），不标就是不标；写入返回里的 hash 可用 memory_locate 定位原文。之后用 memory_search 的 tag 参数按标签查。",
       parameters: {
         type: "object",
         properties: {
@@ -4258,6 +4295,15 @@ function apply(ctx) {
           important: {
             type: "boolean",
             description: "仅 diary 用：标为重要事件（注入时优先显示，不会被后写的日常挤掉）",
+          },
+          state: {
+            type: "string",
+            enum: ["done", "failed", "heard"],
+            description: "这条记忆的可信状态：done=做过（有回执）/ failed=没做成（配 proof 写失败原因）/ heard=听说或转述（未验证）。不传=不标；标了之后注入和检索都带〔做过〕〔没做成〕〔听说〕前缀，避免把「听说」「没做成」当既成事实说",
+          },
+          proof: {
+            type: "string",
+            description: "可选：状态依据——done 给回执（工具/链接/文件），failed 给失败原因，heard 给谁说的",
           },
           cue: {
             type: "object",
