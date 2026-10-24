@@ -1506,8 +1506,67 @@ function appendCompactionRecord(record) {
   return record;
 }
 
-// 等 compaction/end 时才落记录：把 compaction/summary 里的事实先按 id 暂存
-const compactionPending = new Map();
+// ---- 压缩后自检（2026-10-24 加）----
+// 背景：官方压缩会丢东西（社区实测：约 26% 的信息没进摘要，压缩后旧轮次的推理过程不再回传）。
+// 我们拦不住它丢，但能在压缩刚发生时检查「最要紧的三样还在不在」，缺了就留一条提醒——
+// 缺口无法消除，至少让它可见（用户 2026-10-24 原话：「信息缺口估计没法完美解决，想办法和自己和解更务实」）。
+const COMPACTION_CHECK_FILE = () => path.join(PATHS.deep, "compaction-check.jsonl")
+
+function compactionSelfCheck(sessionId) {
+  const checks = []
+  // 1) 核心卡：存在、非空、关键段还在
+  let coreText = ""
+  try {
+    coreText = fs.existsSync(PATHS.core) ? fs.readFileSync(PATHS.core, "utf8") : ""
+  } catch {}
+  const coreChars = coreText.replace(/\s+/g, "").length
+  const hasAnchor = /【约定】|【主线】|【称呼】/.test(coreText)
+  checks.push({ name: "核心卡", ok: coreChars > 0 && hasAnchor, detail: `字=${coreChars} 关键段=${hasAnchor ? "有" : "缺"}` })
+  // 2) 便签：未办完的事最近还写过（7 天内）
+  let memoRecent = 0
+  try {
+    const rows = fs.existsSync(PATHS.memo) ? fs.readFileSync(PATHS.memo, "utf8").trim().split("\n").filter(Boolean) : []
+    const cut = Date.now() - 7 * 86400e3
+    memoRecent = rows.filter((line) => {
+      try {
+        const t = Date.parse(JSON.parse(line).ts)
+        return Number.isFinite(t) && t > cut
+      } catch {
+        return false
+      }
+    }).length
+  } catch {}
+  checks.push({ name: "便签（未办事项）", ok: memoRecent > 0, detail: `近 7 天 ${memoRecent} 条` })
+  // 3) 检索通路：guide 索引还在（索引没了，深层记忆等于翻不到）
+  let guideLines = 0
+  try {
+    guideLines = fs.existsSync(PATHS.guide) ? fs.readFileSync(PATHS.guide, "utf8").trim().split("\n").filter(Boolean).length : 0
+  } catch {}
+  checks.push({ name: "检索索引", ok: guideLines > 0, detail: `guide ${guideLines} 行` })
+
+  const ok = checks.every((c) => c.ok)
+  const record = { at: nowISO(), session: String(sessionId || ""), ok, checks }
+  try {
+    fs.mkdirSync(PATHS.deep, { recursive: true })
+    fs.appendFileSync(COMPACTION_CHECK_FILE(), JSON.stringify(record) + "\n", "utf8")
+  } catch {}
+  if (!ok) {
+    const missing = checks.filter((c) => !c.ok).map((c) => c.name).join("、")
+    diag(`压缩后自检未通过：${missing}`)
+    try {
+      writeMemory({
+        layer: "memo",
+        text: `⚠️ 压缩后自检：${missing} 缺失（${record.at}）。压缩可能把要紧的东西一起带走了——下轮先核对核心卡和未办事项，再继续长任务。`,
+        tags: ["工作", "记忆"],
+      })
+    } catch (e) {
+      diag(`压缩后自检写便签失败：${e?.message || e}`)
+    }
+  }
+  return record
+}
+
+// 等 compaction/end 时才落记录：把 compaction/summary 里的事实先按 id 暂存const compactionPending = new Map();
 
 function ingestCompactionEvent(ev, sessionId) {
   const type = String(ev?.type || "");
@@ -3947,6 +4006,13 @@ function apply(ctx) {
           const r = res.record;
           diag(`压缩记录：${r.id} ${r.trigger === "command" ? "手动 /compact" : "自动"}，压掉 ${r.items} 条 / 省 ${r.savedTokens} tokens（${r.provider || "?"}/${r.model || "?"}）session=${sid}`);
           noteCompaction(sid, 1, r.model ? `官方 compaction 引擎（${r.provider}/${r.model}）` : "官方 compaction 引擎（dsh-compaction-basic）");
+          // 视频教训（BV1Anea6UEqu）：压缩会静默丢东西，压完立刻体检三样要紧的还在不在
+          try {
+            const chk = compactionSelfCheck(sid);
+            diag(`压缩后自检：${chk.ok ? "通过" : "未通过 → " + chk.checks.filter((c) => !c.ok).map((c) => c.name).join("、")}`);
+          } catch (e) {
+            diag(`压缩后自检失败：${e?.message || e}`);
+          }
           backupAsync("compress");
         }
         scheduleAutoSummary({ session: sess || sessionRefs.get(sid) || null }, sid, "compaction", 3000);
@@ -4678,6 +4744,6 @@ const plugin = {
   apply,
 };
 
-export { apply, loadState, saveState, STATE_PATH, buildInjectionText, buildStateInjection, modelRouteOf, sessionMemory, createSessionMemory, sessionMemoryPaths, normalizeSessionId, isSpecialKey, doctorReport, renderDoctor, resolveBackupDir, probeWritable, coreInjection, coreOptions, createLines, lexicalScore, linesConfigDefaults, linesPaths, qualitativeOf, topicTokens, behaviorHint, createSocial, detectScene, normalizeName, personIdOf, registerSocialTools, sceneLabel, socialConfigDefaults, socialPaths, searchSocialContext, backupPolicySummary, compactionStats, compactionStatusLine, noteCompaction, noteAutoSummary, compressCallsIn, nativeCompactionsIn, compressToolCallsIn, compressionKindOf, readCompactionLog, appendCompactionRecord, ingestCompactionEvent, compactionRecords, compactionSuiteDetected, listAutoSummaries, deleteAutoSummary, setFactCaller, factOptions, readFactCandidates, writeFactCandidates, pendingFactCandidates, factCandidateStats, factStatusLine, parseFactCandidates, buildFactPrompt, factInventory, isDuplicateFact, extractFactCandidates, acceptFactCandidate, rejectFactCandidate, updateBackupPolicy, updateAutoSummaryPolicy, autoSummaryConfigView, registerBackupApi, hostIsLoopback, readRequestBody, searchMemory, writeMemory, backupNow, pruneOldSnapshots, shouldSkipBackup, backupStampOf, writeTurnDiary, isCompressionEvent, renameAssetImage, listAssetImages, buildStats, tagsOf, validateTags, checkedTags, TAG_VOCAB, clearMemos, recallSession, decodeSessionFile, relationInjectionLines, archiveRelationOverflow, locateMemory, jsonlHasHash, rebuildGuide, guideStats, guideLinks, guideNodes, addSource, listSources, findSources, sourceStats, loadSources, sourceTag, entryProvenance, sourceIndex, runAutoSummary, pendingTurns, autoSummaryOptions, buildAutoSummaryEntry, parseSummaryText, summaryInputOf, callWithThinkingRetry, setAutoSummaryCaller, defaultConfig, loadConfig, AUTO_SUMMARY_PREFIX };
+export { apply, loadState, saveState, STATE_PATH, buildInjectionText, buildStateInjection, modelRouteOf, sessionMemory, createSessionMemory, sessionMemoryPaths, normalizeSessionId, isSpecialKey, doctorReport, renderDoctor, resolveBackupDir, probeWritable, coreInjection, coreOptions, createLines, lexicalScore, linesConfigDefaults, linesPaths, qualitativeOf, topicTokens, behaviorHint, createSocial, detectScene, normalizeName, personIdOf, registerSocialTools, sceneLabel, socialConfigDefaults, socialPaths, searchSocialContext, backupPolicySummary, compactionStats, compactionStatusLine, noteCompaction, noteAutoSummary, compressCallsIn, nativeCompactionsIn, compressToolCallsIn, compressionKindOf, readCompactionLog, appendCompactionRecord, ingestCompactionEvent, compactionRecords, compactionSelfCheck, compactionSuiteDetected, listAutoSummaries, deleteAutoSummary, setFactCaller, factOptions, readFactCandidates, writeFactCandidates, pendingFactCandidates, factCandidateStats, factStatusLine, parseFactCandidates, buildFactPrompt, factInventory, isDuplicateFact, extractFactCandidates, acceptFactCandidate, rejectFactCandidate, updateBackupPolicy, updateAutoSummaryPolicy, autoSummaryConfigView, registerBackupApi, hostIsLoopback, readRequestBody, searchMemory, writeMemory, backupNow, pruneOldSnapshots, shouldSkipBackup, backupStampOf, writeTurnDiary, isCompressionEvent, renameAssetImage, listAssetImages, buildStats, tagsOf, validateTags, checkedTags, TAG_VOCAB, clearMemos, recallSession, decodeSessionFile, relationInjectionLines, archiveRelationOverflow, locateMemory, jsonlHasHash, rebuildGuide, guideStats, guideLinks, guideNodes, addSource, listSources, findSources, sourceStats, loadSources, sourceTag, entryProvenance, sourceIndex, runAutoSummary, pendingTurns, autoSummaryOptions, buildAutoSummaryEntry, parseSummaryText, summaryInputOf, callWithThinkingRetry, setAutoSummaryCaller, defaultConfig, loadConfig, AUTO_SUMMARY_PREFIX };
 export default plugin;
 
