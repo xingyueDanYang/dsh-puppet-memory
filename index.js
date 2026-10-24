@@ -3609,6 +3609,74 @@ function rejectFactCandidate(id) {
 // 插件主体
 // ---------------------------------------------------------------------------
 
+// ---- 工作台移交（2026-10-24 加）----
+// 需求来自用户 2026-10-23 12:34 的私聊（当时没接，10-24 补做）：PC 上不同会话/工作区之间移交任务，
+// 别再靠人肉复制上下文——留一条结构化交接，另一个会话 pull 走，取走即标记 taken。
+const HANDOFF_KEEP = 200
+function handoffPath() {
+  return path.join(PATHS.deep, "handoff.jsonl")
+}
+function readHandoffs() {
+  return readJsonl(handoffPath())
+}
+function writeHandoffs(rows) {
+  writeJsonl(handoffPath(), rows.slice(-HANDOFF_KEEP))
+}
+
+function fmtHandoff(row, heading) {
+  const lines = [heading, "摘要：" + row.summary]
+  if (row.nextSteps && row.nextSteps.length) lines.push("下一步：" + row.nextSteps.join("；"))
+  if (row.blockers && row.blockers.length) lines.push("卡点：" + row.blockers.join("；"))
+  if (row.files && row.files.length) lines.push("相关文件：" + row.files.join("；"))
+  if (row.from) lines.push("来自会话：" + row.from)
+  return lines.join("\n")
+}
+
+function sendHandoff(args = {}) {
+  const summary = String(args.summary || "").trim()
+  if (!summary) throw new Error("summary 不能为空：一句话说清「在做什么、做到哪」")
+  const toArr = (v) => (Array.isArray(v) ? v : v ? [v] : []).map((x) => String(x).trim()).filter(Boolean)
+  const row = {
+    id: "ho-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 6),
+    at: nowISO(),
+    from: String(args.from || "").trim(),
+    target: String(args.target || "any").trim() || "any",
+    summary,
+    nextSteps: toArr(args.next_steps || args.nextSteps),
+    blockers: toArr(args.blockers),
+    files: toArr(args.files),
+    status: "open",
+  }
+  const rows = readHandoffs()
+  rows.push(row)
+  writeHandoffs(rows)
+  return fmtHandoff(row, "已留下交接 " + row.id + "（target=" + row.target + "）") + "\n另一张桌子用 memory_handoff action=pull 取走。"
+}
+
+function pullHandoff(args = {}) {
+  const target = String(args.target || "").trim()
+  const rows = readHandoffs()
+  const pick = rows.find((r) => r.status === "open" && (r.target === "any" || (target && r.target === target)))
+  if (!pick) return "没有待取的交接。用 action=list 看全部（别的 target 下的不会被取走）。"
+  pick.status = "taken"
+  pick.takenAt = nowISO()
+  pick.takenBy = target || "unspecified"
+  writeHandoffs(rows)
+  return fmtHandoff(pick, "取到交接 " + pick.id + "（已标记 taken）")
+}
+
+function listHandoffs(args = {}) {
+  const status = String(args.status || "").trim()
+  const limit = Math.min(50, Math.max(1, Number(args.limit) || 10))
+  let rows = readHandoffs()
+  if (status) rows = rows.filter((r) => r.status === status)
+  rows = rows.slice(-limit).reverse()
+  if (!rows.length) return "还没有交接记录。"
+  return rows
+    .map((r) => r.id + " · " + r.at + " · " + r.status + " · from=" + (r.from || "?") + " → " + r.target + "\n  " + r.summary)
+    .join("\n")
+}
+
 function apply(ctx) {
   diag(`apply 开始：tools=${typeof ctx?.tools} inject=${typeof ctx?.inject} node=${process.version}`);
   // v0.25：目录写不了不能让整个插件死掉——记诊断、继续注册工具，让 memory_doctor 能报出来
@@ -4602,6 +4670,39 @@ function apply(ctx) {
     });
 
     ctx.tools.register({
+      name: "memory_handoff",
+      description:
+        "工作台移交（PC 上不同会话/工作区之间）：action=send 留一条结构化交接（summary 必填：在做什么/做到哪；可带 next_steps 下一步、blockers 卡点、files 相关文件、target 指定给哪个会话，默认 any）；action=pull 取一条待取的交接（取走即标记 taken，不会被第二个会话重复取）；action=list 看全部（可筛 status=open/taken）。用于「这个会话做不完了，交给下一张桌子」——比人肉复制上下文可靠。",
+      parameters: {
+        type: "object",
+        properties: {
+          action: { type: "string", enum: ["send", "pull", "list"], description: "默认 list" },
+          summary: { type: "string", description: "action=send 必填：一句话说清在做什么、做到哪" },
+          next_steps: { type: "array", items: { type: "string" }, description: "下一步要做的事（可多条）" },
+          blockers: { type: "array", items: { type: "string" }, description: "卡点/风险（可多条）" },
+          files: { type: "array", items: { type: "string" }, description: "相关文件路径（可多条）" },
+          from: { type: "string", description: "哪个会话留的（可省略）" },
+          target: { type: "string", description: "交给哪个会话 id；默认 any（谁先 pull 谁拿走）" },
+          status: { type: "string", enum: ["open", "taken"], description: "action=list 时可筛状态" },
+          limit: { type: "number", description: "action=list 返回条数，默认 10" },
+        },
+        required: ["action"],
+      },
+      output,
+      async execute(args) {
+        try {
+          ensureDirs()
+          const action = String(args?.action || "list")
+          if (action === "send") return sendHandoff(args || {})
+          if (action === "pull") return pullHandoff(args || {})
+          if (action === "list") return listHandoffs(args || {})
+          return "未知 action：" + action + "（可选 send / pull / list）"
+        } catch (err) {
+          return "工作台移交失败：" + (err?.message || err)
+        }
+      },
+    });
+    ctx.tools.register({
       name: "memory_guide",
       description:
         "引导索引（树干的链接）：action=rebuild 重建「线索→条目」映射（标签共现 + cue 共现 + 时间邻近 + 替代链，保留溢出转存条目）；action=stats 看索引概况与孤立节点；action=links 查某条记忆的关联/被引用/替代链（给 keyword 或 hash）。",
@@ -4744,6 +4845,6 @@ const plugin = {
   apply,
 };
 
-export { apply, loadState, saveState, STATE_PATH, buildInjectionText, buildStateInjection, modelRouteOf, sessionMemory, createSessionMemory, sessionMemoryPaths, normalizeSessionId, isSpecialKey, doctorReport, renderDoctor, resolveBackupDir, probeWritable, coreInjection, coreOptions, createLines, lexicalScore, linesConfigDefaults, linesPaths, qualitativeOf, topicTokens, behaviorHint, createSocial, detectScene, normalizeName, personIdOf, registerSocialTools, sceneLabel, socialConfigDefaults, socialPaths, searchSocialContext, backupPolicySummary, compactionStats, compactionStatusLine, noteCompaction, noteAutoSummary, compressCallsIn, nativeCompactionsIn, compressToolCallsIn, compressionKindOf, readCompactionLog, appendCompactionRecord, ingestCompactionEvent, compactionRecords, compactionSelfCheck, compactionSuiteDetected, listAutoSummaries, deleteAutoSummary, setFactCaller, factOptions, readFactCandidates, writeFactCandidates, pendingFactCandidates, factCandidateStats, factStatusLine, parseFactCandidates, buildFactPrompt, factInventory, isDuplicateFact, extractFactCandidates, acceptFactCandidate, rejectFactCandidate, updateBackupPolicy, updateAutoSummaryPolicy, autoSummaryConfigView, registerBackupApi, hostIsLoopback, readRequestBody, searchMemory, writeMemory, backupNow, pruneOldSnapshots, shouldSkipBackup, backupStampOf, writeTurnDiary, isCompressionEvent, renameAssetImage, listAssetImages, buildStats, tagsOf, validateTags, checkedTags, TAG_VOCAB, clearMemos, recallSession, decodeSessionFile, relationInjectionLines, archiveRelationOverflow, locateMemory, jsonlHasHash, rebuildGuide, guideStats, guideLinks, guideNodes, addSource, listSources, findSources, sourceStats, loadSources, sourceTag, entryProvenance, sourceIndex, runAutoSummary, pendingTurns, autoSummaryOptions, buildAutoSummaryEntry, parseSummaryText, summaryInputOf, callWithThinkingRetry, setAutoSummaryCaller, defaultConfig, loadConfig, AUTO_SUMMARY_PREFIX };
+export { apply, loadState, saveState, STATE_PATH, buildInjectionText, buildStateInjection, modelRouteOf, sessionMemory, createSessionMemory, sessionMemoryPaths, normalizeSessionId, isSpecialKey, doctorReport, renderDoctor, resolveBackupDir, probeWritable, coreInjection, coreOptions, createLines, lexicalScore, linesConfigDefaults, linesPaths, qualitativeOf, topicTokens, behaviorHint, createSocial, detectScene, normalizeName, personIdOf, registerSocialTools, sceneLabel, socialConfigDefaults, socialPaths, searchSocialContext, backupPolicySummary, compactionStats, compactionStatusLine, noteCompaction, noteAutoSummary, compressCallsIn, nativeCompactionsIn, compressToolCallsIn, compressionKindOf, readCompactionLog, appendCompactionRecord, ingestCompactionEvent, compactionRecords, compactionSelfCheck, sendHandoff, pullHandoff, listHandoffs, compactionSuiteDetected, listAutoSummaries, deleteAutoSummary, setFactCaller, factOptions, readFactCandidates, writeFactCandidates, pendingFactCandidates, factCandidateStats, factStatusLine, parseFactCandidates, buildFactPrompt, factInventory, isDuplicateFact, extractFactCandidates, acceptFactCandidate, rejectFactCandidate, updateBackupPolicy, updateAutoSummaryPolicy, autoSummaryConfigView, registerBackupApi, hostIsLoopback, readRequestBody, searchMemory, writeMemory, backupNow, pruneOldSnapshots, shouldSkipBackup, backupStampOf, writeTurnDiary, isCompressionEvent, renameAssetImage, listAssetImages, buildStats, tagsOf, validateTags, checkedTags, TAG_VOCAB, clearMemos, recallSession, decodeSessionFile, relationInjectionLines, archiveRelationOverflow, locateMemory, jsonlHasHash, rebuildGuide, guideStats, guideLinks, guideNodes, addSource, listSources, findSources, sourceStats, loadSources, sourceTag, entryProvenance, sourceIndex, runAutoSummary, pendingTurns, autoSummaryOptions, buildAutoSummaryEntry, parseSummaryText, summaryInputOf, callWithThinkingRetry, setAutoSummaryCaller, defaultConfig, loadConfig, AUTO_SUMMARY_PREFIX };
 export default plugin;
 
