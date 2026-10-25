@@ -2,27 +2,106 @@
 
 > 读者是 AI，不是人。人是懒的——他会说「装一下」然后什么都不管。你就是那个执行者。
 > 一次装对，别让用户来回折腾。下面是硬步骤，不要跳。
+>
+> **2026-10-25 修订**：上一版假设「解压好的文件夹已经摆在眼前」，被另一个 AI 实测判为「对第一次拿到压缩包的同样不够用」——缺源路径、缺 md5 命令、缺「调用工具」到底怎么调。这一版把这三处补成可执行的具体动作。
 
 ## 一、先确认三件事
 
 1. **profile 是哪个**：`~/.dsh/profiles/` 下哪个目录里有 `package.json` 就是候选；通常只有一个（`desktop` 或 `web`）。
    - 只有一个 → 直接用。
    - 有两个以上 → 问用户「你平时开的是哪个」，**别猜**。装进不用的 profile = 装了等于没装。
+   - 确认命令（Windows PowerShell）：
+     ```powershell
+     Get-ChildItem "$env:USERPROFILE\.dsh\profiles" -Directory | ForEach-Object { "$($_.Name)  " + (Test-Path (Join-Path $_.FullName 'package.json')) }
+     ```
+     输出里 `True` 的就是候选。
 2. **有没有旧版**：目标目录 `node_modules/dsh-puppet-memory` 已存在 → 先把它改名成 `dsh-puppet-memory.bak-<日期>`，不要直接覆盖（用户的配置和记忆可能在里面有引用）。
+   ```powershell
+   $dstRoot = "$env:USERPROFILE\.dsh\profiles\<profile>\node_modules"
+   if (Test-Path "$dstRoot\dsh-puppet-memory") {
+     Rename-Item "$dstRoot\dsh-puppet-memory" "dsh-puppet-memory.bak-$(Get-Date -Format yyyyMMdd-HHmm)"
+   }
+   ```
 3. **记忆数据在哪**：`~/.dsh/memory/`。**只读，不要动**，也不要「顺手清理」。
 
 ## 二、装（复制，不是安装器）
 
-把压缩包解压出来的 `dsh-puppet-memory` 文件夹**整个**复制到：
+### 2.1 先把「源」和「目标」写成两条绝对路径
 
+这一步不能跳——上一版就死在这：只写了「把解压出来的文件夹复制过去」，读者不知道从哪复制、复制到哪。
+
+**要问用户的是「完整路径」，不是「哪个文件夹」**（只给文件夹，你拿不到 Expand-Archive 要的完整文件名和版本）：
+
+> 请把**压缩包的完整路径**发我（例如 `C:\Users\你\Downloads\dsh-puppet-memory-0.34.0.zip`）；
+> 如果你已经解压好了，直接给**解压出来的 dsh-puppet-memory 文件夹的完整路径**也行。
+
+拿到之后，按情况走下面三条之一，最后都要落到一个变量 `$srcDir`（源文件夹绝对路径）：
+
+**情况 A：用户给的是压缩包完整路径（zip）**
+```powershell
+$zip   = "C:\Users\<用户>\Downloads\dsh-puppet-memory-0.34.0.zip"   # 用户给的完整路径
+Expand-Archive -Path $zip -DestinationPath "$env:TEMP\dsh-install" -Force
+$srcDir = "$env:TEMP\dsh-install\dsh-puppet-memory"
 ```
-~/.dsh/profiles/<profile>/node_modules/dsh-puppet-memory/
+（如果解压出来的第一层不叫 `dsh-puppet-memory`，用 `Get-ChildItem "$env:TEMP\dsh-install"` 看一眼，把 `$srcDir` 指向那个真实目录。）
+
+**情况 B：用户给的是压缩包完整路径（tgz）**
+```powershell
+$tgz = "C:\Users\<用户>\Downloads\dsh-puppet-memory-0.34.0.tgz"
+New-Item -ItemType Directory -Force -Path "$env:TEMP\dsh-install\tgz" | Out-Null
+tar -xzf $tgz -C "$env:TEMP\dsh-install\tgz"          # 解出来是 package\
+Rename-Item "$env:TEMP\dsh-install\tgz\package" "dsh-puppet-memory"
+$srcDir = "$env:TEMP\dsh-install\tgz\dsh-puppet-memory"
 ```
 
-复制完检查：这个路径下**直接**能看见 `index.js`、`client.js`、`package.json`。
-**如果里面还套了一层 `dsh-puppet-memory/`，就是错了**——这是最常见的失败，现象是重启后工具全部不出现。
+**情况 C：用户给的是已解压好的文件夹**
+```powershell
+$srcDir = "D:\Downloads\dsh-puppet-memory-0.34.0\dsh-puppet-memory"   # 用户给的完整路径，原样用
+```
+（用户给的是包那一层、不是里面那层时，先看一层：`Get-ChildItem $srcDir`，如果里面只有一个 `dsh-puppet-memory` 目录，`$srcDir` 要指到它。）
 
-然后用 md5 对比三件（源 vs 目标），必须一致：`index.js`、`client.js`、`package.json`。
+**目标路径**（固定写法，把 `<profile>` 换成第一节确认过的那个）：
+```powershell
+$dstDir = "$env:USERPROFILE\.dsh\profiles\<profile>\node_modules\dsh-puppet-memory"
+```
+
+**复制**（三种情况通用）：
+```powershell
+Copy-Item -Path $srcDir -Destination (Split-Path $dstDir) -Recurse -Force
+```
+
+写清两条路径再动手——`Write-Output "src=$srcDir"; Write-Output "dst=$dstDir"`，自己看一眼对不对。
+
+### 2.2 复制完必须做的两个检查
+
+```powershell
+# ① 看它「里面」有没有那三个文件——直接看见才算对
+Get-ChildItem $dstDir -File | Select-Object -ExpandProperty Name
+```
+期望输出里**必须有**：`index.js`、`client.js`、`package.json`。
+
+```powershell
+# ② 有没有「多套一层」——如果这里还能再进一个 dsh-puppet-memory 目录，就是错了
+Test-Path "$dstDir\dsh-puppet-memory"
+```
+期望输出：`False`。输出 `True` 就说明多套了一层，把里层的内容移上来、删掉多余那层。
+
+**多套一层是最常见的失败**，现象是重启后工具全部不出现。
+
+### 2.3 用 md5 对比三件（源 vs 目标）
+
+```powershell
+foreach ($f in 'index.js','client.js','package.json') {
+  $src = Join-Path $srcDir $f
+  $dst = Join-Path $dstDir $f
+  if (-not (Test-Path $src)) { "缺源文件: $src"; continue }
+  "{0,-14} src={1}" -f $f, (Get-FileHash $src -Algorithm MD5).Hash
+  "{0,-14} dst={1}" -f "",   (Get-FileHash $dst -Algorithm MD5).Hash
+}
+```
+期望输出：同一行的 `src` 和 `dst` 两串 32 位十六进制**完全相同**。不一样就是复制坏了或源包本身有问题，重做一次，别硬着头皮往下走。
+
+（没有 PowerShell 的环境：`certutil -hashfile <文件> MD5`，同样比两边的输出。）
 
 ## 三、让用户重启 DSH
 
@@ -30,18 +109,29 @@
 
 ## 四、验证（必须做完再回话）
 
-1. 让会话里调用 `memory_doctor`：大部分 `✓`、最多一条 `⚠ 设置页接口`（离线时正常）→ 通过。
-2. 调用 `memory_stats`：能看到「行为记忆 / 核心卡 / 三线 / 社交 / 备份」几行 → 在干活。
-3. 设置里应多出三个页面：记忆备份 / 自动摘要 / 会话记忆。
+> 这里的「调用」= **在 DSH 会话里对 agent 说话**（例如「跑一下 memory_doctor」），不是让你在命令行执行。文档里所有 `memory_xxx` 都是工具名，人话就是「让 AI 用一下这个工具」。
+
+1. **memory_doctor**：大部分 `✓`、最多一条 `⚠ 设置页接口`（离线时正常）→ 通过。期望看到的样子（节选）：
+   ```
+   ✓ 记忆目录可写：C:\Users\<用户>\.dsh\memory
+   ✓ 核心卡 core.md：存在
+   ✓ 插件版本：<版本号>
+   ```
+2. **memory_stats**：能看到「核心卡 / 关系 / 日记 / 备份」几行 → 在干活。
+3. **设置里应多出三个页面**（记忆备份 / 自动摘要 / 会话记忆）——**这一条你看不到，必须让用户确认**：
+   > 麻烦打开 DSH 设置看一下，「记忆备份 / 自动摘要 / 会话记忆」这三个页面在不在？在的话回我一声，这项才算验完。
+
+   没等到用户回这句，就不算验证通过——前两条你能自己跑，第三条要人看，别自己替用户点头。
 
 ## 五、失败了怎么定位（按现象查，别乱试）
 
 | 现象 | 原因 | 修法 |
 |---|---|---|
-| 重启后工具全都没有，`memory_doctor` 不认识 | 路径多套了一层，或装到了别的 profile | 看第二节的检查点；确认 `~/.dsh/profiles/<用户实际用的>/node_modules/dsh-puppet-memory/package.json` 存在 |
+| 重启后工具全都没有，`memory_doctor` 不认识 | 路径多套了一层，或装到了别的 profile | 看 2.2；确认 `~/.dsh/profiles/<用户实际用的>/node_modules/dsh-puppet-memory/package.json` 存在 |
 | 工具在，但记忆是空的 | 用户是新装，正常 | 不用修，聊两句就有了 |
 | `memory_doctor` 报目录不可写 | 文件夹权限 | 按它输出的「→」处理，不要自己 chmod 整个 `.dsh` |
 | 备份失败但说「已回退」 | 用户以前配了不存在的盘（如 F 盘） | 正常回退，不是错误；要改去 设置→记忆备份 |
+| md5 对不上 | 复制不完整 / 源包损坏 | 重新解压、重新复制；两次都对不上就告诉用户包可能坏了 |
 
 ## 六、红线
 
@@ -49,3 +139,4 @@
 - 不覆盖 `~/.dsh/memory/config.json`；要改配置走设置页或 `memory_control`。
 - 不修改 `~/.dsh/sessions/`（会话原文，只读）。
 - 装完别自作主张卸载插件自带的文档和测试目录，用户以后要用。
+- **拿不到源路径就问，不要猜**：猜错路径比装不上更费时间。
