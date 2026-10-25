@@ -5,3 +5,4 @@ test/.smoke/
 *.tgz
 .DS_Store
 Thumbs.db
+*.zip
