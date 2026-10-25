@@ -38,6 +38,8 @@
      Get-ChildItem "$env:USERPROFILE\.dsh\profiles" -Directory | ForEach-Object { "$($_.Name)  " + (Test-Path (Join-Path $_.FullName 'package.json')) }
      ```
      输出里 `True` 的就是候选。
+   - **一个候选都没有**（`~/.dsh/profiles` 不存在，或所有目录都返回 `False`）→ 说明这台机器还没正常装/开过 DSH，**停下来问用户**：「DSH 装在哪、打开过吗？」不要自己造 profile 目录。
+   - 除了「只有一个 / 多个」还有第三种：**目录存在但为空** → 同上，先问用户。
 2. **有没有旧版**：目标目录 `node_modules/dsh-puppet-memory` 已存在 → 先把它改名成 `dsh-puppet-memory.bak-<日期>`，不要直接覆盖（用户的配置和记忆可能在里面有引用）。
    ```powershell
    $dstRoot = "$env:USERPROFILE\.dsh\profiles\<profile>\node_modules"
@@ -99,6 +101,8 @@ $dstDir = "$env:USERPROFILE\.dsh\profiles\<profile>\node_modules\dsh-puppet-memo
 
 **复制**（三种情况通用）：
 ```powershell
+# 全新 profile 里 node_modules 可能根本不存在，先建父目录，否则 Copy-Item 会直接失败
+New-Item -ItemType Directory -Force -Path (Split-Path $dstDir) | Out-Null
 Copy-Item -Path $srcDir -Destination (Split-Path $dstDir) -Recurse -Force
 ```
 
@@ -153,7 +157,7 @@ foreach ($f in 'index.js','client.js','package.json') {
    ```
 3. **从源重新复制一次**（回到 2.1，`$srcDir` 不变），再跑一次 2.2 和 2.3。
 4. **两次都对不上** → 源包本身有问题：停下，告诉用户「包可能损坏，请重新下载」，**不要**继续安装，也不要把 `.bak` 删掉。然后按用户回答二选一：
-   - 用户说**去重新下载** → 等他给新包，从第 0 节重新来；
+   - 用户说**去重新下载** → 先把上面第 2 步留下的 `dsh-puppet-memory.broken-*` **删掉**（别堆着，下轮会混淆），等他给新包，从第 0 节重新来；
    - 用户说**先算了** → 进下面第 5 步收尾。
 5. **收尾（恢复原状）**：删掉 `dsh-puppet-memory.broken-*`；
    - 有 `.bak` → 把它改名回 `dsh-puppet-memory`（`Rename-Item "$dstRoot\dsh-puppet-memory.bak-*" "dsh-puppet-memory"`），重启 DSH，等于回到装之前；
@@ -175,7 +179,7 @@ foreach ($f in 'index.js','client.js','package.json') {
    ✓ 核心卡 core.md：存在
    ✓ 插件版本：<版本号>
    ```
-2. **memory_stats**：能看到「核心卡 / 关系 / 日记 / 备份」几行 → 在干活。
+2. **memory_stats**：能跑出「核心卡 / 关系 / 日记 / 备份」这几行结构就算在干活——**数值是 0 或很多行空的是正常的**（全新安装本来就没有记忆，聊两句就有了）。这一点和第五节「工具在但记忆是空的 = 正常」是同一件事，不矛盾。
 3. **设置里应多出三个页面**（记忆备份 / 自动摘要 / 会话记忆）——**这一条你看不到，必须让用户确认**：
    > 麻烦打开 DSH 设置看一下，「记忆备份 / 自动摘要 / 会话记忆」这三个页面在不在？在的话回我一声，这项才算验完。
 
@@ -187,6 +191,7 @@ foreach ($f in 'index.js','client.js','package.json') {
 |---|---|
 | `memory_doctor` 这个工具根本不存在 | 插件没加载 → 转第五节第 1 行（多套一层/装错 profile） |
 | 工具在，但输出里报错（目录不可写等） | 按报错那行的「→」处理；处理不了转第五节 |
+| `memory_stats` 连结构行都跑不出来 | 转第五节（工具在但状态读不出，属加载不全） |
 | 用户回「设置里没有这三个页面」 | 先确认他真的完全重启过（不是最小化）；确认重启了还没有 → 转第五节 |
 | 三项都过 | 装完了，回话：装好、版本号、用户可见的变化（多了三个设置页、能跨会话记事了） |
 
@@ -196,6 +201,8 @@ foreach ($f in 'index.js','client.js','package.json') {
 |---|---|---|
 | 重启后工具全都没有，`memory_doctor` 不认识 | 路径多套了一层，或装到了别的 profile | 看 2.2；确认 `~/.dsh/profiles/<用户实际用的>/node_modules/dsh-puppet-memory/package.json` 存在 |
 | 工具在，但记忆是空的 | 用户是新装，正常 | 不用修，聊两句就有了 |
+| 目标目录里缺 `index.js/client.js/package.json` | 复制错了层 / 没复制成功（2.2 第一项没过） | 回 2.1 重算 `$srcDir` 重新复制；两次都不对就按 2.4 判坏、转 5.1 收尾 |
+| `node_modules` 目录本身不存在（全新 profile） | 这个 profile 里还没装过任何插件 | 先建目录再复制：`New-Item -ItemType Directory -Force -Path (Split-Path $dstDir)`，然后回 2.1 |
 | `memory_doctor` 报目录不可写 | 文件夹权限 | 按它输出的「→」处理，不要自己 chmod 整个 `.dsh` |
 | 备份失败但说「已回退」 | 用户以前配了不存在的盘（如 F 盘） | 正常回退，不是错误；要改去 设置→记忆备份 |
 | md5 对不上 | 复制不完整 / 源包损坏 | 按 2.4 的 1→5 步走：坏的改名留证据、重新复制，两次不对就判定包损坏并停 |
