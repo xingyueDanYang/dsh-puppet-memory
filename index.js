@@ -452,6 +452,9 @@ function ensureDirs() {
   }
 }
 
+// v0.34（B-52）：写入守卫的默认上限（字数）。只拦明显超长的粘贴，不拦正常条目。
+const WRITE_GUARD_DEFAULT_MAX = { relation: 1200, saying: 1200, user: 800, memo: 4000, note: 8000, persona: 1200, diary: 4000 };
+
 function defaultConfig() {
   return {
     version: 1,
@@ -508,6 +511,18 @@ function defaultConfig() {
       maxTokens: 3000,
       timeoutMs: 20000,
     },
+    // v0.34（B-52）：写入守卫。只挡「明显坏数据」——乱码、超长、把注入块整段复制进记忆；
+    // 判不准的一律放行（宁可少拦，不可误杀）。dedupe 负责把近似重复的便签/笔记合并掉。
+    writeGuard: {
+      enabled: true,
+      dedupe: true,
+      // 字符二元组 Jaccard 相似度下限；1 = 只有完全相同才合并（等于关闭近似合并）
+      dedupeThreshold: 0.82,
+      maxChars: WRITE_GUARD_DEFAULT_MAX,
+    },
+    // v0.34（B-52）：要点层。检索结果顶部先给几条「要点 + hash」速览，扫一眼就知道要不要读原文。
+    // 抽取式：只取第一句，不调模型、不花 token，也没有额外存储。
+    brief: { enabled: true, prependHits: 3, maxChars: 60 },
     // 多人记忆（v0.21 骨架）：默认关闭注入。关着时工具仍可显式读写 social/，但一个字都不注入。
     // 只有 enabled=true 且能从 session header 认出场景（群/私聊 + 对象）时，才按场景注入档案。
     social: socialConfigDefaults(),
@@ -530,6 +545,9 @@ function loadConfig() {
   merged.sessions = { ...defaultConfig().sessions, ...(cfg.sessions || {}) };
   merged.autoSummary = { ...defaultConfig().autoSummary, ...(cfg.autoSummary || {}) };
   merged.facts = { ...defaultConfig().facts, ...(cfg.facts || {}) };
+  merged.writeGuard = { ...defaultConfig().writeGuard, ...(cfg.writeGuard || {}) };
+  merged.writeGuard.maxChars = { ...defaultConfig().writeGuard.maxChars, ...((cfg.writeGuard && cfg.writeGuard.maxChars) || {}) };
+  merged.brief = { ...defaultConfig().brief, ...(cfg.brief || {}) };
   merged.social = { ...defaultConfig().social, ...(cfg.social || {}) };
   merged.social.sceneKeys = { ...defaultConfig().social.sceneKeys, ...((cfg.social && cfg.social.sceneKeys) || {}) };
   merged.lines = { ...defaultConfig().lines, ...(cfg.lines || {}) };
@@ -574,6 +592,88 @@ function keywordsOf(text) {
     .slice(0, 8)
     .map(([k]) => k);
 }
+
+// ---------------------------------------------------------------------------
+// v0.34（B-52）：写入守卫——乱码 / 超长 / 把注入块整段复制进记忆，一律拒收；
+// 近似重复的便签和笔记自动合并。判断口径：只拦「明显是坏的」，拿不准就放行。
+// ---------------------------------------------------------------------------
+const MOJIBAKE_SIGNS = ["锟斤拷", "烫烫烫", "屯屯屯", "Ã¢", "â€", "ï¼", "ã€"];
+const INJECTION_SIGNS = [
+  /<\/?puppet_[a-z_]+>/i,
+  /以下是跨会话记忆摘要/,
+  /【核心记忆】/,
+  /【行为规则】/,
+  /【当前状态】/,
+  /由\s*(木偶记忆|Puppet Memory)\s*插件自动注入/,
+];
+
+function writeGuardOf(cfg = null) {
+  const base = defaultConfig().writeGuard;
+  const given = (cfg || loadConfig()) || {};
+  const wg = given.writeGuard && typeof given.writeGuard === "object" ? given.writeGuard : {};
+  const threshold = Number(wg.dedupeThreshold);
+  return {
+    enabled: wg.enabled !== false,
+    dedupe: wg.dedupe !== false,
+    dedupeThreshold: Number.isFinite(threshold) ? Math.min(1, Math.max(0.5, threshold)) : base.dedupeThreshold,
+    maxChars: { ...base.maxChars, ...(wg.maxChars && typeof wg.maxChars === "object" ? wg.maxChars : {}) },
+  };
+}
+
+// 返回拒绝原因（字符串）或 null（放行）
+function writeGuardCheck(text, layer, guard) {
+  const body = String(text ?? "");
+  if (!body.trim()) return null;
+  const limit = Number(guard?.maxChars?.[layer]) || 0;
+  if (limit > 0 && body.length > limit) {
+    return `内容太长：${body.length} 字，${layer} 上限 ${limit} 字。拆成几条更小的，或只留要点。`;
+  }
+  if (body.includes("\ufffd")) return "内容里含替换字符（�），像是粘贴或编码坏了。给一份干净的文本再来。";
+  for (const sign of MOJIBAKE_SIGNS) {
+    if (body.includes(sign)) return `内容里出现乱码片段「${sign}」，多半是编码错了。给一份干净的文本来。`;
+  }
+  for (const re of INJECTION_SIGNS) {
+    if (re.test(body)) {
+      return "内容里带着注入块的结构标记（比如 <puppet_memory>、【核心记忆】），那是系统注入的格式，不能当记忆存。改成你自己的话。";
+    }
+  }
+  return null;
+}
+
+// 字符二元组集合；用于近似重复判断（中文没有空格，二元组比词切分稳）
+function textBigrams(text) {
+  const norm = String(text ?? "").toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, "");
+  const set = new Set();
+  if (!norm) return set;
+  if (norm.length === 1) set.add(norm);
+  for (let i = 0; i + 1 < norm.length; i += 1) set.add(norm.slice(i, i + 2));
+  return set;
+}
+
+function similarityOf(a, b) {
+  const A = textBigrams(a);
+  const B = textBigrams(b);
+  if (!A.size || !B.size) return 0;
+  let inter = 0;
+  for (const x of A) if (B.has(x)) inter += 1;
+  const jaccard = inter / (A.size + B.size - inter);
+  // 长度接近时再用「包含度」兜一层：同一段话后面补一句，二元组会被拉低，但包含度仍然很高。
+  // 长度差得远就不认——短句出现在长文里不等于重复。
+  const ratio = Math.min(A.size, B.size) / Math.max(A.size, B.size);
+  const containment = inter / Math.min(A.size, B.size);
+  return ratio >= 0.7 && containment >= 0.9 ? Math.max(jaccard, containment * 0.95) : jaccard;
+}
+
+// 在最近 300 条里找最相近的一条；textOf 决定拿哪个字段比
+function findNearDuplicate(rows, text, threshold, textOf) {
+  let best = null;
+  for (let i = rows.length - 1; i >= 0 && i >= rows.length - 300; i -= 1) {
+    const score = similarityOf(text, textOf(rows[i]));
+    if (score >= threshold && (!best || score > best.best)) best = { index: i, best: score, row: rows[i] };
+  }
+  return best;
+}
+
 
 // 标签：人工给的分类标签（比自动关键词稳定，可跨层检索），最多 6 个、每个 ≤16 字。
 // 兼容字符串入参（按 ，,、;；空格 切分）和数组入参；逐个去空白、去重。
@@ -1809,6 +1909,26 @@ function searchSocialContext(social, args = {}) {
   return `当前场景：${sceneLabel(scene)}\n${lines.join("\n")}`;
 }
 
+// v0.34（B-52）：要点层——从一条记忆里压出一句能扫读的话（抽取式，不调模型、零成本）。
+// 只取第一句、去掉标记和层前缀、超长截断；原文仍在，要点只是索引。
+const BRIEF_MAX_CHARS = 60;
+function briefOf(entry, max = BRIEF_MAX_CHARS) {
+  const raw = String(
+    (entry && (entry.brief || entry.text || entry.meaning || entry.user || entry.assistant || entry.keyword)) || "",
+  );
+  let s = raw
+    .replace(/<[^>]+>/g, " ")
+    .replace(/【[^】]{1,8}】/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!s) return "";
+  const firstSentence = s.match(/^.{0,200}?[。！？；!?;]/);
+  if (firstSentence) s = firstSentence[0];
+  s = s.replace(/[。！？；!?;、,，]+$/, "").trim();
+  if (!s) return "";
+  return s.length > max ? `${s.slice(0, Math.max(1, max - 1))}…` : s;
+}
+
 function searchMemory(query, layer, limit, tag) {
   const q = String(query || "").trim();
   const tagQuery = String(tag || "").trim();
@@ -1872,6 +1992,7 @@ function searchMemory(query, layer, limit, tag) {
       }
       const hs = entry?.hash ? `  #${entry.hash}` : "";
       const provenance = entryProvenance(entry, srcIdx);
+      const brief = briefOf(entry);
       // 评分：命中词数 × 2 + 时间近因 + 使用次数 + 标签命中 + 重要标记
       const tsMs = Date.parse(entry?.ts || "");
       const ageDays = Number.isFinite(tsMs) ? (Date.now() - tsMs) / 86400000 : 999;
@@ -1886,7 +2007,7 @@ function searchMemory(query, layer, limit, tag) {
       const score = matched * 2 + recency + useBonus + tagBonus + importantBonus + cueBonus - autoSummaryPenalty;
       // A-40：检索结果也带〔做过〕〔没做成〕〔听说〕前缀，和注入保持一致；
       // 原始 JSONL 行仍附在后面（含 state/proof 字段，可回查依据）。
-      hits.push({ text: `${where}:${index + 1}  ${statePrefixOf(entry)}${clip(line, 300)}${hs}${suffix}${provenance ? `  ${provenance}` : ""}`, score, strict: textHit, ts: Number.isFinite(tsMs) ? tsMs : 0 });
+      hits.push({ text: `${where}:${index + 1}  ${statePrefixOf(entry)}${clip(line, 300)}${hs}${suffix}${provenance ? `  ${provenance}` : ""}`, score, strict: textHit, ts: Number.isFinite(tsMs) ? tsMs : 0, brief, hash: entry?.hash ? String(entry.hash) : "" });
     });
   }
   if (!hits.length) {
@@ -1896,10 +2017,26 @@ function searchMemory(query, layer, limit, tag) {
   const strict = hits.filter((h) => h.strict);
   const pool = strict.length ? strict : hits;
   const ordered = pool.sort((a, b) => b.score - a.score || (b.ts || 0) - (a.ts || 0));
-  return ordered
-    .slice(0, max)
-    .map((h) => h.text)
-    .join("\n");
+  const picked = ordered.slice(0, max);
+  // v0.34（B-52）要点层：命中不多时先给一份「要点 + hash」速览，扫一眼就能判断要不要看原文。
+  // brief.enabled=false 或 prependHits=0 就退回老格式。
+  const briefCfg = (() => {
+    try {
+      return loadConfig().brief || {};
+    } catch {
+      return {};
+    }
+  })();
+  const lines = picked.map((h) => h.text);
+  const prependCount = briefCfg.enabled === false ? 0 : Math.max(0, Number(briefCfg.prependHits ?? 3) || 0);
+  if (prependCount > 0) {
+    const heads = picked
+      .filter((h) => h.brief)
+      .slice(0, prependCount)
+      .map((h, i) => `${i + 1}. ${h.brief}${h.hash ? `  #${h.hash}` : ""}`);
+    if (heads.length) lines.unshift(`【要点】\n${heads.join("\n")}`);
+  }
+  return lines.join("\n");
 }
 
 // 用 hash 或关键词精确定位原文：返回 文件:行号 + 完整 JSONL 行
@@ -2885,9 +3022,36 @@ function renameAssetImage(name, newName) {
 // 工具
 // ---------------------------------------------------------------------------
 
+// v0.34（B-52）：把新内容并进已有条目。保留原 hash 当身份（不再改），只刷新时间、
+// 合并标签/备注；新文本明显更全（多两成以上）才替换正文，避免被更短的版本覆盖。
+function mergeIntoEntry(old, incoming, ts, tags) {
+  const next = { ...old, ts };
+  const merged = mergeTags(tags || [], old.tags || []);
+  if (merged.length) next.tags = merged; else delete next.tags;
+  const newText = String(incoming.text || "");
+  const oldText = String(old.text || "");
+  if (newText.length > oldText.length * 1.2) {
+    next.text = newText;
+    next.keywords = keywordsOf(newText);
+  }
+  if (incoming.note && !old.note) next.note = incoming.note;
+  if (incoming.state && !next.state) next.state = incoming.state;
+  if (incoming.proof && !next.proof) next.proof = incoming.proof;
+  next.mergedCount = Number(old.mergedCount || 0) + 1;
+  next.lastMergedAt = ts;
+  return next;
+}
+
 function writeMemory(args) {
   const layer = String(args.layer || "");
   const ts = nowISO();
+  // v0.34（B-52）：写入守卫。整段被拒时返回原因，让模型改文案而不是让脏数据进库。
+  const guard = writeGuardOf();
+  const guardReject = (text, layerName) => {
+    if (!guard.enabled) return null;
+    const bad = writeGuardCheck(text, layerName, guard);
+    return bad ? `写入被拒（${layerName}）：${bad}` : null;
+  };
   // 备注：跟着条目一起落盘（人类可读的补充说明，不参与检索主键），并在 guide 索引里留一份
   const userNote = String(args.note || "").trim();
   // 原文 / 转述：文字条目和资产出处都存这个标记，显示时用来区分「照抄原话」还是「自己概括」
@@ -2905,6 +3069,10 @@ function writeMemory(args) {
     const keyword = String(args.keyword || "").trim();
     const meaning = String(args.meaning || "").trim();
     if (!keyword || !meaning) return "relation 需要 keyword 和 meaning";
+    {
+      const rejected = guardReject(`${keyword}｜${meaning}`, "relation");
+      if (rejected) return rejected;
+    }
     const hash = sha1(`${keyword}|${meaning}`).slice(0, 16);
     const { tags, note: tagsNote } = checkedTags(args.tags);
     const entry = { kind: "relation", ts, keyword, meaning, links: String(args.links || ""), source: String(args.source || ""), useCount: 0, hash };
@@ -2954,6 +3122,10 @@ function writeMemory(args) {
   if (layer === "user") {
     const text = String(args.text || args.meaning || "").trim();
     if (!text) return "user 需要 text（要记住的用户信息）";
+    {
+      const rejected = guardReject(text, "user");
+      if (rejected) return rejected;
+    }
     const keyword = String(args.keyword || "").trim();
     const hash = sha1(keyword ? `${keyword}|${text}` : text).slice(0, 16);
     const { tags, note: tagsNote } = checkedTags(args.tags);
@@ -2990,6 +3162,10 @@ function writeMemory(args) {
   if (layer === "memo") {
     const text = String(args.text || "").trim();
     if (!text) return "memo 需要 text（便签内容）";
+    {
+      const rejected = guardReject(text, "memo");
+      if (rejected) return rejected;
+    }
     const { tags, note: tagsNote } = checkedTags(args.tags);
     const entry = { kind: "memo", ts, text, hash: sha1(text).slice(0, 16) };
     markState(entry);
@@ -2999,6 +3175,15 @@ function writeMemory(args) {
     if (tags.length) entry.tags = cleanTags(tags);
     if (userNote) entry.note = userNote;
     if (jsonlHasHash(PATHS.memo, entry.hash)) return `已存在相同内容的便签（hash ${entry.hash}），未重复写入；可用 memory_locate 定位原文`;
+    if (guard.dedupe) {
+      const rows = readJsonl(PATHS.memo);
+      const dup = findNearDuplicate(rows, text, guard.dedupeThreshold, (r) => r.text || "");
+      if (dup) {
+        rows[dup.index] = mergeIntoEntry(dup.row, entry, ts, entry.tags);
+        writeJsonl(PATHS.memo, rows);
+        return `内容与已有便签相近（相似度 ${dup.best.toFixed(2)}），已合并进 ${rows[dup.index].hash}，没新增条目`;
+      }
+    }
     appendJsonl(PATHS.memo, entry);
     appendJsonl(PATHS.guide, { ts, kind: "memo", tags, hash: entry.hash, file: "behavior/memo.jsonl", ...(userNote ? { note: userNote } : {}) });
     return `已写入便签（${text.length} 字）${tagsPrefixOf(entry)}${tagsNote}（hash ${entry.hash}）`;
@@ -3007,6 +3192,10 @@ function writeMemory(args) {
   if (layer === "note") {
     const text = String(args.text || "").trim();
     if (!text) return "note 需要 text";
+    {
+      const rejected = guardReject(text, "note");
+      if (rejected) return rejected;
+    }
     const { tags, note: tagsNote } = checkedTags(args.tags);
     const entry = { kind: "note", ts, text, keywords: keywordsOf(text), hash: sha1(text).slice(0, 16) };
     markState(entry);
@@ -3020,6 +3209,16 @@ function writeMemory(args) {
     if (audios.length) entry.audios = audioEntries(audios);
     autoRegisterSources(entry, entryMediaRefs(entry));
     if (jsonlHasHash(PATHS.notes, entry.hash)) return `已存在相同内容的笔记（hash ${entry.hash}），未重复写入；可用 memory_locate 定位原文`;
+    if (guard.dedupe) {
+      const rows = readJsonl(PATHS.notes);
+      const dup = findNearDuplicate(rows, text, guard.dedupeThreshold, (r) => r.text || "");
+      if (dup) {
+        rows[dup.index] = mergeIntoEntry(dup.row, entry, ts, entry.tags);
+        writeJsonl(PATHS.notes, rows);
+        appendJsonl(PATHS.guide, { ts, kind: "note-merge", keywords: rows[dup.index].keywords, tags: rows[dup.index].tags || [], hash: rows[dup.index].hash, file: "behavior/notes.jsonl", note: `近似重复，合并进旧条目（相似度 ${dup.best.toFixed(2)}）` });
+        return `内容与已有笔记相近（相似度 ${dup.best.toFixed(2)}），已合并进 ${rows[dup.index].hash}，没新增条目`;
+      }
+    }
     appendJsonl(PATHS.notes, entry);
     appendJsonl(PATHS.guide, { ts, kind: "note", keywords: entry.keywords, tags, hash: entry.hash, file: "behavior/notes.jsonl", ...(userNote ? { note: userNote } : {}) });
     return `已写入笔记（${text.length} 字）${tagsPrefixOf(entry)}${mediaNote(images, audios, errors)}${tagsNote}（hash ${entry.hash}）`;
@@ -3029,6 +3228,10 @@ function writeMemory(args) {
     const keyword = String(args.keyword || "").trim();
     const meaning = String(args.meaning || "").trim();
     if (!keyword || !meaning) return "saying 需要 keyword 和 meaning";
+    {
+      const rejected = guardReject(`${keyword}｜${meaning}`, "saying");
+      if (rejected) return rejected;
+    }
     const hash = sha1(`${keyword}|${meaning}`).slice(0, 16);
     const { tags, note: tagsNote } = checkedTags(args.tags);
     const entry = { kind: "saying", ts, keyword, meaning, source: String(args.source || ""), links: String(args.links || ""), useCount: 0, hash };
@@ -3078,6 +3281,16 @@ function writeMemory(args) {
   if (layer === "persona") {
     const text = String(args.text || "").trim();
     if (!text) return "persona 需要 text";
+    {
+      const rejected = guardReject(text, "persona");
+      if (rejected) return rejected;
+    }
+    // 人设是追加式文件，同一行写两遍会真的出现两遍，这里按归一化后的整行去重
+    const normalizePersonaLine = (s) => String(s || "").replace(/^[-*]\s*/, "").replace(/\s+/g, "").trim();
+    const personaNow = readText(PATHS.persona);
+    if (personaNow && normalizePersonaLine(personaNow).includes(normalizePersonaLine(text))) {
+      return "人设文件里已经有这条了（内容相同），没重复追加。";
+    }
     const { images, audios, errors } = mediaRefsOf(args);
     const block = /^#/.test(text) ? `\n${text}\n` : `\n- ${text}\n`;
     const imgBlock = images.map((r) => `![记忆图片](assets/${r.name})`).join("\n");
@@ -3092,6 +3305,10 @@ function writeMemory(args) {
   if (layer === "diary") {
     const text = String(args.text || "").trim();
     if (!text) return "diary 需要 text";
+    {
+      const rejected = guardReject(text, "diary");
+      if (rejected) return rejected;
+    }
     const { tags, note: tagsNote } = checkedTags(args.tags);
     const file = path.join(PATHS.diaryDir, `${monthKey()}.jsonl`);
     const entry = { kind: "manual-diary", ts, text, keywords: keywordsOf(text), hash: sha1(text + ts).slice(0, 16) };
@@ -3106,6 +3323,11 @@ function writeMemory(args) {
     // 重要事件：注入时优先显示，不会被后写的日常挤掉
     if (args.important === true) entry.important = true;
     if (readJsonl(file).some((r) => r && r.text === text)) return "这个月已经记过同样的日记内容，未重复写入";
+    if (guard.dedupe) {
+      const rows = readJsonl(file);
+      const dup = findNearDuplicate(rows, text, guard.dedupeThreshold, (r) => r.text || r.user || "");
+      if (dup) return `本月已有内容相近的日记（相似度 ${dup.best.toFixed(2)}，hash ${dup.row.hash}），没重复写。要补充细节就写进便签或笔记。`;
+    }
     const { images, audios, errors } = mediaRefsOf(args);
     if (images.length) entry.images = imageEntries(images);
     if (audios.length) entry.audios = audioEntries(audios);
@@ -5086,6 +5308,6 @@ const plugin = {
   apply,
 };
 
-export { apply, loadState, saveState, STATE_PATH, buildInjectionText, buildStateInjection, modelRouteOf, sessionMemory, createSessionMemory, sessionMemoryPaths, normalizeSessionId, isSpecialKey, doctorReport, renderDoctor, resolveBackupDir, probeWritable, coreInjection, coreOptions, createLines, lexicalScore, linesConfigDefaults, linesPaths, qualitativeOf, topicTokens, behaviorHint, createSocial, detectScene, normalizeName, personIdOf, registerSocialTools, sceneLabel, socialConfigDefaults, socialPaths, searchSocialContext, backupPolicySummary, compactionStats, compactionStatusLine, noteCompaction, noteAutoSummary, compressCallsIn, nativeCompactionsIn, compressToolCallsIn, compressionKindOf, readCompactionLog, appendCompactionRecord, ingestCompactionEvent, compactionRecords, compactionSelfCheck, dutyBoardData, sendHandoff, pullHandoff, listHandoffs, compactionSuiteDetected, listAutoSummaries, deleteAutoSummary, setFactCaller, factOptions, readFactCandidates, writeFactCandidates, pendingFactCandidates, factCandidateStats, factStatusLine, parseFactCandidates, buildFactPrompt, factInventory, isDuplicateFact, extractFactCandidates, acceptFactCandidate, rejectFactCandidate, updateBackupPolicy, updateAutoSummaryPolicy, autoSummaryConfigView, registerBackupApi, hostIsLoopback, readRequestBody, searchMemory, writeMemory, backupNow, pruneOldSnapshots, shouldSkipBackup, backupStampOf, writeTurnDiary, isCompressionEvent, renameAssetImage, listAssetImages, buildStats, tagsOf, validateTags, checkedTags, TAG_VOCAB, clearMemos, recallSession, decodeSessionFile, relationInjectionLines, archiveRelationOverflow, locateMemory, jsonlHasHash, rebuildGuide, guideStats, guideLinks, guideNodes, addSource, listSources, findSources, sourceStats, loadSources, sourceTag, entryProvenance, sourceIndex, runAutoSummary, pendingTurns, autoSummaryOptions, buildAutoSummaryEntry, buildSummaryPrompt, summaryStyleLine, parseSummaryText, summaryInputOf, callWithThinkingRetry, setAutoSummaryCaller, defaultConfig, loadConfig, AUTO_SUMMARY_PREFIX };
+export { apply, loadState, saveState, STATE_PATH, buildInjectionText, buildStateInjection, modelRouteOf, sessionMemory, createSessionMemory, sessionMemoryPaths, normalizeSessionId, isSpecialKey, doctorReport, renderDoctor, resolveBackupDir, probeWritable, coreInjection, coreOptions, createLines, lexicalScore, linesConfigDefaults, linesPaths, qualitativeOf, topicTokens, behaviorHint, createSocial, detectScene, normalizeName, personIdOf, registerSocialTools, sceneLabel, socialConfigDefaults, socialPaths, searchSocialContext, backupPolicySummary, compactionStats, compactionStatusLine, noteCompaction, noteAutoSummary, compressCallsIn, nativeCompactionsIn, compressToolCallsIn, compressionKindOf, readCompactionLog, appendCompactionRecord, ingestCompactionEvent, compactionRecords, compactionSelfCheck, dutyBoardData, sendHandoff, pullHandoff, listHandoffs, compactionSuiteDetected, listAutoSummaries, deleteAutoSummary, setFactCaller, factOptions, readFactCandidates, writeFactCandidates, pendingFactCandidates, factCandidateStats, factStatusLine, parseFactCandidates, buildFactPrompt, factInventory, isDuplicateFact, extractFactCandidates, acceptFactCandidate, rejectFactCandidate, updateBackupPolicy, updateAutoSummaryPolicy, autoSummaryConfigView, registerBackupApi, hostIsLoopback, readRequestBody, searchMemory, writeMemory, briefOf, writeGuardOf, writeGuardCheck, similarityOf, backupNow, pruneOldSnapshots, shouldSkipBackup, backupStampOf, writeTurnDiary, isCompressionEvent, renameAssetImage, listAssetImages, buildStats, tagsOf, validateTags, checkedTags, TAG_VOCAB, clearMemos, recallSession, decodeSessionFile, relationInjectionLines, archiveRelationOverflow, locateMemory, jsonlHasHash, rebuildGuide, guideStats, guideLinks, guideNodes, addSource, listSources, findSources, sourceStats, loadSources, sourceTag, entryProvenance, sourceIndex, runAutoSummary, pendingTurns, autoSummaryOptions, buildAutoSummaryEntry, buildSummaryPrompt, summaryStyleLine, parseSummaryText, summaryInputOf, callWithThinkingRetry, setAutoSummaryCaller, defaultConfig, loadConfig, AUTO_SUMMARY_PREFIX };
 export default plugin;
 
