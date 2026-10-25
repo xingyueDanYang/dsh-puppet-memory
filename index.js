@@ -675,6 +675,23 @@ function findNearDuplicate(rows, text, threshold, textOf) {
 }
 
 
+// v0.35（B-56）别名：用户可能用的其他说法，写进条目一起参与检索。
+// 和 tags 的区别——tags 是分类（固定词表），aliases 是「同一个东西的不同叫法」（自由词）。
+const MAX_ALIASES = 8;
+function aliasesOf(value) {
+  const raw = Array.isArray(value) ? value : typeof value === "string" ? value.split(/[，,、;；\s]+/) : [];
+  const out = [];
+  for (const item of raw) {
+    const v = String(item || "").trim().slice(0, 16);
+    if (v && !out.includes(v)) out.push(v);
+    if (out.length >= MAX_ALIASES) break;
+  }
+  return out;
+}
+function mergeAliases(a, b) {
+  return [...new Set([...(Array.isArray(a) ? a : []), ...(Array.isArray(b) ? b : [])])].slice(0, MAX_ALIASES);
+}
+
 // 标签：人工给的分类标签（比自动关键词稳定，可跨层检索），最多 6 个、每个 ≤16 字。
 // 兼容字符串入参（按 ，,、;；空格 切分）和数组入参；逐个去空白、去重。
 const MAX_TAGS = 6;
@@ -834,7 +851,8 @@ function relationInjectionLines(cfg, ratio = 0.55, suppressed = new Set()) {
   const maxChars = Math.max(200, Number(cfg?.inject?.maxChars) || DEFAULT_INJECT_MAX);
   const budget = Math.round(maxChars * Math.max(0.3, Math.min(0.8, Number(ratio) || 0.55)));
   // v0.28：本会话屏蔽的条目直接不进注入（数据还在，随时可解除）
-  const relations = tailJsonl(PATHS.relations, 12).filter((r) => !suppressed.has(String(r?.hash || "")));
+  // v0.35（B-55）：标废的条目不进注入；屏蔽表同理（数据都还在，可恢复）
+  const relations = tailJsonl(PATHS.relations, 12).filter((r) => !suppressed.has(String(r?.hash || "")) && !r?.voided);
   const relLines = relations.map((r) => {
     const n = imageLabelsOf(r).length;
     const a = audioLabelsOf(r).length;
@@ -945,7 +963,7 @@ function buildInjectionText(cfg, coreUsed = 0, lines = null, opts = {}) {
   const { kept: relLines, budget } = relationInjectionLines(cfg, primary === "companion" ? 0.62 : 0.5, suppressed);
   if (relLines.length) parts.push(`【关系】${clip(relLines.join("；"), budget)}`);
 
-  const notes = tailJsonl(PATHS.notes, 6).filter((n) => !suppressed.has(String(n?.hash || "")));
+  const notes = tailJsonl(PATHS.notes, 6).filter((n) => !suppressed.has(String(n?.hash || "")) && !n?.voided);
   if (notes.length) {
     parts.push(`【最近笔记】${clip(notes.map((n) => n.text).join("；"), primary === "learning" ? 420 : 320)}`);
   }
@@ -959,7 +977,7 @@ function buildInjectionText(cfg, coreUsed = 0, lines = null, opts = {}) {
   // 日记：重要事件（important:true）优先占位，再用最近日记补齐，最多 4 条
   const diaryFiles = dirJsonl(PATHS.diaryDir);
   const recentDiaries = (diaryFiles.length ? tailJsonl(diaryFiles[diaryFiles.length - 1], 40) : []).filter(
-    (d) => !suppressed.has(String(d?.hash || "")),
+    (d) => !suppressed.has(String(d?.hash || "")) && !d?.voided,
   );
   const pickedDiaries = [];
   for (let i = recentDiaries.length - 1; i >= 0 && pickedDiaries.length < 2; i -= 1) {
@@ -1929,7 +1947,7 @@ function briefOf(entry, max = BRIEF_MAX_CHARS) {
   return s.length > max ? `${s.slice(0, Math.max(1, max - 1))}…` : s;
 }
 
-function searchMemory(query, layer, limit, tag) {
+function searchMemory(query, layer, limit, tag, includeVoided = false) {
   const q = String(query || "").trim();
   const tagQuery = String(tag || "").trim();
   const tagNeedle = tagQuery.toLowerCase();
@@ -1964,6 +1982,8 @@ function searchMemory(query, layer, limit, tag) {
     lines.forEach((line, index) => {
       if (!line.trim()) return;
       const entry = parseJsonlLine(line);
+      // v0.35（B-55）：标废条目默认不进检索结果（includeVoided=true 才出现，行首带〔已标废〕）
+      if (entry?.voided && !includeVoided) return;
       const low = line.toLowerCase();
       const matched = tokens.filter((t) => low.includes(t)).length;
       const textHit = !tokens.length || matched === tokens.length;
@@ -1996,7 +2016,9 @@ function searchMemory(query, layer, limit, tag) {
       // 评分：命中词数 × 2 + 时间近因 + 使用次数 + 标签命中 + 重要标记
       const tsMs = Date.parse(entry?.ts || "");
       const ageDays = Number.isFinite(tsMs) ? (Date.now() - tsMs) / 86400000 : 999;
-      const recency = ageDays <= 7 ? 3 : ageDays <= 30 ? 1.5 : ageDays <= 180 ? 0.5 : 0;
+      // v0.34.1（B-56 评测结论）：近因权重下调（3/1.5/0.5 → 1/0.6/0.2）。原来「7 天内 +3」等于一个半命中词，
+      // 会把旧的正确条目压下去——「时间是相关性的劣质代理」，时间只该当小权重项。
+      const recency = ageDays <= 7 ? 1 : ageDays <= 30 ? 0.6 : ageDays <= 180 ? 0.2 : 0;
       const useBonus = Math.min(Math.max(Number(entry?.useCount || 0), 0), 5) * 0.5;
       const tagBonus = tagNeedle && tagHit ? 2 : 0;
       const importantBonus = entry?.important ? 2 : 0;
@@ -2007,7 +2029,8 @@ function searchMemory(query, layer, limit, tag) {
       const score = matched * 2 + recency + useBonus + tagBonus + importantBonus + cueBonus - autoSummaryPenalty;
       // A-40：检索结果也带〔做过〕〔没做成〕〔听说〕前缀，和注入保持一致；
       // 原始 JSONL 行仍附在后面（含 state/proof 字段，可回查依据）。
-      hits.push({ text: `${where}:${index + 1}  ${statePrefixOf(entry)}${clip(line, 300)}${hs}${suffix}${provenance ? `  ${provenance}` : ""}`, score, strict: textHit, ts: Number.isFinite(tsMs) ? tsMs : 0, brief, hash: entry?.hash ? String(entry.hash) : "" });
+      const voidMark = entry?.voided ? `〔已标废：${clip(String(entry.voided.reason || ""), 40)}〕` : "";
+      hits.push({ text: `${where}:${index + 1}  ${voidMark}${statePrefixOf(entry)}${clip(line, 300)}${hs}${suffix}${provenance ? `  ${provenance}` : ""}`, score, strict: textHit, ts: Number.isFinite(tsMs) ? tsMs : 0, brief, hash: entry?.hash ? String(entry.hash) : "" });
     });
   }
   if (!hits.length) {
@@ -2039,6 +2062,94 @@ function searchMemory(query, layer, limit, tag) {
   return lines.join("\n");
 }
 
+// v0.35（B-55）：标废 / 恢复。数据不删，只加 voided:{at,reason}；
+// 标废后不进注入、默认不进检索，但 memory_locate 仍能查到原因（可回查是底线）。
+function voidMemory(args) {
+  const action = String(args?.action || "void");
+  const reason = String(args?.reason || "").trim();
+  const hash = String(args?.hash || "").trim().toLowerCase();
+  const keyword = String(args?.keyword || "").trim().toLowerCase();
+  const layer = String(args?.layer || "all");
+  if (action !== "unvoid" && !reason) {
+    return "标废必须给 reason（为什么作废）。没有原因就等于无声删除，以后查不回来——要彻底删请用手工改库。";
+  }
+  if (!hash && !keyword) return "需要 hash（记忆结果里的 #xxxx，可只给前 8 位）或 keyword + layer";
+
+  // 只动「真条目」的文件：guide / array / sessions 是索引，按 hash 也会命中，
+  // 但标废索引没有意义（还会让计数翻倍），所以这里不复用 searchTargets。
+  const behaviorFiles = [PATHS.relations, PATHS.notes, ...dirJsonl(PATHS.diaryDir)];
+  const deepFiles = [PATHS.sayings];
+  const voidTargets =
+    layer === "behavior" ? behaviorFiles
+      : layer === "deep" ? deepFiles
+        : layer === "user" ? [PATHS.user]
+          : layer === "memo" ? [PATHS.memo]
+            : layer === "array" ? []
+              : [...behaviorFiles, ...deepFiles, PATHS.user, PATHS.memo];
+  const targets = [];
+  for (const file of voidTargets) {
+    if (!fs.existsSync(file)) continue;
+    const rows = readJsonl(file);
+    let touched = 0;
+    rows.forEach((entry, i) => {
+      if (!entry) return;
+      const entryHash = String(entry.hash || "").toLowerCase();
+      const byHash = hash && (entryHash === hash || (hash.length >= 8 && entryHash.startsWith(hash)));
+      const byKeyword =
+        keyword &&
+        (String(entry.keyword || "").toLowerCase() === keyword ||
+          String(entry.keyword || "").toLowerCase().includes(keyword) ||
+          String(entry.text || "").toLowerCase().includes(keyword));
+      if (!byHash && !byKeyword) return;
+      if (action === "unvoid") {
+        if (!entry.voided) return;
+        delete entry.voided;
+      } else {
+        entry.voided = { at: nowISO(), reason: clip(reason, 200) };
+      }
+      touched += 1;
+    });
+    if (touched) targets.push({ file, rows, touched });
+  }
+  // guide 是索引：同一个 hash 会在那里留一行，检索时也会被扫到。
+  // 标废要连索引一起标，否则「默认不返回」会被索引行绕过。
+  const guideRows = readJsonl(PATHS.guide);
+  let guideTouched = 0;
+  guideRows.forEach((entry) => {
+    if (!entry) return;
+    const entryHash = String(entry.hash || "").toLowerCase();
+    const hit = hash && (entryHash === hash || (hash.length >= 8 && entryHash.startsWith(hash)));
+    if (!hit) return;
+    if (action === "unvoid") {
+      if (!entry.voided) return;
+      delete entry.voided;
+    } else {
+      entry.voided = { at: nowISO(), reason: clip(reason, 200) };
+    }
+    guideTouched += 1;
+  });
+  if (guideTouched) writeJsonl(PATHS.guide, guideRows);
+
+  if (!targets.length && !guideTouched) {
+    return action === "unvoid" ? "没找到「已标废」的匹配条目，无法恢复" : "没找到匹配的条目（hash 或 keyword + layer 给对了吗）";
+  }
+  let total = 0;
+  for (const t of targets) {
+    writeJsonl(t.file, t.rows);
+    total += t.touched;
+    appendJsonl(PATHS.guide, {
+      ts: nowISO(),
+      kind: action === "unvoid" ? "unvoid" : "void",
+      hash: "",
+      file: rel(t.file),
+      reason: clip(reason, 120),
+    });
+  }
+  return action === "unvoid"
+    ? `已恢复 ${total} 条：重新进注入与检索。`
+    : `已标废 ${total} 条：不再进注入、默认不进检索；memory_locate 仍能查到原因（${clip(reason, 40)}）。要撤销用 memory_void action=unvoid。`;
+}
+
 // 用 hash 或关键词精确定位原文：返回 文件:行号 + 完整 JSONL 行
 function locateMemory(args) {
   const hash = String(args?.hash || "").trim().toLowerCase();
@@ -2066,8 +2177,11 @@ function locateMemory(args) {
         const where = file === PATHS.persona ? "behavior/persona.md" : rel(file);
         const kind = entry?.kind || "line";
         const provenance = entryProvenance(entry, srcIdx);
+        const voidNote = entry?.voided
+          ? `  〔已标废：${entry.voided.reason || "无原因"}　${String(entry.voided.at || "").slice(0, 16)}〕`
+          : "";
         out.push(
-          `${where}:${index + 1}  [${kind}${entry?.keyword ? ` · ${entry.keyword}` : ""}]  hash=${entry?.hash || "无"}${provenance ? `  ${provenance}` : ""}\n  ${clip(line, 800)}`,
+          `${where}:${index + 1}  [${kind}${entry?.keyword ? ` · ${entry.keyword}` : ""}]  hash=${entry?.hash || "无"}${provenance ? `  ${provenance}` : ""}${voidNote}\n  ${clip(line, 800)}`,
         );
       });
   }
@@ -3045,6 +3159,8 @@ function mergeIntoEntry(old, incoming, ts, tags) {
 function writeMemory(args) {
   const layer = String(args.layer || "");
   const ts = nowISO();
+  // v0.35（B-56）：别名，一次解析，各层共用
+  const aliases = aliasesOf(args.aliases);
   // v0.34（B-52）：写入守卫。整段被拒时返回原因，让模型改文案而不是让脏数据进库。
   const guard = writeGuardOf();
   const guardReject = (text, layerName) => {
@@ -3076,6 +3192,7 @@ function writeMemory(args) {
     const hash = sha1(`${keyword}|${meaning}`).slice(0, 16);
     const { tags, note: tagsNote } = checkedTags(args.tags);
     const entry = { kind: "relation", ts, keyword, meaning, links: String(args.links || ""), source: String(args.source || ""), useCount: 0, hash };
+    if (aliases.length) entry.aliases = aliases;
     markState(entry);
     if (quote) entry.quote = quote;
     const cue = cueOf(args.cue);
@@ -3101,6 +3218,9 @@ function writeMemory(args) {
       if (!entry.quote && old.quote) entry.quote = old.quote;
       if (!entry.state && old.state) entry.state = old.state;
       if (!entry.proof && old.proof) entry.proof = old.proof;
+      if (old.voided && !entry.voided) entry.voided = old.voided; // 标废是状态，不因内容更新而消失
+      const relAliases = mergeAliases(entry.aliases, old.aliases);
+      if (relAliases.length) entry.aliases = relAliases; else delete entry.aliases;
       if (old.hash && old.hash !== entry.hash) {
         const prev = Array.isArray(old.supersedes) ? old.supersedes.filter(Boolean) : [];
         entry.supersedes = [...prev, old.hash].slice(-5);
@@ -3130,6 +3250,7 @@ function writeMemory(args) {
     const hash = sha1(keyword ? `${keyword}|${text}` : text).slice(0, 16);
     const { tags, note: tagsNote } = checkedTags(args.tags);
     const entry = { kind: "user", ts, keyword, text, hash };
+    if (aliases.length) entry.aliases = aliases;
     markState(entry);
     const userSource = String(args.source || "").trim();
     if (userSource) entry.source = userSource;
@@ -3146,8 +3267,11 @@ function writeMemory(args) {
       if (!entry.quote && old.quote) entry.quote = old.quote;
       if (!entry.state && old.state) entry.state = old.state;
       if (!entry.proof && old.proof) entry.proof = old.proof;
+      if (old.voided && !entry.voided) entry.voided = old.voided;
       const merged = mergeTags(entry.tags, old.tags);
       if (merged.length) entry.tags = merged; else delete entry.tags;
+      const userAliases = mergeAliases(entry.aliases, old.aliases);
+      if (userAliases.length) entry.aliases = userAliases; else delete entry.aliases;
       rows[at] = entry;
       updated = true;
     } else {
@@ -3168,6 +3292,7 @@ function writeMemory(args) {
     }
     const { tags, note: tagsNote } = checkedTags(args.tags);
     const entry = { kind: "memo", ts, text, hash: sha1(text).slice(0, 16) };
+    if (aliases.length) entry.aliases = aliases;
     markState(entry);
     const memoSource = String(args.source || "").trim();
     if (memoSource) entry.source = memoSource;
@@ -3198,6 +3323,7 @@ function writeMemory(args) {
     }
     const { tags, note: tagsNote } = checkedTags(args.tags);
     const entry = { kind: "note", ts, text, keywords: keywordsOf(text), hash: sha1(text).slice(0, 16) };
+    if (aliases.length) entry.aliases = aliases;
     markState(entry);
     const noteSource = String(args.source || "").trim();
     if (noteSource) entry.source = noteSource;
@@ -3235,6 +3361,7 @@ function writeMemory(args) {
     const hash = sha1(`${keyword}|${meaning}`).slice(0, 16);
     const { tags, note: tagsNote } = checkedTags(args.tags);
     const entry = { kind: "saying", ts, keyword, meaning, source: String(args.source || ""), links: String(args.links || ""), useCount: 0, hash };
+    if (aliases.length) entry.aliases = aliases;
     markState(entry);
     if (quote) entry.quote = quote;
     const cue = cueOf(args.cue);
@@ -3260,6 +3387,9 @@ function writeMemory(args) {
       if (!entry.quote && old.quote) entry.quote = old.quote;
       if (!entry.state && old.state) entry.state = old.state;
       if (!entry.proof && old.proof) entry.proof = old.proof;
+      if (old.voided && !entry.voided) entry.voided = old.voided;
+      const sayAliases = mergeAliases(entry.aliases, old.aliases);
+      if (sayAliases.length) entry.aliases = sayAliases; else delete entry.aliases;
       if (old.hash && old.hash !== entry.hash) {
         const prev = Array.isArray(old.supersedes) ? old.supersedes.filter(Boolean) : [];
         entry.supersedes = [...prev, old.hash].slice(-5);
@@ -3312,6 +3442,7 @@ function writeMemory(args) {
     const { tags, note: tagsNote } = checkedTags(args.tags);
     const file = path.join(PATHS.diaryDir, `${monthKey()}.jsonl`);
     const entry = { kind: "manual-diary", ts, text, keywords: keywordsOf(text), hash: sha1(text + ts).slice(0, 16) };
+    if (aliases.length) entry.aliases = aliases;
     markState(entry);
     const diarySource = String(args.source || "").trim();
     if (diarySource) entry.source = diarySource;
@@ -4580,6 +4711,11 @@ function apply(ctx) {
             items: { type: "string" },
             description: "分类标签，最多 6 个、每个 ≤16 字；也可传逗号/顿号/空格分隔的字符串。只接受固定词表：称呼/身份/关系/工作/背景/记忆/插件/备份/会话/形象/图标/语言/常言/性格/第一次/视频/表情包/梗/生活/金钱/学习/待办；词表外的会被忽略并在返回里提示。成语/梗类条目请用 saying 层",
           },
+          aliases: {
+            type: "string",
+            description:
+              "别名/别称：用户可能用来说这件事的**其他说法**，逗号或空格分隔（最多 8 个、每个 ≤16 字）。存进去后会被一起检索——比如条目叫「小号回话节奏」，别名写「回话间隔 回复频率」。v0.35/B-56：这是修「同义改写搜不到」的写入侧手段，比调检索权重管用",
+          },
           important: {
             type: "boolean",
             description: "仅 diary 用：标为重要事件（注入时优先显示，不会被后写的日常挤掉）",
@@ -4654,6 +4790,7 @@ function apply(ctx) {
           layer: { type: "string", enum: ["behavior", "deep", "array", "user", "memo", "all"], description: "限定层，默认 all" },
           limit: { type: "number", description: "最多返回条数，默认 20" },
           tag: { type: "string", description: "按标签过滤（子串匹配，如「第一次」）；可与 query 组合取交集" },
+          includeVoided: { type: "boolean", description: "把「已标废」的条目也返回（默认不返回；行首标〔已标废〕）" },
           scope: { type: "string", enum: ["context"], description: "v0.21：scope=context 只检索「当前场景可见」的社交记忆（群聊=本群 + 本群发言人；私聊=对方 + 主人的私事；别人的私事、别的群的内容永远不出现）。不传 personId/groupId 时用最近一次识别到的场景" },
           personId: { type: "string", description: "scope=context 时：按某人的场景检索（不传就用最近场景）" },
           groupId: { type: "string", description: "scope=context 时：按某个群检索（不传就用最近场景）" },
@@ -4663,9 +4800,34 @@ function apply(ctx) {
       async execute(args) {
         try {
           if (String(args?.scope || "") === "context") return searchSocialContext(social, args || {});
-          return searchMemory(args?.query, args?.layer, args?.limit, args?.tag);
+          return searchMemory(args?.query, args?.layer, args?.limit, args?.tag, args?.includeVoided === true);
         } catch (err) {
           return `检索失败：${err?.message || err}`;
+        }
+      },
+    });
+
+    register({
+
+      name: "memory_void",
+      description:
+        "把一条记忆标记为「已作废」——**不删数据、可恢复**。用途：旧结论被推翻、记错了、过期了、来源不成立。标废后：①不再进每轮注入；②memory_search 默认不返回；③memory_locate 仍能按 hash 查到原文和作废原因；④guide 索引保留。**reason 必填**（否则等于无声删除，以后查不回来）。action=unvoid 撤销。要真正删数据请手工改库，这个工具永远不删。",
+      parameters: {
+        type: "object",
+        properties: {
+          hash: { type: "string", description: "条目 hash（memory_search 结果里的 #xxxx，可只给前 8 位）" },
+          keyword: { type: "string", description: "或按关键词定位（配合 layer）" },
+          layer: { type: "string", enum: ["behavior", "deep", "array", "user", "memo", "all"], description: "限定层，默认 all" },
+          reason: { type: "string", description: "为什么作废（必填，写进条目，以后 memory_locate 能看到）" },
+          action: { type: "string", enum: ["void", "unvoid"], description: "默认 void=标废；unvoid=恢复" },
+        },
+      },
+      output,
+      async execute(args) {
+        try {
+          return voidMemory(args || {});
+        } catch (err) {
+          return `标废失败：${err?.message || err}`;
         }
       },
     });
@@ -5308,6 +5470,6 @@ const plugin = {
   apply,
 };
 
-export { apply, loadState, saveState, STATE_PATH, buildInjectionText, buildStateInjection, modelRouteOf, sessionMemory, createSessionMemory, sessionMemoryPaths, normalizeSessionId, isSpecialKey, doctorReport, renderDoctor, resolveBackupDir, probeWritable, coreInjection, coreOptions, createLines, lexicalScore, linesConfigDefaults, linesPaths, qualitativeOf, topicTokens, behaviorHint, createSocial, detectScene, normalizeName, personIdOf, registerSocialTools, sceneLabel, socialConfigDefaults, socialPaths, searchSocialContext, backupPolicySummary, compactionStats, compactionStatusLine, noteCompaction, noteAutoSummary, compressCallsIn, nativeCompactionsIn, compressToolCallsIn, compressionKindOf, readCompactionLog, appendCompactionRecord, ingestCompactionEvent, compactionRecords, compactionSelfCheck, dutyBoardData, sendHandoff, pullHandoff, listHandoffs, compactionSuiteDetected, listAutoSummaries, deleteAutoSummary, setFactCaller, factOptions, readFactCandidates, writeFactCandidates, pendingFactCandidates, factCandidateStats, factStatusLine, parseFactCandidates, buildFactPrompt, factInventory, isDuplicateFact, extractFactCandidates, acceptFactCandidate, rejectFactCandidate, updateBackupPolicy, updateAutoSummaryPolicy, autoSummaryConfigView, registerBackupApi, hostIsLoopback, readRequestBody, searchMemory, writeMemory, briefOf, writeGuardOf, writeGuardCheck, similarityOf, backupNow, pruneOldSnapshots, shouldSkipBackup, backupStampOf, writeTurnDiary, isCompressionEvent, renameAssetImage, listAssetImages, buildStats, tagsOf, validateTags, checkedTags, TAG_VOCAB, clearMemos, recallSession, decodeSessionFile, relationInjectionLines, archiveRelationOverflow, locateMemory, jsonlHasHash, rebuildGuide, guideStats, guideLinks, guideNodes, addSource, listSources, findSources, sourceStats, loadSources, sourceTag, entryProvenance, sourceIndex, runAutoSummary, pendingTurns, autoSummaryOptions, buildAutoSummaryEntry, buildSummaryPrompt, summaryStyleLine, parseSummaryText, summaryInputOf, callWithThinkingRetry, setAutoSummaryCaller, defaultConfig, loadConfig, AUTO_SUMMARY_PREFIX };
+export { apply, loadState, saveState, STATE_PATH, buildInjectionText, buildStateInjection, modelRouteOf, sessionMemory, createSessionMemory, sessionMemoryPaths, normalizeSessionId, isSpecialKey, doctorReport, renderDoctor, resolveBackupDir, probeWritable, coreInjection, coreOptions, createLines, lexicalScore, linesConfigDefaults, linesPaths, qualitativeOf, topicTokens, behaviorHint, createSocial, detectScene, normalizeName, personIdOf, registerSocialTools, sceneLabel, socialConfigDefaults, socialPaths, searchSocialContext, backupPolicySummary, compactionStats, compactionStatusLine, noteCompaction, noteAutoSummary, compressCallsIn, nativeCompactionsIn, compressToolCallsIn, compressionKindOf, readCompactionLog, appendCompactionRecord, ingestCompactionEvent, compactionRecords, compactionSelfCheck, dutyBoardData, sendHandoff, pullHandoff, listHandoffs, compactionSuiteDetected, listAutoSummaries, deleteAutoSummary, setFactCaller, factOptions, readFactCandidates, writeFactCandidates, pendingFactCandidates, factCandidateStats, factStatusLine, parseFactCandidates, buildFactPrompt, factInventory, isDuplicateFact, extractFactCandidates, acceptFactCandidate, rejectFactCandidate, updateBackupPolicy, updateAutoSummaryPolicy, autoSummaryConfigView, registerBackupApi, hostIsLoopback, readRequestBody, searchMemory, writeMemory, voidMemory, briefOf, aliasesOf, mergeAliases, writeGuardOf, writeGuardCheck, similarityOf, backupNow, pruneOldSnapshots, shouldSkipBackup, backupStampOf, writeTurnDiary, isCompressionEvent, renameAssetImage, listAssetImages, buildStats, tagsOf, validateTags, checkedTags, TAG_VOCAB, clearMemos, recallSession, decodeSessionFile, relationInjectionLines, archiveRelationOverflow, locateMemory, jsonlHasHash, rebuildGuide, guideStats, guideLinks, guideNodes, addSource, listSources, findSources, sourceStats, loadSources, sourceTag, entryProvenance, sourceIndex, runAutoSummary, pendingTurns, autoSummaryOptions, buildAutoSummaryEntry, buildSummaryPrompt, summaryStyleLine, parseSummaryText, summaryInputOf, callWithThinkingRetry, setAutoSummaryCaller, defaultConfig, loadConfig, AUTO_SUMMARY_PREFIX };
 export default plugin;
 
