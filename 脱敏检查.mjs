@@ -13,11 +13,8 @@ import path from 'node:path'
 
 const cwd = process.cwd()
 
-// 敏感模式：宁可多报，人工看一眼成本很低；漏报的代价是号被挂到公开仓库上
-const RULES = [
-  { name: '主人 QQ 号', re: /\b1111111111\b/ },
-  { name: 'QQ 群号', re: /\b(500000001|500000002|500000003|500000004|500000005|500000006)\b/ },
-  { name: 'NapCat OneBot token', re: /\b0123456789abcdef\b/ },
+// 通用规则：这些模式本身不含私人信息，可以留在仓库里。
+const GENERIC_RULES = [
   { name: 'GitHub PAT', re: /\bghp_[A-Za-z0-9]{20,}/ },
   { name: '通用 key/token 赋值', re: /(api[_-]?key|token|secret|password)\s*[:=]\s*["'][A-Za-z0-9_\-]{12,}["']/i },
   { name: '本机绝对路径（Windows）', re: /\b[A-Za-z]:\\\\(?:Users|Documents|dshf|deepseek-harness)\\/ },
@@ -26,6 +23,31 @@ const RULES = [
   { name: '住址相关', re: /(余姚|宁波|浙江宁波)/ },
   { name: '凭证文件名', re: /(\.npmrc-web|bili_credential\.json|\.gitee-token|\.login\.env)/ },
 ]
+
+// 私人号码**不写进仓库**——以前把主人 QQ 号和群号直接写成正则放在这个文件里，
+// 结果「脱敏检查」自己成了公开仓库里唯一的泄露源。现在改为本机放一份
+// 未入库的「脱敏私有规则.json」（.gitignore 已忽略），格式：
+//   { "qq": ["1xxxxxxxxxx"], "groups": ["5xxxxxxxxx"], "tokens": ["<token>"] }
+// 文件不存在就只跑通用规则（宁可少拦，也不把号码写回仓库）。
+const PRIVATE_FILE = path.join(cwd, '脱敏私有规则.json')
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+function privateRules() {
+  let raw
+  try {
+    raw = JSON.parse(fs.readFileSync(PRIVATE_FILE, 'utf8'))
+  } catch {
+    return []
+  }
+  const out = []
+  for (const n of raw.qq || []) out.push({ name: '主人 QQ 号', re: new RegExp(`\\b${escapeRe(String(n))}\\b`) })
+  if (Array.isArray(raw.groups) && raw.groups.length) {
+    out.push({ name: 'QQ 群号', re: new RegExp(`\\b(${raw.groups.map((g) => escapeRe(String(g))).join('|')})\\b`) })
+  }
+  for (const t of raw.tokens || []) out.push({ name: '私人 token', re: new RegExp(`\\b${escapeRe(String(t))}\\b`) })
+  return out
+}
+
+const RULES = [...privateRules(), ...GENERIC_RULES]
 
 // 允许出现的例外（示例、占位符、回环地址）
 const ALLOW = [

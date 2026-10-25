@@ -1072,8 +1072,10 @@ window.__ModuleLoader__.load({
           ['今日额度', (quota.sent || 0) + ' / ' + (quota.max || '-')],
           ['观察器 pid', qq.watcherPid || '（无）'],
           ['最近扫描', qq.lastScan ? String(qq.lastScan).slice(0, 90) : '（暂无）'],
-          ['开机自启', qq.lastBoot ? String(qq.lastBoot).slice(0, 90) : '（暂无）'],
-        ], qq.alert ? ('⚠️ 有未清告警：' + qq.alert.ago + '，连续失败 ' + qq.alert.failures + ' 次') : '无未清告警'),
+          // 开机自启那一行以前把 boot.log 整条怼进来（含暂停原因长句），面板被撑开还容易被误读；
+          // 现在只留「时间 + 前 28 字」摘要，完整内容去 ~/.dsh/qq-watch/boot.log 看。
+          ['开机自启', qq.lastBoot ? (String(qq.lastBoot).length > 34 ? String(qq.lastBoot).slice(0, 34) + '…' : String(qq.lastBoot)) : '（暂无）'],
+        ], (qq.alert ? ('⚠️ 有未清告警：' + qq.alert.ago + '，连续失败 ' + qq.alert.failures + ' 次') : '无未清告警') + ' ｜ 日志 ~/.dsh/qq-watch/'),
         card('B站值班', [
           ['配置', bili.configured ? '已配置' : '未配置'],
           ['最近报告', bili.lastReport ? (bili.lastReport.file + '（' + bili.lastReport.ago + '）') : '（还没跑过）'],

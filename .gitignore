@@ -6,3 +6,6 @@ test/.smoke/
 .DS_Store
 Thumbs.db
 *.zip
+
+# 本机脱敏规则（含真实号码，不入库）
+脱敏私有规则.json

@@ -862,7 +862,7 @@ export function registerSocialTools(register, output, social) {
         id: { type: "string", description: "person id（get/update/alias 用）" },
         nickname: { type: "string", description: "昵称" },
         aliases: { type: "array", items: { type: "string" }, description: "别名/曾用名" },
-        platformIds: { type: "object", description: "稳定平台 id，如 {qq:\"2222222222\", bilibili:\"12345\"}；键小写" },
+        platformIds: { type: "object", description: "稳定平台 id，如 {qq:\"12345678\", bilibili:\"12345\"}；键小写" },
         avatarHash: { type: "string", description: "头像哈希（没有稳定 id 时用于推断同一人）" },
         groupIds: { type: "array", items: { type: "string" }, description: "resolve 用：这个身份出现在哪些群（共现加分）" },
         groupId: { type: "string", description: "群号（event 用）" },
