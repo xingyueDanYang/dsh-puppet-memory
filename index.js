@@ -829,14 +829,25 @@ function tagsPrefixOf(entry) {  const tags = Array.isArray(entry?.tags) ? entry.
 // 会话文件定位（只读引用，不复制）
 // ---------------------------------------------------------------------------
 
-function findSessionFile(sessionId) {
+// v0.35 修补：会话 id 有两种写法（带 session- 前缀的 header.id、不带前缀的裸 uuid），
+// 目录名也有两种（旧版 <slug>/<uuid>/、新版 <slug>/session-<uuid>/）。
+// 老代码无条件拼 `session-`，一旦传进来的是带前缀的 id 就成 session-session-…，
+// 于是 array/sessions.jsonl 的 sessionFile 一列 131 行全是空串（读取时靠回退才没坏）。
+// 现在两边写法都试，目录布局也都认。
+function findSessionFile(sessionId, sessionDir = SESSION_DIR) {
   if (!sessionId) return "";
   return safe("定位会话文件", () => {
-    if (!fs.existsSync(SESSION_DIR)) return "";
-    const wanted = `session-${sessionId}`;
-    for (const slug of fs.readdirSync(SESSION_DIR)) {
-      const candidate = path.join(SESSION_DIR, slug, wanted, "session.v4.jsonl.zstd");
-      if (fs.existsSync(candidate)) return candidate;
+    if (!fs.existsSync(sessionDir)) return "";
+    const raw = String(sessionId).trim();
+    const bare = raw.replace(/^session[-_]/, "");
+    // 每个写法都展开成「原样 / 补 session- / 冒号转义」三种，再并集去重
+    const forms = (s) => [s, `session-${s}`, s.replace(/:/g, "~003A"), `session-${s.replace(/:/g, "~003A")}`];
+    const names = [...new Set([...forms(raw), ...forms(bare)])].filter(Boolean);
+    for (const slug of fs.readdirSync(sessionDir)) {
+      for (const name of names) {
+        const candidate = path.join(sessionDir, slug, name, "session.v4.jsonl.zstd");
+        if (fs.existsSync(candidate)) return candidate;
+      }
     }
     return "";
   }, "");
@@ -5470,6 +5481,6 @@ const plugin = {
   apply,
 };
 
-export { apply, loadState, saveState, STATE_PATH, buildInjectionText, buildStateInjection, modelRouteOf, sessionMemory, createSessionMemory, sessionMemoryPaths, normalizeSessionId, isSpecialKey, doctorReport, renderDoctor, resolveBackupDir, probeWritable, coreInjection, coreOptions, createLines, lexicalScore, linesConfigDefaults, linesPaths, qualitativeOf, topicTokens, behaviorHint, createSocial, detectScene, normalizeName, personIdOf, registerSocialTools, sceneLabel, socialConfigDefaults, socialPaths, searchSocialContext, backupPolicySummary, compactionStats, compactionStatusLine, noteCompaction, noteAutoSummary, compressCallsIn, nativeCompactionsIn, compressToolCallsIn, compressionKindOf, readCompactionLog, appendCompactionRecord, ingestCompactionEvent, compactionRecords, compactionSelfCheck, dutyBoardData, sendHandoff, pullHandoff, listHandoffs, compactionSuiteDetected, listAutoSummaries, deleteAutoSummary, setFactCaller, factOptions, readFactCandidates, writeFactCandidates, pendingFactCandidates, factCandidateStats, factStatusLine, parseFactCandidates, buildFactPrompt, factInventory, isDuplicateFact, extractFactCandidates, acceptFactCandidate, rejectFactCandidate, updateBackupPolicy, updateAutoSummaryPolicy, autoSummaryConfigView, registerBackupApi, hostIsLoopback, readRequestBody, searchMemory, writeMemory, voidMemory, briefOf, aliasesOf, mergeAliases, writeGuardOf, writeGuardCheck, similarityOf, backupNow, pruneOldSnapshots, shouldSkipBackup, backupStampOf, writeTurnDiary, isCompressionEvent, renameAssetImage, listAssetImages, buildStats, tagsOf, validateTags, checkedTags, TAG_VOCAB, clearMemos, recallSession, decodeSessionFile, relationInjectionLines, archiveRelationOverflow, locateMemory, jsonlHasHash, rebuildGuide, guideStats, guideLinks, guideNodes, addSource, listSources, findSources, sourceStats, loadSources, sourceTag, entryProvenance, sourceIndex, runAutoSummary, pendingTurns, autoSummaryOptions, buildAutoSummaryEntry, buildSummaryPrompt, summaryStyleLine, parseSummaryText, summaryInputOf, callWithThinkingRetry, setAutoSummaryCaller, defaultConfig, loadConfig, AUTO_SUMMARY_PREFIX };
+export { apply, loadState, saveState, STATE_PATH, buildInjectionText, buildStateInjection, modelRouteOf, sessionMemory, createSessionMemory, sessionMemoryPaths, normalizeSessionId, isSpecialKey, doctorReport, renderDoctor, resolveBackupDir, probeWritable, coreInjection, coreOptions, createLines, lexicalScore, linesConfigDefaults, linesPaths, qualitativeOf, topicTokens, behaviorHint, createSocial, detectScene, normalizeName, personIdOf, registerSocialTools, sceneLabel, socialConfigDefaults, socialPaths, searchSocialContext, backupPolicySummary, compactionStats, compactionStatusLine, noteCompaction, noteAutoSummary, compressCallsIn, nativeCompactionsIn, compressToolCallsIn, compressionKindOf, readCompactionLog, appendCompactionRecord, ingestCompactionEvent, compactionRecords, compactionSelfCheck, dutyBoardData, sendHandoff, pullHandoff, listHandoffs, compactionSuiteDetected, listAutoSummaries, deleteAutoSummary, setFactCaller, factOptions, readFactCandidates, writeFactCandidates, pendingFactCandidates, factCandidateStats, factStatusLine, parseFactCandidates, buildFactPrompt, factInventory, isDuplicateFact, extractFactCandidates, acceptFactCandidate, rejectFactCandidate, updateBackupPolicy, updateAutoSummaryPolicy, autoSummaryConfigView, registerBackupApi, hostIsLoopback, readRequestBody, searchMemory, writeMemory, voidMemory, briefOf, aliasesOf, mergeAliases, writeGuardOf, writeGuardCheck, similarityOf, backupNow, pruneOldSnapshots, shouldSkipBackup, backupStampOf, writeTurnDiary, isCompressionEvent, renameAssetImage, listAssetImages, buildStats, tagsOf, validateTags, checkedTags, TAG_VOCAB, clearMemos, recallSession, decodeSessionFile, findSessionFile, relationInjectionLines, archiveRelationOverflow, locateMemory, jsonlHasHash, rebuildGuide, guideStats, guideLinks, guideNodes, addSource, listSources, findSources, sourceStats, loadSources, sourceTag, entryProvenance, sourceIndex, runAutoSummary, pendingTurns, autoSummaryOptions, buildAutoSummaryEntry, buildSummaryPrompt, summaryStyleLine, parseSummaryText, summaryInputOf, callWithThinkingRetry, setAutoSummaryCaller, defaultConfig, loadConfig, AUTO_SUMMARY_PREFIX };
 export default plugin;
 
