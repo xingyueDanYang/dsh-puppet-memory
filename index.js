@@ -177,6 +177,55 @@ function assetTypeOf(file, meta) {
   return assetTypeOfExt(path.extname(String(file || ""))) || "image";
 }
 
+// ---------------------------------------------------------------------------
+// v0.36（B-68）音频分类：枚举写死，不收自由文本
+// 为什么写死：tags 那套的教训——自由词一年后全是「语音2」「语音_重要」，分类就废了。
+// 三组维度：来源（哪来的）/ 内容（是什么声）/ 用途（拿来干嘛）。
+// 只做**整文件级**分类，不做分段、不做时间轴跳转（丹阳 2026-10-26 定）。
+// ---------------------------------------------------------------------------
+const AUDIO_SOURCE = ["mic", "voice", "track", "music"];
+const AUDIO_KIND = ["dialog", "monolog", "music", "ambient", "mixed"];
+const AUDIO_USE = ["evidence", "material", "reference"];
+const AUDIO_LABEL = {
+  mic: "自己录", voice: "QQ语音", track: "视频音轨", musicFile: "音乐文件",
+  dialog: "人声对话", monolog: "独白", ambient: "环境音", mixed: "混合",
+  evidence: "原话证据", material: "素材", reference: "参考",
+};
+const AUDIO_CLASS_FIELDS = ["source", "kind", "use", "duration", "lang", "from"];
+
+function pickAudioEnum(value, allowed) {
+  const v = String(value ?? "").trim().toLowerCase();
+  return allowed.includes(v) ? v : "";
+}
+
+// 从写入参数里抽音频分类；非法枚举值直接丢弃（不猜），其它字段做长度与数值清洗
+function audioClassOf(item) {
+  const out = {};
+  if (!item || typeof item !== "object") return out;
+  const source = pickAudioEnum(item.source, AUDIO_SOURCE);
+  if (source) out.source = source;
+  const kind = pickAudioEnum(item.kind, AUDIO_KIND);
+  if (kind) out.kind = kind;
+  const use = pickAudioEnum(item.use, AUDIO_USE);
+  if (use) out.use = use;
+  const dur = Number(item.duration);
+  if (Number.isFinite(dur) && dur > 0) out.duration = Math.round(dur);
+  if (item.lang) out.lang = clip(String(item.lang), 12);
+  if (item.from) out.from = clip(String(item.from), 120);
+  return out;
+}
+
+// 一行展示：〔QQ语音·人声对话·原话证据〕
+function audioClassTag(meta) {
+  if (!meta) return "";
+  const bits = [
+    meta.source ? AUDIO_LABEL[meta.source] || meta.source : "",
+    meta.kind ? AUDIO_LABEL[meta.kind] || meta.kind : "",
+    meta.use ? AUDIO_LABEL[meta.use] || meta.use : "",
+  ].filter(Boolean);
+  return bits.length ? `〔${bits.join("·")}〕` : "";
+}
+
 function loadAssetIndex() {
   const idx = readJson(ASSET_INDEX, null);
   if (idx && typeof idx === "object" && idx.images) {
@@ -242,6 +291,14 @@ function storeAssets(list) {
         }
         const ref = { ref: `assets/${known}`, name: meta.name || known, sha256: digest, bytes: buf.length, type };
         if (transcript) ref.transcript = transcript;
+        // 同内容已存在：把这次的分类补进去（后写的分类优先，空的不覆盖）
+        if (type === "audio") {
+          const cls = audioClassOf(item);
+          if (Object.keys(cls).length) {
+            Object.assign(ref, cls);
+            idx.images[known] = { ...meta, type: meta.type || type, ...cls, ...(meta.transcript ? { transcript: meta.transcript } : {}) };
+          }
+        }
         refs.push(ref);
         continue;
       }
@@ -260,6 +317,14 @@ function storeAssets(list) {
       idx.bySha[digest] = file;
       const ref = { ref: `assets/${file}`, name: file, sha256: digest, bytes: buf.length, type };
       if (transcript) ref.transcript = transcript;
+      // v0.36（B-68）：音频分类随资产索引一起落盘，ref 里也带一份，写条目时直接抄
+      if (type === "audio") {
+        const cls = audioClassOf(item);
+        if (Object.keys(cls).length) {
+          Object.assign(ref, cls);
+          idx.images[file] = { ...(idx.images[file] || meta), ...cls };
+        }
+      }
       refs.push(ref);
     } catch (err) {
       refs.push({ error: `存媒体失败 ${src}：${err?.message || err}`, type });
@@ -315,14 +380,12 @@ function imageEntries(images) {
 }
 
 function audioEntries(audios) {
-  return audios.map((r) => ({
-    ref: r.ref,
-    name: r.name,
-    sha256: r.sha256,
-    bytes: r.bytes,
-    type: "audio",
-    ...(r.transcript ? { transcript: r.transcript } : {}),
-  }));
+  return audios.map((r) => {
+    const e = { ref: r.ref, name: r.name, sha256: r.sha256, bytes: r.bytes, type: "audio" };
+    if (r.transcript) e.transcript = r.transcript;
+    for (const k of AUDIO_CLASS_FIELDS) if (r[k] !== undefined && r[k] !== "") e[k] = r[k];
+    return e;
+  });
 }
 
 // 返回 [{ref, label, file, exists, transcript}]，兼容旧格式（字符串）与新格式（对象）
@@ -3333,7 +3396,7 @@ function buildStats() {
 // 媒体资产：列出 / 改名（改名会同步更新所有引用它的记忆条目）
 // ---------------------------------------------------------------------------
 
-function listAssetImages() {
+function listAssetImages(filter = {}) {
   const idx = loadAssetIndex();
   if (!fs.existsSync(PATHS.assets)) return "媒体资产库为空。";
   const names = fs
@@ -3349,21 +3412,74 @@ function listAssetImages() {
     .sort();
   if (!names.length) return "媒体资产库为空。";
   const srcIdx = sourceIndex();
+  const wantSource = pickAudioEnum(filter.source, AUDIO_SOURCE);
+  const wantKind = pickAudioEnum(filter.kind, AUDIO_KIND);
+  const wantUse = pickAudioEnum(filter.use, AUDIO_USE);
   const rowOf = (f, type) => {
     const meta = idx.images[f] || {};
     const kb = ((meta.bytes || fs.statSync(path.join(PATHS.assets, f)).size) / 1024).toFixed(0);
     const transcript =
       type === "audio" && meta.transcript ? `，转写 ${String(meta.transcript).slice(0, 30)}…` : "";
+    const dur = type === "audio" && meta.duration ? `，${meta.duration} 秒` : "";
+    const cls = type === "audio" ? audioClassTag(meta) : "";
     const srcs = srcIdx.byAsset.get(f) || [];
     const provenance = srcs.length ? ` · ${srcs.map((r) => sourceTag(r)).join(" ")}` : "";
-    return `- ${f}（${kb} KB${transcript}，sha256 ${String(meta.sha256 || "?").slice(0, 12)}…）${provenance}`;
+    return `- ${cls}${f}（${kb} KB${dur}${transcript}，sha256 ${String(meta.sha256 || "?").slice(0, 12)}…）${provenance}`;
   };
   const images = names.filter((f) => assetTypeOf(f, idx.images[f]) === "image");
-  const audios = names.filter((f) => assetTypeOf(f, idx.images[f]) === "audio");
+  const allAudios = names.filter((f) => assetTypeOf(f, idx.images[f]) === "audio");
+  const audios = allAudios.filter((f) => {
+    if (!wantSource && !wantKind && !wantUse) return true;
+    const m = idx.images[f] || {};
+    if (wantSource && m.source !== wantSource) return false;
+    if (wantKind && m.kind !== wantKind) return false;
+    if (wantUse && m.use !== wantUse) return false;
+    return true;
+  });
   const parts = [];
-  if (images.length) parts.push(`图片资产（${images.length} 张）：\n${images.map((f) => rowOf(f, "image")).join("\n")}`);
-  if (audios.length) parts.push(`音频资产（${audios.length} 段）：\n${audios.map((f) => rowOf(f, "audio")).join("\n")}`);
-  return `${parts.join("\n\n")}\n\n改名：memory_image action=rename name=<现文件名> newName=<新名字>\n出处：memory_source action=add asset=<文件名> author=… id=… quote=verbatim|paraphrase`;
+  const filtering = Boolean(wantSource || wantKind || wantUse);
+  if (!filtering && images.length) {
+    parts.push(`图片资产（${images.length} 张）：\n${images.map((f) => rowOf(f, "image")).join("\n")}`);
+  }
+  if (audios.length) {
+    const head = filtering
+      ? `音频资产（筛出 ${audios.length} / 共 ${allAudios.length} 段）`
+      : `音频资产（${audios.length} 段）`;
+    parts.push(`${head}：\n${audios.map((f) => rowOf(f, "audio")).join("\n")}`);
+  } else if (filtering) {
+    parts.push(`没有符合筛选的音频（共 ${allAudios.length} 段）。可选值：source=${AUDIO_SOURCE.join("/")}、kind=${AUDIO_KIND.join("/")}、use=${AUDIO_USE.join("/")}`);
+  }
+  if (!parts.length) return "媒体资产库为空。";
+  return `${parts.join("\n\n")}\n\n改名：memory_image action=rename name=<现文件名> newName=<新名字>\n单条详情：memory_image action=meta name=<文件名>\n出处：memory_source action=add asset=<文件名> author=… id=… quote=verbatim|paraphrase`;
+}
+
+// 单个资产详情（含音频分类、转写、出处）
+function assetDetail(name) {
+  const f = String(name || "").trim();
+  if (!f) return "缺 name（文件名，可先用 action=list 查看）";
+  const idx = loadAssetIndex();
+  const meta = idx.images[f];
+  const file = path.join(PATHS.assets, f);
+  if (!meta && !fs.existsSync(file)) return `找不到资产：${f}`;
+  const m = meta || { name: f, type: assetTypeOf(f, null) };
+  const lines = [
+    `文件：${f}`,
+    `类型：${m.type === "audio" ? "音频" : "图片"}`,
+    `大小：${((m.bytes || 0) / 1024).toFixed(1)} KB`,
+    `sha256：${m.sha256 || "?"}`,
+  ];
+  if (m.type === "audio") {
+    lines.push(`分类：${audioClassTag(m) || "（未分类）"}`);
+    if (m.duration) lines.push(`时长：${m.duration} 秒`);
+    if (m.lang) lines.push(`语言：${m.lang}`);
+    if (m.from) lines.push(`来源：${m.from}`);
+    lines.push(`转写：${m.transcript ? clip(m.transcript, 300) : "（无）"}`);
+  }
+  if (m.source) lines.push(`原始路径：${m.source}`);
+  if (m.addedAt) lines.push(`加入时间：${m.addedAt}`);
+  const srcs = sourceIndex().byAsset.get(f) || [];
+  if (srcs.length) lines.push(`出处：${srcs.map((r) => sourceTag(r)).join("；")}`);
+  return lines.join("\n");
 }
 
 function updateAssetRefs(oldFile, newFile) {
@@ -5102,8 +5218,27 @@ function apply(ctx) {
           },
           audios: {
             type: "array",
-            items: { type: "string" },
-            description: "可选：单独的本地音频路径列表（也可以直接混在 images 里）；音频存为条目的 audios 引用，支持 mp3/wav/m4a/aac/ogg/opus/flac/webm/amr",
+            items: {
+              oneOf: [
+                { type: "string" },
+                {
+                  type: "object",
+                  properties: {
+                    path: { type: "string" },
+                    name: { type: "string" },
+                    source: { type: "string", enum: AUDIO_SOURCE, description: "来源：mic 自己录 / voice QQ语音 / track 视频音轨 / music 音乐文件" },
+                    kind: { type: "string", enum: AUDIO_KIND, description: "内容：dialog 人声对话 / monolog 独白 / music / ambient 环境音 / mixed 混合" },
+                    use: { type: "string", enum: AUDIO_USE, description: "用途：evidence 原话证据 / material 素材 / reference 参考" },
+                    duration: { type: "number", description: "时长（秒）" },
+                    lang: { type: "string", description: "语言，如 zh / en" },
+                    from: { type: "string", description: "出处标记：BV 号 / 文件名 / 来源说明" },
+                    transcript: { type: "string", description: "转写文本（这个文件自己的）" },
+                  },
+                  required: ["path"],
+                },
+              ],
+            },
+            description: "可选：本地音频列表。可以给路径字符串，也可以给对象带分类——source/kind/use 三组只收固定枚举（非法值丢弃，不猜）；分类只到整文件级，不做分段与时间轴跳转（v0.36）。支持 mp3/wav/m4a/aac/ogg/opus/flac/webm/amr",
           },
           audioNames: {
             type: "array",
@@ -5574,13 +5709,16 @@ function apply(ctx) {
 
       name: "memory_image",
       description:
-        "管理记忆资产（图片/音频）：action=list 列出所有图片与音频（文件名/大小/哈希，音频带转写摘要，已登记的出处会显示在行尾）；action=rename 给资产改名（会自动同步更新所有引用它的记忆条目和出处表，方便溯源）。",
+        "管理记忆资产（图片/音频）：action=list 列出图片与音频（文件名/大小/哈希，音频带分类〔来源·内容·用途〕、时长与转写摘要，出处显示在行尾），可按 source/kind/use 筛选；action=meta 看单个资产的详情（分类、时长、语言、转写、原始路径、出处）；action=rename 给资产改名（会自动同步更新所有引用它的记忆条目和出处表）。音频分类只用固定枚举：source=mic/voice/track/music、kind=dialog/monolog/music/ambient/mixed、use=evidence/material/reference。",
       parameters: {
         type: "object",
         properties: {
-          action: { type: "string", enum: ["list", "rename"], description: "操作" },
-          name: { type: "string", description: "rename 时：现文件名（可先用 list 查看）" },
+          action: { type: "string", enum: ["list", "rename", "meta"], description: "操作" },
+          name: { type: "string", description: "rename/meta 时：文件名（可先用 list 查看）" },
           newName: { type: "string", description: "rename 时：新名字（可带 png/jpg 或 mp3/wav 等扩展名）" },
+          source: { type: "string", enum: AUDIO_SOURCE, description: "list 时可筛：音频来源" },
+          kind: { type: "string", enum: AUDIO_KIND, description: "list 时可筛：音频内容类型" },
+          use: { type: "string", enum: AUDIO_USE, description: "list 时可筛：音频用途" },
         },
         required: ["action"],
       },
@@ -5589,9 +5727,10 @@ function apply(ctx) {
         try {
           ensureDirs();
           const action = String(args?.action || "list");
-          if (action === "list") return listAssetImages();
+          if (action === "list") return listAssetImages(args || {});
+          if (action === "meta") return assetDetail(args?.name);
           if (action === "rename") return renameAssetImage(args?.name, args?.newName);
-          return `未知 action：${action}（可选 list / rename）`;
+          return `未知 action：${action}（可选 list / meta / rename）`;
         } catch (err) {
           return `资产操作失败：${err?.message || err}`;
         }
@@ -5844,6 +5983,6 @@ const plugin = {
   apply,
 };
 
-export { apply, loadState, saveState, STATE_PATH, buildInjectionText, buildStateInjection, modelRouteOf, sessionMemory, createSessionMemory, sessionMemoryPaths, normalizeSessionId, isSpecialKey, doctorReport, renderDoctor, resolveBackupDir, probeWritable, coreInjection, coreOptions, createLines, lexicalScore, linesConfigDefaults, linesPaths, qualitativeOf, topicTokens, behaviorHint, createSocial, detectScene, normalizeName, personIdOf, registerSocialTools, sceneLabel, socialConfigDefaults, socialPaths, searchSocialContext, backupPolicySummary, compactionStats, compactionStatusLine, noteCompaction, noteAutoSummary, compressCallsIn, nativeCompactionsIn, compressToolCallsIn, compressionKindOf, readCompactionLog, appendCompactionRecord, ingestCompactionEvent, compactionRecords, compactionSelfCheck, dutyBoardData, sendHandoff, pullHandoff, listHandoffs, compactionSuiteDetected, listAutoSummaries, deleteAutoSummary, setFactCaller, factOptions, readFactCandidates, writeFactCandidates, pendingFactCandidates, factCandidateStats, factStatusLine, parseFactCandidates, buildFactPrompt, factInventory, isDuplicateFact, extractFactCandidates, acceptFactCandidate, rejectFactCandidate, updateBackupPolicy, updateAutoSummaryPolicy, autoSummaryConfigView, registerBackupApi, hostIsLoopback, readRequestBody, searchMemory, writeMemory, voidMemory, exportArchive, readQqWatchSettings, writeQqWatchSettings, qqWatchView, briefOf, aliasesOf, mergeAliases, writeGuardOf, writeGuardCheck, similarityOf, backupNow, pruneOldSnapshots, shouldSkipBackup, backupStampOf, writeTurnDiary, isCompressionEvent, renameAssetImage, listAssetImages, buildStats, tagsOf, validateTags, checkedTags, TAG_VOCAB, clearMemos, recallSession, decodeSessionFile, findSessionFile, relationInjectionLines, archiveRelationOverflow, locateMemory, jsonlHasHash, rebuildGuide, guideStats, guideLinks, guideNodes, addSource, listSources, findSources, sourceStats, loadSources, sourceTag, entryProvenance, sourceIndex, runAutoSummary, pendingTurns, autoSummaryOptions, buildAutoSummaryEntry, buildSummaryPrompt, summaryStyleLine, parseSummaryText, summaryInputOf, callWithThinkingRetry, setAutoSummaryCaller, defaultConfig, loadConfig, AUTO_SUMMARY_PREFIX };
+export { apply, loadState, saveState, STATE_PATH, buildInjectionText, buildStateInjection, modelRouteOf, sessionMemory, createSessionMemory, sessionMemoryPaths, normalizeSessionId, isSpecialKey, doctorReport, renderDoctor, resolveBackupDir, probeWritable, coreInjection, coreOptions, createLines, lexicalScore, linesConfigDefaults, linesPaths, qualitativeOf, topicTokens, behaviorHint, createSocial, detectScene, normalizeName, personIdOf, registerSocialTools, sceneLabel, socialConfigDefaults, socialPaths, searchSocialContext, backupPolicySummary, compactionStats, compactionStatusLine, noteCompaction, noteAutoSummary, compressCallsIn, nativeCompactionsIn, compressToolCallsIn, compressionKindOf, readCompactionLog, appendCompactionRecord, ingestCompactionEvent, compactionRecords, compactionSelfCheck, dutyBoardData, sendHandoff, pullHandoff, listHandoffs, compactionSuiteDetected, listAutoSummaries, deleteAutoSummary, setFactCaller, factOptions, readFactCandidates, writeFactCandidates, pendingFactCandidates, factCandidateStats, factStatusLine, parseFactCandidates, buildFactPrompt, factInventory, isDuplicateFact, extractFactCandidates, acceptFactCandidate, rejectFactCandidate, updateBackupPolicy, updateAutoSummaryPolicy, autoSummaryConfigView, registerBackupApi, hostIsLoopback, readRequestBody, searchMemory, writeMemory, voidMemory, exportArchive, readQqWatchSettings, writeQqWatchSettings, qqWatchView, briefOf, aliasesOf, mergeAliases, writeGuardOf, writeGuardCheck, similarityOf, backupNow, pruneOldSnapshots, shouldSkipBackup, backupStampOf, writeTurnDiary, isCompressionEvent, renameAssetImage, listAssetImages, assetDetail, AUDIO_SOURCE, AUDIO_KIND, AUDIO_USE, audioClassTag, buildStats, tagsOf, validateTags, checkedTags, TAG_VOCAB, clearMemos, recallSession, decodeSessionFile, findSessionFile, relationInjectionLines, archiveRelationOverflow, locateMemory, jsonlHasHash, rebuildGuide, guideStats, guideLinks, guideNodes, addSource, listSources, findSources, sourceStats, loadSources, sourceTag, entryProvenance, sourceIndex, runAutoSummary, pendingTurns, autoSummaryOptions, buildAutoSummaryEntry, buildSummaryPrompt, summaryStyleLine, parseSummaryText, summaryInputOf, callWithThinkingRetry, setAutoSummaryCaller, defaultConfig, loadConfig, AUTO_SUMMARY_PREFIX };
 export default plugin;
 

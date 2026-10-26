@@ -373,7 +373,7 @@ API 对应三个动作：`GET ?action=fact-candidates&limit=`（列表 + `pendin
 | `memory_search` | 按层检索（behavior/deep/array/user/memo/all）；多词用空格/顿号分隔、默认取交集；`tag` 可按标签过滤（可只给 tag） |
 | `memory_locate` | 用 `hash`（可只给前 8 位）或 `keyword` 精确定位原文：返回 文件:行号 + 完整 JSONL 行，用于「摘要只剩一句话、想找回原话」 |
 | `memory_stats` | 记忆规模、图片/音频资产（张数/段数/体积）、标签汇总、开关状态、最近备份 |
-| `memory_image` | 管理记忆资产：`action=list` 列出图片与音频（带已登记出处），`action=rename` 改名并同步更新所有引用和出处表 |
+| `memory_image` | 管理记忆资产：`action=list` 列出图片与音频（音频带分类〔来源·内容·用途〕与时长，可按三组筛选，带已登记出处）、`action=meta` 看单条详情、`action=rename` 改名并同步更新所有引用和出处表 |
 | `memory_source` | 出处：`action=add` 给资产/条目登记「谁说的、在哪看到的」（作者 + 平台 ID + URL + 原文/转述），`list` / `find` / `stats` 查看；写记忆带 `source` 时会自动登记资产出处 |
 | `memory_clear` | 清空便签（清空前自动归档到 `behavior/archive/`） |
 | `memory_recall` | 读取已归档会话原文（list 列会话，query 关键词过滤） |
