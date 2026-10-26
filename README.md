@@ -1,6 +1,6 @@
 # 木偶记忆（Puppet Memory）
 
-> ⚠️ **main 分支是开发中的版本，可能比 Release 新**。当前最新发布为 `0.32.0`（2026-10-24，兼容 DSH 0.2.1-rc.3），新增**值班台**。历史稳定版见 Release 列表。开发过程记录在 `过程/` 目录。
+> ⚠️ **main 分支是开发中的版本，可能比 Release 新**。当前最新发布为 `0.35.0`（2026-10-26，兼容 DSH 0.2.1-rc.3），新增**标废 / 写入侧别名 / 导出档案**。历史稳定版见 Release 列表。开发过程记录在 `过程/` 目录。
 
 > 原名 `dsh-memory`，2026-10-20 更名。DSH（DeepSeek Harness）的跨会话记忆插件：记忆按用途分五层打底（常驻 / 按需·行为 / 按需·知识 / 账本 / 临时），外加三线状态、多人多群、会话级记忆管理。
 
@@ -25,7 +25,7 @@
 | **会话记忆管理** | 脏片段可在当前会话屏蔽（数据不删）或删掉（先归档），也可整会话暂停注入 |
 | **自动摘要 / 事实候选** | 压缩后/会话结束压摘要；事实只提案，`accept` 才写记忆 |
 | **小模型路由** | 摘要/提炼可用独立 provider/model（本地 Ollama 等），失败自动回退主会话模型 |
-| **值班台** | 侧栏一屏看三样心跳：QQ 观察器 / B站值班 / 记忆（每 30 秒自动刷新，只读文件、不花模型钱） |
+| **值班台** | 侧栏一屏看三样心跳：QQ 观察器 / B站值班 / 记忆（每 30 秒自动刷新，只读文件、不花模型钱）；v0.35 起带「省 token」卡：观察间隔 / 回话间隔（各 1–30 分钟）、峰时减半、脚本级跳过规则 |
 | **可移植性** | 默认备份到家目录、目录不可写自动回退、`memory_doctor` 一键自检 |
 
 > 定位：**五层按用途**（常驻 / 按需·行为 / 按需·知识 / 账本 / 临时），加一套状态与隔离机制——层管「什么时候进上下文」，其余管「怎么用、不滥用、不串台」。v0.34 之后又加了一道写入守卫和一个要点层——前者管「别让脏东西进来」，后者管「别让一堆原文糊人一脸」。
@@ -311,7 +311,7 @@ API 对应三个动作：`GET ?action=fact-candidates&limit=`（列表 + `pendin
 
 ## 自动摘要（v0.11 起）：模型压过的段落，只在检索时出现
 
-每个回合已经有机械压缩的 `kind:"turn"` 日记（user/assistant 各截 240 字）。自动摘要（**默认关闭**）在下面三个时机，把还没摘过的回合压成一条 `kind:"auto-summary"` 日记。**默认用当前会话的模型**；v0.26 起可以在 `autoSummary.model` / `facts.model` 指定独立路由（比如本地 Ollama 的小模型），调用失败会自动回退主会话模型：
+每个回合已经有机械压缩的 `kind:"turn"` 日记（user/assistant 各截 240 字）。**v0.35 起可以连全文一起存**（`config.diary.fullText=true`）：超出 240 字的部分写进 `userFull` / `assistantFull`，短字段照旧保留——**注入与检索只读短字段，开全文不会让上下文变长**（`test/diary-full.mjs` 16 项盯着这条）。为什么要这个开关：原文只活在宿主的会话文件里，宿主哪天清理就没了，日记全文是第二份底；默认关是因为它会把隐私面放大（备份、导出、脱敏都多一份副本）。自动摘要（**默认关闭**）在下面三个时机，把还没摘过的回合压成一条 `kind:"auto-summary"` 日记。**默认用当前会话的模型**；v0.26 起可以在 `autoSummary.model` / `facts.model` 指定独立路由（比如本地 Ollama 的小模型），调用失败会自动回退主会话模型：
 
 1. **上下文被压缩后**（v0.13.2 起以真实信号为准，v0.15 起认原生事件）：`turn-stopping` 里本回合是否有原生 `compaction/end` / `compaction/summary` 事件（官方 `dsh-compaction-basic` 引擎的做法，2026-10-21 起是主力）、或调用了 `compress` 工具（bili 时代的做法，它**不会 append** 原生事件 —— 实测 16 个会话日志里 compaction 事件 0 条）；`session/event` 的 `compaction/end` 监听作兼容备用；另有「上下文骤降 ≥35%、且原先超过 3 万字」兜底。各条路都会打一行 diag，方便事后核对；
 2. **会话结束**（`disposed`）；
@@ -381,6 +381,11 @@ API 对应三个动作：`GET ?action=fact-candidates&limit=`（列表 + `pendin
 | `memory_control` | 全局/单会话开关；`action=inject` 可切注入频率：`mode=every-step`（每步注入，默认）或 `first-step`（只在会话内注入一次，之后靠 memory_search，省上下文）；`action=summary` 开关自动摘要（`enabled=true/false`，不传则切换），`action=summarize` 立刻给当前会话未摘要的回合跑一次 |
 | `memory_facts` | 三期：`action=list` 看待确认的稳定事实候选；`action=extract` 跑一次提炼（只写 `deep/fact-candidates.jsonl`，不碰记忆层）；`action=accept id=…` 确认后写入 `user`/`relation`/`saying`（唯一写入口）；`action=reject id=…` 拒绝 |
 | `memory_backup` | 立刻备份到 F 盘 |
+| `memory_void` | 标废一条记忆：`hash` 或 `keyword`+`layer`，`reason` 必填；数据不删、不进注入、默认不进检索，`unvoid` 可恢复 |
+| `memory_handoff` | 工作台移交：`send` 留一条交接 / `pull` 取走即标记 / `list` 查看，用于不同会话、不同工作区之间接力 |
+| `memory_export` | 导出档案：往 `~/.dsh/memory/exports/export-<时间>/` 写「档案.md」（人读）+「data.json」（机器读），含三张卡、各层条目、最近日记、标废记录、手册、会话索引；只读，不改记忆 |
+
+> 这里只列常用项。完整清单（23 个工具，含多人多群 4 个）见《全功能说明》第三节。
 
 ## 唯一性与哈希定位
 
@@ -442,7 +447,7 @@ API 对应三个动作：`GET ?action=fact-candidates&limit=`（列表 + `pendin
 
 ```powershell
 # 1. 把包加进 profile（会同时进入 dsh.profile.bundles）
-& 'C:\Users\Administrator\AppData\Local\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop add file:D:/Documents/deepseek-harness/plugins/dsh-puppet-memory
+& '<DSH 安装目录>\resources\runtime\cli\bin\dsh.cmd' plugin --profile <profile> add file:<插件源码目录>
 
 # 2. 重启 DSH（插件在启动时加载）
 ```
@@ -511,6 +516,7 @@ memory_doctor
   },
   "backup": { "enabled": true, "dir": "<你的家目录>\\.dsh\\memory-backups", "sessions": true },
   "sessions": { "disabled": [] },
+  "diary": { "fullText": false, "maxChars": 8000 },
   "autoSummary": {
     "enabled": false,
     "onCompaction": true,
@@ -816,7 +822,7 @@ node test/session-memory.mjs           # 会话记忆：屏蔽/删除归档/注�
 
 1. **数据先于代码**：任何存储结构变化，顺序固定——先备份 → 写迁移 → **能读旧格式** → 确认回滚后新字段不丢。不允许「改了就不认老数据」。
 2. **默认行为不轻改**：新功能默认关或 opt-in；要改默认，必须在变更说明里单独写一段，说清「你会感觉到什么变化」。
-3. **一批改动一次验证**：24 套测试 + 预检 19 项 + **用真实记忆跑一遍**（不是只跑临时目录），三步都过才算候选版本。
+3. **一批改动一次验证**：28 套测试 + 预检 21 项 + **用真实记忆跑一遍**（不是只跑临时目录），三步都过才算候选版本。
 4. **破坏性变更单独发**：会改数据、删数据、改注入语义的，不攒批——单独一版，附迁移说明和回滚方法。
 5. **一条硬规矩**：任何改动都不得让「回滚到上一版」变成数据丢失。做不到就别改。
 
@@ -853,30 +859,40 @@ node test/session-memory.mjs           # 会话记忆：屏蔽/删除归档/注�
 
 **跑一遍再发**：
 
-1. `node test/*.mjs` 全绿（24 套）
-2. `E:\dshf\gz\release\preflight.mjs` —— 18 项，其中第 18 项**专治这张表**：文档里没出现当前版本号就直接变红
+1. `node test/*.mjs` 全绿（28 套）
+2. 跑本机的发版预检脚本（`preflight.mjs`，21 项）——其中「文档版本号一致」和「README 首行版本」两项**专治这张表**：文档里没出现当前版本号、或者首行「当前最新发布为」还停在上一版，都会变红；「包内容隐私扫描」自动跑 `脱敏检查.mjs`
 3. 打包后核对 `tar -tzf *.tgz`：文档都在、版本号对、没有把本地临时文件打进去
+4. 包内容隐私扫描（preflight 会自动带上）：机器路径、QQ/群号、令牌、私人称呼一律为 0
 
 ## 回滚（改坏了怎么办）
 
 四种退路，从轻到重，都**不会**碰记忆数据（`~/.dsh/memory`）：
 
 ```powershell
-# 1. 拔线：删掉宿主里的目录联接（源码和记忆都留着，重建联接即可恢复）
-Remove-Item 'C:\Users\Administrator\.dsh\profiles\desktop\node_modules\dsh-puppet-memory' -Force
+# 1. 拔线：删掉宿主里的插件副本（源码和记忆都留着，重新 add 即可恢复）
+Remove-Item '<你的用户名>\.dsh\profiles\<profile>\node_modules\dsh-puppet-memory' -Force
 
 # 2. 官方卸载（需先关闭 DSH）
-& 'C:\Users\Administrator\AppData\Local\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd' plugin --profile desktop remove dsh-puppet-memory
+& '<DSH 安装目录>\resources\runtime\cli\bin\dsh.cmd' plugin --profile <profile> remove dsh-puppet-memory
 
 # 3. 只禁不改：把 profile 的 dsh.profile.bundles 里 "dsh-puppet-memory" 一行删掉
 
 # 4. 全量回退 profile 配置（安装前备份）
-Copy-Item 'D:\Documents\deepseek-harness\backups\dsh-profile-20261020b\*' 'C:\Users\Administrator\.dsh\profiles\desktop\' -Force
+Copy-Item '<profile 备份目录>\*' '<你的用户名>\.dsh\profiles\<profile>\' -Force
 ```
 
 插件自身异常只影响它自己（工具不注册 / 注入为空），宿主启动时会记录错误但继续跑；排查看 `~/.dsh/memory/diag.log`。
 
 ## 版本历史
+- **0.35.0（2026-10-26）**：**标废 + 别名 + 导出档案**（一批发，不拆版本）。
+  ①**标废（B-55）**：新增 `memory_void` / `unvoid`，`reason` 必填。标了废的条目**不进注入、默认不进检索**（要看得带 `includeVoided`），但原文和作废原因都留着，`memory_locate` 查得到、随时能恢复；**绝不物理删除**。用意：淘汰不是删除，是「降级且留账」。
+  ②**写入侧别名（B-60）**：`memory_write` 加 `aliases`（最多 8 个、每个 ≤16 字），把「同一件事的其他叫法」一起存进去，之后搜哪个说法都能命中；更新已有条目时别名取并集。这条是评测逼出来的——纯同义改写的问法，纯词法检索的 recall@5 只有 0–25%，光调权重救不了。
+  ③**导出档案（B-66）**：新增 `memory_export`，往 `~/.dsh/memory/exports/export-<时间>/` 写两份：`档案.md`（人读：三张卡、各层条目带 hash/日期/标签/标废原因、最近日记、手册、会话索引）与 `data.json`（机器读，`formatVersion: 1`）。**只读**，不写任何记忆文件。用途：换机器、交给人接手、给下一代模型重算——数据比代码活得久。
+  ④**日记全文可选（A-75）**：`config.diary.fullText` 打开后，回合日记除 240 字摘要外再存 `userFull` / `assistantFull`。**加字段不替换**——注入与检索仍只读短字段，所以开全文不会让上下文变长。默认关（隐私面会放大）。
+  ⑤**`engines.dsh`（B-51）**：声明 `>=0.2.1-rc.2`，市场卡片不再显示「宿主要求未知」。
+  ⑥**修掉三处旧账**：`array/sessions.jsonl` 的 `sessionFile` 一列此前全是空串（定位会话文件时把 `session-` 前缀拼了两遍，A-70）；新装用户的默认人设模板写着我们自己的称呼（A-71）；包内文档里的本机路径与「脱敏检查」两条从来没生效过的正则（A-72）。
+  ⑦值班台底部加「省 token」卡：观察间隔 / 回话间隔（各 1–30 分钟）、峰时减半、脚本级跳过规则——**这些改的是本机 QQ 观察器**（`~/.dsh/qq-watch/settings.json`，观察器是单独的本机脚本，不在本插件包内），没跑观察器的人这张卡只会写一份用不上的配置文件。
+  **你会感觉到什么变化**：标废过的条目从注入和默认检索里消失（数据还在）；检索的新鲜度权重下调了（新写的条目不再压过真正相关的老条目）；同义问法比以前容易搜到（靠写入时存的别名）；其余行为不变。升级不需要迁移，`config.json` 缺 `diary` 段会补默认值。测试 31 套、预检 21 项。
 - **0.34.0（2026-10-25）**：**写入守卫 + 要点层**（B-52，取样市场后的两个缺口）。①**写入守卫**：乱码（含替换字符 `�`、`锟斤拷` 一类错编序列、`Ã¢`/`â€` 这类被当 Latin-1 解过的 UTF-8）、超长粘贴、把 `<puppet_memory>` 或 `【核心记忆】` 这类**注入块整段复制进记忆**，一律拒收并返回可读原因（不抛异常，让模型改文案而不是让脏数据进库）；便签与笔记的**近似重复**自动合并进旧条目（字符二元组 Jaccard ≥ 0.82，或长度接近且包含度 ≥ 0.9 时认），合并时标签取并集、只有新文本多两成以上才替换正文；人设文件整行去重（以前同一行写两遍会真的出现两遍）。配置 `writeGuard.enabled / dedupe / dedupeThreshold / maxChars`，默认开，可按层调上限（relation/saying 1200、user 800、memo 4000、note 8000、persona 1200、diary 4000）。②**要点层**：`memory_search` 顶部先给最多 3 条「要点 + hash」速览，扫一眼就知道要不要读原文；要点是**抽取式**——取第一句、去掉标记与层前缀、≤60 字，不调模型、不花 token、不额外存字段。配置 `brief.enabled / prependHits / maxChars`，关掉就直接退回老格式。新增 `test/write-guard.mjs`（23 项）与 `test/brief.mjs`（17 项），24 套测试全过。老数据一个字不用动，`config.json` 缺这两段会自动补默认值。
 - **0.33.0-dev（2026-10-24，未发布）**：**记忆三态**（B-32，借鉴 AI 小屋系列四）——`memory_write` 新增 `state` / `proof` 两个参数：`done` 做过（有回执）/ `failed` 没做成（配失败原因）/ `heard` 听说或转述（未验证），也认中文别名（做过 / 没做成 / 听说）。标记后**注入与检索都会带**〔做过〕〔没做成〕〔听说〕前缀，不再把「听说」「没做成」当既成事实说；更新已有条目时旧状态会保留，不认识的 state 直接忽略、不落库。另一个是行为约束（B-31）：核心卡红线加一条「承诺动作要有回执」——说「我去看 / 我去发 / 我去查」就得真调工具，没回执就不说这句。新增 `test/memory-states.mjs`（18 项）。另**核心卡拆两半**（用户 2026-10-24：「核心卡的状态分开来记」）：`behavior/core.md` 只放稳定内容（称呼/红线/约定，600 字），会变的状态挪到 `behavior/core-state.md`（150 字独立预算）——状态改来改去不吃稳定内容的预算，两份分开截断、分开报字数；`memory_core` 加 `target=core|state`；注入里状态段单独标【当前状态】。`test/core-memory.mjs` 扩到 50 项。再把**规则单独拎成一份**（用户 2026-10-24：「压缩后会丢规则，那就压缩后注入一次，已经遵守的规则不用每次提醒」）：`behavior/core-rules.md`（说话方式 / 红线 / 约定，400 字预算）跟稳定内容、状态**各算各的指纹**——状态一改只补状态段，规则不会跟着重复；规则只在「内容改过」或「上下文压缩后」各注入一次（`<puppet_rules>` 单独一块）；`memory_core` 的 `target` 扩到 `core|rules|state`。`test/core-memory.mjs` 扩到 70 项。
 - **0.33.1（2026-10-25，已发布）**：**只有文档**——把两份人话文档合并成一份（老 `怎么用-给大肥鱼.md` 的实用段落并进《给人类的说明书》后删除），删掉停在 0.28.0 的 `便签.txt`；《全功能说明》更新到本版（补记忆三态、核心卡三份、一句话复位、备份含 `social/` 与恢复口径）。同时在预检里加了一项「文档版本号与 package.json 一致」，以后发版漏更新文档会直接变红。

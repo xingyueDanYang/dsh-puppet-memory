@@ -17,8 +17,11 @@ const cwd = process.cwd()
 const GENERIC_RULES = [
   { name: 'GitHub PAT', re: /\bghp_[A-Za-z0-9]{20,}/ },
   { name: '通用 key/token 赋值', re: /(api[_-]?key|token|secret|password)\s*[:=]\s*["'][A-Za-z0-9_\-]{12,}["']/i },
-  { name: '本机绝对路径（Windows）', re: /\b[A-Za-z]:\\\\(?:Users|Documents|dshf|deepseek-harness)\\/ },
-  { name: '家目录路径', re: /C:\\\\Users\\\\[A-Za-z0-9_.-]+/ },
+  // 2026-10-26 修：老正则把反斜杠写成 \\\\（正则里代表两个反斜杠），实际文档里是单个 \，
+  // 所以「本机绝对路径」和「家目录路径」两条从来没真的命中过——README 里一堆
+  // C:\Users\Administrator\… 全被漏掉。改成单反斜杠匹配；占位符 C:\Users\<你的用户名> 不命中。
+  { name: '本机绝对路径（Windows）', re: /\b[A-Za-z]:\\(?:Users|Documents|dshf|deepseek-harness)\\(?!<|[你您])/i },
+  { name: '家目录路径', re: /C:\\Users\\[A-Za-z0-9_.-]+/ },
   { name: '内网 IP', re: /\b(192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})\b/ },
   { name: '住址相关', re: /(余姚|宁波|浙江宁波)/ },
   { name: '凭证文件名', re: /(\.npmrc-web|bili_credential\.json|\.gitee-token|\.login\.env)/ },
@@ -63,8 +66,12 @@ const SKIP_DIRS = new Set(['.git', 'node_modules', 'assets'])
 
 function listFiles() {
   try {
-    const out = execFileSync('git', ['ls-files', '-co', '--exclude-standard'], { cwd, encoding: 'utf8' })
-    return out.split('\n').map((s) => s.trim()).filter(Boolean)
+    // 2026-10-26 修：`git ls-files` 默认会把非 ASCII 文件名转成八进制转义（"\345\205\250…"），
+    // 于是 给人类的说明书.md / 全功能说明.md / 验收-A测-修补目录.md 这些中文名文档读不到，
+    // 又被下面的 catch 静默 continue —— 等于从来没被检查过（本次差点把真实群号发出去）。
+    // -z 用 NUL 分隔且不做路径转义，中文名原样返回。
+    const out = execFileSync('git', ['ls-files', '-co', '--exclude-standard', '-z'], { cwd, encoding: 'utf8' })
+    return out.split('\0').filter(Boolean)
   } catch {
     // 不在 git 仓库里：退化为遍历当前目录
     const acc = []
@@ -82,14 +89,20 @@ function listFiles() {
   }
 }
 
-const files = listFiles().filter((f) => TEXT_EXT.test(f))
+// 检查脚本自己不参与扫描：它的注释和规则表里必须出现「路径长什么样」「凭证文件叫什么」，
+// 否则这些规则没法写。跳过它，但其它任何文件都不跳过。
+const SELF = new Set(['脱敏检查.mjs', '脱敏检查.mjs.bak'])
+const files = listFiles().filter((f) => TEXT_EXT.test(f) && !SELF.has(f))
 const hits = []
+const unreadable = []
 
 for (const f of files) {
   let text
   try {
     text = fs.readFileSync(path.join(cwd, f), 'utf8')
   } catch {
+    // 不静默跳过：读不到的文件单独报出来（以前中文名文件就是这样被漏掉的）
+    unreadable.push(f)
     continue
   }
   const lines = text.split('\n')
@@ -106,7 +119,8 @@ for (const f of files) {
 }
 
 if (!hits.length) {
-  console.log(`✅ 脱敏检查通过：扫了 ${files.length} 个文本文件，没发现敏感痕迹。`)
+  const extra = unreadable.length ? `；⚠️ 有 ${unreadable.length} 个文本文件读不到、没扫：${unreadable.slice(0, 6).join('、')}` : ''
+  console.log(`✅ 脱敏检查通过：扫了 ${files.length} 个文本文件，没发现敏感痕迹。${extra}`)
   process.exit(0)
 }
 

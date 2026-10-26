@@ -99,11 +99,15 @@ const PATHS = {
   assets: path.join(MEM_DIR, "assets"),
 };
 
+// 2026-10-26（A-71）：默认人设模板改成中性占位。
+// 老版本这里写死了「用户叫我『大肥鱼』」——那是我们自己的称呼，却会被 ensure() 写进
+// 每一个新装用户的 persona.md，等于让所有人的 AI 都管主人叫大肥鱼。属于隐私/白标失误。
+// 改法：只留「这里该写什么」的提示，不写具体内容；已有 persona.md 的用户不受影响（只补缺失文件）。
 const DEFAULT_PERSONA = `# 人设
-- 称呼：用户叫我「大肥鱼」，我也接受这个称呼，可偶尔自称大肥鱼。
+- 称呼：把用户第一次告诉你的叫法写在这里（他怎么自称、你该怎么称呼他）。
 - 身份：DeepSeek 模型，运行在 DeepSeek Harness（DSH）里。
 - 风格：先给结论再解释，少客套，不说空话；不懂就说不懂，不装懂。
-- 用户偏好：喜欢直率真实的回答，反感「立场先于事实」和空泛的漂亮话。
+- 用户偏好：这里写用户的偏好、禁忌、在意的事；还没有就先留空。
 `;
 
 const SESSION_STOP_BIGRAMS = new Set([
@@ -478,6 +482,11 @@ function defaultConfig() {
       keepDays: 30,
     },
     sessions: { disabled: [] },
+    // v0.35（B-67）：回合日记是否连全文一起存。
+    // 默认关：只存 240 字截断（够检索，体积小）。开了之后超出 240 字的部分写进 userFull/assistantFull，
+    // **短字段照样保留**——注入与检索只读短字段，所以开全文不会让上下文变长。
+    // 为什么要这个开关：原文只活在宿主的会话文件里，宿主哪天清理就没了；日记全文是第二份底。
+    diary: { fullText: false, maxChars: 8000 },
     // 自动摘要（v0.11.0）：压缩后 / 会话结束时用模型把本段回合压成一条【自动摘要】。
     // 默认关闭（模型调用要花 token，先手动开验证效果）。只写 diary 层，不进每轮注入。
     autoSummary: {
@@ -1465,6 +1474,85 @@ function readRequestBody(req, limit = 64 * 1024) {
 }
 
 // 把 API 挂到宿主 webServer 上；返回 disposer，方便插件被关开关/热重载时摘掉路由
+// ---------------------------------------------------------------------------
+// v0.35（B-53 / B-54）观察器设置：~/.dsh/qq-watch/settings.json
+// 为什么放在插件里：面板在 client 半边、读不了文件，得有一条 host 路由替它读写。
+// 字段口径与 `tools/napcat/bridge/settings.mjs` 保持一致（那边是观察器自己的读取端）：
+//   watchMinutes 1–30 / replyMinutes 1–30 / peakHalf / peakWindows / skip[]
+// 只认这几项，其余字段原样保留；写坏了也只影响观察器下一次读，不会把设置文件搞丢。
+// ---------------------------------------------------------------------------
+// QQ_WATCH_DIR 仅用于本地测试；正常运行时是 ~/.dsh/qq-watch
+const QQ_WATCH_DIR = process.env.QQ_WATCH_DIR || path.join(DSH_DIR, "qq-watch");
+const QQ_WATCH_SETTINGS = path.join(QQ_WATCH_DIR, "settings.json");
+const QQ_PEAK_DEFAULT = [["09:00", "12:00"], ["14:00", "18:00"]];
+
+function qqClampMinutes(v, fallback) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(30, Math.max(1, Math.round(n)));
+}
+
+function qqSanitizeSettings(raw) {
+  const input = raw && typeof raw === "object" ? raw : {};
+  const out = { ...input };
+  out.watchMinutes = qqClampMinutes(input.watchMinutes, 1);
+  out.replyMinutes = qqClampMinutes(input.replyMinutes, 15);
+  out.peakHalf = Boolean(input.peakHalf);
+  const wins = Array.isArray(input.peakWindows) ? input.peakWindows.filter((w) => Array.isArray(w) && w.length === 2 && /^\d{2}:\d{2}$/.test(String(w[0])) && /^\d{2}:\d{2}$/.test(String(w[1]))).slice(0, 6) : [];
+  out.peakWindows = wins.length ? wins.map((w) => [String(w[0]), String(w[1])]) : QQ_PEAK_DEFAULT;
+  out.skip = (Array.isArray(input.skip) ? input.skip : [])
+    .slice(0, 50)
+    .filter((s) => s && typeof s === "object" && ["keyword", "regex", "group"].includes(String(s.type || "").toLowerCase()) && String(s.value || "").trim())
+    .map((s) => ({ type: String(s.type).toLowerCase(), value: String(s.value).slice(0, 200) }));
+  return out;
+}
+
+function readQqWatchSettings() {
+  try {
+    return qqSanitizeSettings(JSON.parse(fs.readFileSync(QQ_WATCH_SETTINGS, "utf8")));
+  } catch {
+    return qqSanitizeSettings({});
+  }
+}
+
+function writeQqWatchSettings(patch) {
+  const current = readQqWatchSettings();
+  const next = qqSanitizeSettings({ ...current, ...(patch && typeof patch === "object" ? patch : {}) });
+  fs.mkdirSync(QQ_WATCH_DIR, { recursive: true });
+  fs.writeFileSync(QQ_WATCH_SETTINGS, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+  return next;
+}
+
+// 与观察器同一套算法：峰时（左闭右开）内两个间隔都 ×2
+function qqInPeak(settings, when = new Date()) {
+  const mins = when.getHours() * 60 + when.getMinutes();
+  for (const [a, b] of settings.peakWindows || []) {
+    const [ah, am] = String(a).split(":").map(Number);
+    const [bh, bm] = String(b).split(":").map(Number);
+    const start = ah * 60 + am;
+    const end = bh * 60 + bm;
+    if (start <= end ? mins >= start && mins < end : mins >= start || mins < end) return true;
+  }
+  return false;
+}
+
+function qqWatchView() {
+  const settings = readQqWatchSettings();
+  const peak = Boolean(settings.peakHalf) && qqInPeak(settings);
+  return {
+    ok: true,
+    settings,
+    effective: {
+      watchMinutes: settings.watchMinutes * (peak ? 2 : 1),
+      replyMinutes: settings.replyMinutes * (peak ? 2 : 1),
+      inPeak: qqInPeak(settings),
+      peakApplied: peak,
+      file: QQ_WATCH_SETTINGS,
+      exists: fs.existsSync(QQ_WATCH_SETTINGS),
+    },
+  };
+}
+
 function registerBackupApi(service) {
   const sendJson = (res, obj, status = 200) => {
     res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
@@ -1490,6 +1578,7 @@ function registerBackupApi(service) {
           return sendJson(res, autoSummaryConfigView());
         }
         if (action === "duty-board") return sendJson(res, dutyBoardData());
+        if (action === "qq-watch") return sendJson(res, qqWatchView());
         if (action === "session-memory") {
           const mem = sessionMemory();
           const wanted = normalizeSessionId(url.searchParams.get("session") || "");
@@ -1525,6 +1614,17 @@ function registerBackupApi(service) {
       if (action === "save") {
         const result = updateBackupPolicy(body);
         return sendJson(res, result, result.ok ? 200 : 400);
+      }
+      if (action === "qq-watch") {
+        // B-53/B-54：面板保存两个间隔 + 峰时减半 + 跳过规则。只写 settings.json，不重启观察器。
+        const patch = {};
+        if (body.watchMinutes !== undefined) patch.watchMinutes = body.watchMinutes;
+        if (body.replyMinutes !== undefined) patch.replyMinutes = body.replyMinutes;
+        if (body.peakHalf !== undefined) patch.peakHalf = body.peakHalf;
+        if (Array.isArray(body.skip)) patch.skip = body.skip;
+        if (!Object.keys(patch).length) return sendJson(res, { ok: false, error: "没有要改的字段（watchMinutes / replyMinutes / peakHalf / skip）" }, 400);
+        const settings = writeQqWatchSettings(patch);
+        return sendJson(res, { ...qqWatchView(), settings, message: "已保存（观察器下一轮热读生效，不用重启）" });
       }
       if (action === "save-autosummary") {
         const result = updateAutoSummaryPolicy(body);
@@ -2884,6 +2984,232 @@ function renderDoctor(checks = []) {
   return `记忆插件自检：${summary}\n${lines.join("\n")}`;
 }
 
+// ---------------------------------------------------------------------------
+// v0.35（B-66）导出档案
+// 为什么要有：记忆插件的主角是数据，不是功能。换宿主、换模型、插件哪天没人维护了，
+// 这份档案还得能打开看、能被人接手。备份快照是「给插件自己恢复用的」，结构跟内部目录
+// 一样，外人读不懂；导出是「给下一代/给别人看的」，一页 md + 一份 json。
+// 全程只读：不写任何记忆文件，只往 exports/ 下写这两份产物。
+// ---------------------------------------------------------------------------
+function pluginVersionOf() {
+  try {
+    return JSON.parse(fs.readFileSync(new URL("./package.json", import.meta.url), "utf8")).version || "";
+  } catch {
+    return "";
+  }
+}
+
+function rawLineCount(file) {
+  return fs.existsSync(file) ? readText(file).split(/\r?\n/).filter((l) => l.trim()).length : 0;
+}
+
+// 一行一条，人能扫：〔标签〕关键词＝释义（hash · 日期 · 已标废原因）
+function archiveRow(row) {
+  const tags = Array.isArray(row?.tags) ? row.tags.filter(Boolean) : [];
+  const st = stateOf(row?.state);
+  const head = [st ? STATE_LABELS[st] : "", ...tags].filter(Boolean).join("·");
+  const name = row?.keyword || row?.title || row?.name || clip(String(row?.text ?? row?.meaning ?? row?.hash ?? "?"), 24);
+  const body = clip(String(row?.meaning ?? row?.text ?? ""), 600);
+  const meta = [
+    row?.hash ? `hash ${String(row.hash).slice(0, 8)}` : "",
+    row?.ts ? String(row.ts).slice(0, 10) : "",
+    row?.voided ? `已标废：${row.voided.reason || "无原因"}` : "",
+  ].filter(Boolean).join(" · ");
+  return `- ${head ? `〔${head}〕` : ""}${name}${body ? `＝${body}` : ""}${meta ? `（${meta}）` : ""}`;
+}
+
+function exportArchive(args = {}) {
+  const ts = nowISO();
+  const stamp = ts.replace("T", "_").replace(/[:]/g, "").slice(0, 15);
+  const outDir = path.resolve(String(args.outDir || path.join(MEM_DIR, "exports", `export-${stamp}`)));
+  const diaryLimit = Math.max(0, Math.min(5000, Number(args.diaryLimit ?? 300)));
+  const includeWorkbook = args.includeWorkbook !== false;
+
+  // 各层读一遍（坏行由 readJsonl 自动跳过，这里记下丢了多少行供自检）
+  const files = {
+    relations: PATHS.relations,
+    user: PATHS.user,
+    memo: PATHS.memo,
+    notes: PATHS.notes,
+    sayings: PATHS.sayings,
+    sources: PATHS.sources,
+  };
+  const layers = {};
+  let badLines = 0;
+  for (const [key, file] of Object.entries(files)) {
+    layers[key] = readJsonl(file);
+    badLines += Math.max(0, rawLineCount(file) - layers[key].length);
+  }
+
+  const diaryFiles = dirJsonl(PATHS.diaryDir).sort();
+  const diary = diaryFiles
+    .flatMap((f) => readJsonl(f))
+    .sort((a, b) => String(a?.ts || "").localeCompare(String(b?.ts || "")));
+  const diaryTotal = diary.length;
+  const diaryShown = diaryLimit ? diary.slice(-diaryLimit) : [];
+
+  const sessions = readJsonl(PATHS.sessionsIndex).map((r) => ({
+    session: r?.session || "",
+    ts: r?.ts || "",
+    cwd: r?.cwd || "",
+    file: r?.sessionFile || "",
+  }));
+
+  const cards = {
+    persona: readText(PATHS.persona),
+    core: readText(PATHS.core),
+    coreRules: readText(PATHS.coreRules),
+    coreState: readText(PATHS.coreState),
+  };
+
+  let workbook = [];
+  try {
+    const dir = path.join(MEM_DIR, "deep", "workbook");
+    if (fs.existsSync(dir)) {
+      workbook = fs.readdirSync(dir).filter((f) => f.endsWith(".md")).sort().map((f) => {
+        const text = readText(path.join(dir, f));
+        return {
+          file: f,
+          title: (text.split(/\r?\n/)[0] || "").replace(/^#\s*/, "").trim(),
+          bytes: Buffer.byteLength(text, "utf8"),
+          text: includeWorkbook ? text : "",
+        };
+      });
+    }
+  } catch {
+    /* 手册读不到不影响导出 */
+  }
+
+  const guideCount = rawLineCount(PATHS.guide);
+  const voidedRows = Object.entries(layers).flatMap(([layer, rows]) =>
+    rows.filter((r) => r?.voided).map((r) => ({ layer, ...r })),
+  );
+
+  const counts = {
+    relations: layers.relations.length,
+    user: layers.user.length,
+    memo: layers.memo.length,
+    notes: layers.notes.length,
+    sayings: layers.sayings.length,
+    sources: layers.sources.length,
+    diaryTotal,
+    diaryExported: diaryShown.length,
+    sessions: sessions.length,
+    workbook: workbook.length,
+    guide: guideCount,
+    voided: voidedRows.length,
+  };
+
+  const cardLen = (s) => String(s || "").replace(/\s/g, "").length;
+  const lines = [];
+  lines.push("# 木偶记忆 · 导出档案");
+  lines.push("");
+  lines.push(`- 导出时间：${ts}`);
+  lines.push(`- 插件：dsh-puppet-memory ${pluginVersionOf() || "（版本未知）"}`);
+  lines.push(`- 记忆目录：${MEM_DIR}`);
+  lines.push(`- 格式版本：archive-1（字段只增不改名；解析看 data.json）`);
+  lines.push("");
+  lines.push("## 0. 这份档案怎么读");
+  lines.push("");
+  lines.push("这是「数据的原文」，不是插件的备份快照。快照用来把插件恢复原样，结构跟内部目录一致；");
+  lines.push("这份用来**在插件没有、或换了模型之后，仍然能读懂并接手**。下面每一节都能单独拿去用。");
+  lines.push("");
+  lines.push(`- 常驻三张卡：核心 ${cardLen(cards.core)} 字 / 规则 ${cardLen(cards.coreRules)} 字 / 状态 ${cardLen(cards.coreState)} 字`);
+  lines.push(`- 条目：关系 ${counts.relations}、用户档案 ${counts.user}、笔记 ${counts.notes}、常言 ${counts.sayings}、出处 ${counts.sources}、便签 ${counts.memo}`);
+  lines.push(`- 日记：导出最近 ${counts.diaryExported} 条（总共 ${counts.diaryTotal} 条）`);
+  lines.push(`- 会话索引 ${counts.sessions} 条、引导索引 ${counts.guide} 条、手册 ${counts.workbook} 篇；标废条目 ${counts.voided} 条`);
+  lines.push(`- 坏行：${badLines} 行（JSONL 里解析不出来的行，导出时跳过，不影响其它条目）`);
+  lines.push("");
+  lines.push("> 这份档案含隐私（称呼、关系、日记原话）。要发给别人之前先脱敏。");
+  lines.push("");
+
+  const section = (title, note, rows, fmt) => {
+    lines.push(`## ${title}${note ? `（${note}）` : ""}`);
+    lines.push("");
+    if (!rows.length) {
+      lines.push("（空）");
+    } else {
+      for (const r of rows) lines.push(fmt(r));
+    }
+    lines.push("");
+  };
+
+  lines.push("## 1. 人设");
+  lines.push("");
+  lines.push(String(cards.persona || "（空）").trim());
+  lines.push("");
+  for (const [title, text] of [["2. 核心卡", cards.core], ["3. 规则卡", cards.coreRules], ["4. 状态卡", cards.coreState]]) {
+    lines.push(`## ${title}`);
+    lines.push("");
+    lines.push(String(text || "（空）").trim());
+    lines.push("");
+  }
+
+  section("5. 关系", "人、关系、约定；标废的在行尾标原因", layers.relations, archiveRow);
+  section("6. 用户档案", "", layers.user, archiveRow);
+  section("7. 常言 / 梗", "", layers.sayings, archiveRow);
+  section("8. 笔记", "", layers.notes, archiveRow);
+  section("9. 出处", "", layers.sources, archiveRow);
+  section("10. 便签", "临时层，可随时清空", layers.memo, archiveRow);
+  section("11. 标废记录", "数据没删，只是不再用；原因留着，可恢复", voidedRows, (r) => `${archiveRow(r)}〔原属 ${r.layer}〕`);
+  section("12. 日记", `最近 ${counts.diaryExported} 条`, diaryShown, (r) => {
+    const who = r?.kind === "auto-summary" ? "自动摘要" : `用户：${clip(String(r?.user || ""), 80)} / 我：${clip(String(r?.assistant || ""), 120)}`;
+    return `- ${String(r?.ts || "").slice(0, 16).replace("T", " ")} ${who}`;
+  });
+
+  lines.push("## 13. 手册（workbook）");
+  lines.push("");
+  if (!workbook.length) lines.push("（空）");
+  for (const w of workbook) {
+    lines.push(`### ${w.title || w.file}`);
+    lines.push("");
+    lines.push(`文件：\`${w.file}\`（${w.bytes} 字节）`);
+    lines.push("");
+    if (w.text) {
+      lines.push(w.text.trim());
+      lines.push("");
+    }
+  }
+
+  section("14. 会话索引", "只有指针：会话 id / 时间 / 工作目录 / 原文文件位置", sessions, (r) =>
+    `- ${r.ts ? String(r.ts).slice(0, 16).replace("T", " ") : "?"} · ${r.session || "?"} · ${r.cwd || "?"}${r.file ? ` · ${r.file}` : ""}`);
+
+  const mdPath = path.join(outDir, "档案.md");
+  const jsonPath = path.join(outDir, "data.json");
+  fs.mkdirSync(outDir, { recursive: true });
+  fs.writeFileSync(mdPath, `${lines.join("\n")}\n`, "utf8");
+  fs.writeFileSync(
+    jsonPath,
+    `${JSON.stringify({
+      format: "dsh-puppet-memory-archive",
+      formatVersion: 1,
+      exportedAt: ts,
+      plugin: { name: PLUGIN_NAME, version: pluginVersionOf() || "" },
+      memoryDir: MEM_DIR,
+      counts,
+      badLines,
+      cards,
+      layers,
+      diary: diaryShown,
+      sessions,
+      workbook: workbook.map((w) => ({ file: w.file, title: w.title, bytes: w.bytes, text: w.text })),
+      guide: { count: guideCount, note: "引导索引是派生层，可由 memory_guide action=rebuild 重建，故不导出正文" },
+      voided: voidedRows,
+    }, null, 2)}\n`,
+    "utf8",
+  );
+
+  const kb = (p) => `${(fs.statSync(p).size / 1024).toFixed(1)} KB`;
+  return [
+    `已导出档案：${outDir}`,
+    `- 档案.md（${kb(mdPath)}，人读）`,
+    `- data.json（${kb(jsonPath)}，机器读）`,
+    `内容：关系 ${counts.relations} / 用户 ${counts.user} / 笔记 ${counts.notes} / 常言 ${counts.sayings} / 出处 ${counts.sources} / 便签 ${counts.memo} / 日记 ${counts.diaryExported}（共 ${counts.diaryTotal}）/ 会话 ${counts.sessions} / 手册 ${counts.workbook} / 标废 ${counts.voided}`,
+    `坏行跳过：${badLines} 行`,
+    "这份档案含隐私，直接外发前先脱敏。",
+  ].join("\n");
+}
+
 function buildStats() {
   const fileStats = [];
   const known = [
@@ -3505,6 +3831,20 @@ function writeTurnDiary(agent, events) {
     keywords,
     hash,
   };
+  // v0.35（B-67）日记存全文（可选，默认关）：
+  // 为什么加：截断 240 字只够当「检索用的脸面」，不够当「原文」。原文一旦只活在会话文件里，
+  // 宿主哪天清理就没了。所以按需把全文记进 *_Full 字段——**加字段不替换**，注入和检索仍读短字段，
+  // 上下文体积不受影响（有测试盯着这条）。
+  try {
+    const dcfg = loadConfig()?.diary || {};
+    if (dcfg.fullText) {
+      const max = Math.max(240, Math.min(20000, Number(dcfg.maxChars) || 8000));
+      if (turn.user.length > 240) diaryEntry.userFull = clip(turn.user, max);
+      if (turn.assistant.length > 240) diaryEntry.assistantFull = clip(turn.assistant, max);
+    }
+  } catch {
+    /* 配置读不到就按默认（不存全文） */
+  }
   appendJsonl(diaryFile, diaryEntry);
 
   const sessionFile = findSessionFile(sessionId);
@@ -5282,6 +5622,29 @@ function apply(ctx) {
     });
 
     register({
+      name: "memory_export",
+      description:
+        "把记忆导出成一份可交接的档案：<记忆目录>/exports/export-<时间>/ 下写「档案.md」（人读）+「data.json」（机器读），含人设、三张卡、关系/用户/常言/笔记/出处/便签、最近日记、标废记录、手册、会话索引。全程只读，不改任何记忆数据。用于换机器、换宿主、把记忆交给下一代模型重算，或交给人接手。",
+      parameters: {
+        type: "object",
+        properties: {
+          outDir: { type: "string", description: "输出目录（默认 ~/.dsh/memory/exports/export-<时间>）" },
+          diaryLimit: { type: "number", description: "导出最近多少条日记，默认 300；0 = 不导日记" },
+          includeWorkbook: { type: "boolean", description: "是否连手册正文一起导出，默认 true" },
+        },
+        required: [],
+      },
+      output,
+      async execute(args) {
+        try {
+          return exportArchive(args || {});
+        } catch (err) {
+          return `导出失败：${err?.message || err}`;
+        }
+      },
+    });
+
+    register({
 
       name: "memory_recall",
       description:
@@ -5481,6 +5844,6 @@ const plugin = {
   apply,
 };
 
-export { apply, loadState, saveState, STATE_PATH, buildInjectionText, buildStateInjection, modelRouteOf, sessionMemory, createSessionMemory, sessionMemoryPaths, normalizeSessionId, isSpecialKey, doctorReport, renderDoctor, resolveBackupDir, probeWritable, coreInjection, coreOptions, createLines, lexicalScore, linesConfigDefaults, linesPaths, qualitativeOf, topicTokens, behaviorHint, createSocial, detectScene, normalizeName, personIdOf, registerSocialTools, sceneLabel, socialConfigDefaults, socialPaths, searchSocialContext, backupPolicySummary, compactionStats, compactionStatusLine, noteCompaction, noteAutoSummary, compressCallsIn, nativeCompactionsIn, compressToolCallsIn, compressionKindOf, readCompactionLog, appendCompactionRecord, ingestCompactionEvent, compactionRecords, compactionSelfCheck, dutyBoardData, sendHandoff, pullHandoff, listHandoffs, compactionSuiteDetected, listAutoSummaries, deleteAutoSummary, setFactCaller, factOptions, readFactCandidates, writeFactCandidates, pendingFactCandidates, factCandidateStats, factStatusLine, parseFactCandidates, buildFactPrompt, factInventory, isDuplicateFact, extractFactCandidates, acceptFactCandidate, rejectFactCandidate, updateBackupPolicy, updateAutoSummaryPolicy, autoSummaryConfigView, registerBackupApi, hostIsLoopback, readRequestBody, searchMemory, writeMemory, voidMemory, briefOf, aliasesOf, mergeAliases, writeGuardOf, writeGuardCheck, similarityOf, backupNow, pruneOldSnapshots, shouldSkipBackup, backupStampOf, writeTurnDiary, isCompressionEvent, renameAssetImage, listAssetImages, buildStats, tagsOf, validateTags, checkedTags, TAG_VOCAB, clearMemos, recallSession, decodeSessionFile, findSessionFile, relationInjectionLines, archiveRelationOverflow, locateMemory, jsonlHasHash, rebuildGuide, guideStats, guideLinks, guideNodes, addSource, listSources, findSources, sourceStats, loadSources, sourceTag, entryProvenance, sourceIndex, runAutoSummary, pendingTurns, autoSummaryOptions, buildAutoSummaryEntry, buildSummaryPrompt, summaryStyleLine, parseSummaryText, summaryInputOf, callWithThinkingRetry, setAutoSummaryCaller, defaultConfig, loadConfig, AUTO_SUMMARY_PREFIX };
+export { apply, loadState, saveState, STATE_PATH, buildInjectionText, buildStateInjection, modelRouteOf, sessionMemory, createSessionMemory, sessionMemoryPaths, normalizeSessionId, isSpecialKey, doctorReport, renderDoctor, resolveBackupDir, probeWritable, coreInjection, coreOptions, createLines, lexicalScore, linesConfigDefaults, linesPaths, qualitativeOf, topicTokens, behaviorHint, createSocial, detectScene, normalizeName, personIdOf, registerSocialTools, sceneLabel, socialConfigDefaults, socialPaths, searchSocialContext, backupPolicySummary, compactionStats, compactionStatusLine, noteCompaction, noteAutoSummary, compressCallsIn, nativeCompactionsIn, compressToolCallsIn, compressionKindOf, readCompactionLog, appendCompactionRecord, ingestCompactionEvent, compactionRecords, compactionSelfCheck, dutyBoardData, sendHandoff, pullHandoff, listHandoffs, compactionSuiteDetected, listAutoSummaries, deleteAutoSummary, setFactCaller, factOptions, readFactCandidates, writeFactCandidates, pendingFactCandidates, factCandidateStats, factStatusLine, parseFactCandidates, buildFactPrompt, factInventory, isDuplicateFact, extractFactCandidates, acceptFactCandidate, rejectFactCandidate, updateBackupPolicy, updateAutoSummaryPolicy, autoSummaryConfigView, registerBackupApi, hostIsLoopback, readRequestBody, searchMemory, writeMemory, voidMemory, exportArchive, readQqWatchSettings, writeQqWatchSettings, qqWatchView, briefOf, aliasesOf, mergeAliases, writeGuardOf, writeGuardCheck, similarityOf, backupNow, pruneOldSnapshots, shouldSkipBackup, backupStampOf, writeTurnDiary, isCompressionEvent, renameAssetImage, listAssetImages, buildStats, tagsOf, validateTags, checkedTags, TAG_VOCAB, clearMemos, recallSession, decodeSessionFile, findSessionFile, relationInjectionLines, archiveRelationOverflow, locateMemory, jsonlHasHash, rebuildGuide, guideStats, guideLinks, guideNodes, addSource, listSources, findSources, sourceStats, loadSources, sourceTag, entryProvenance, sourceIndex, runAutoSummary, pendingTurns, autoSummaryOptions, buildAutoSummaryEntry, buildSummaryPrompt, summaryStyleLine, parseSummaryText, summaryInputOf, callWithThinkingRetry, setAutoSummaryCaller, defaultConfig, loadConfig, AUTO_SUMMARY_PREFIX };
 export default plugin;
 
