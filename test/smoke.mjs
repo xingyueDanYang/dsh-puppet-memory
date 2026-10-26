@@ -237,7 +237,9 @@ const countsBefore = fs.readFileSync(path.join(memDir, "behavior", "diary", `${n
 mem.writeTurnDiary({ session: { header: { id: "test-session", cwd: "D:\\test" } } }, fakeEvents);
 const countsAfter = fs.readFileSync(path.join(memDir, "behavior", "diary", `${new Date().toISOString().slice(0, 7)}.jsonl`), "utf8").split(/\r?\n/).filter(Boolean).length;
 check("turn diary appended", countsAfter === countsBefore + 1);
-const idx = fs.readFileSync(path.join(memDir, "array", "index.jsonl"), "utf8");
+// v0.36：会话索引按月分片（跟日记同一套切法），所以读当月文件而不是单文件
+const monthKey = new Date().toISOString().slice(0, 7);
+const idx = fs.readFileSync(path.join(memDir, "array", "index", `${monthKey}.jsonl`), "utf8");
 check("array index written", idx.includes("test-session"));
 
 check("compression tool detect", mem.isCompressionEvent([{ type: "tool/call", data: { name: "compress" } }]) === true);

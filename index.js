@@ -94,7 +94,9 @@ const PATHS = {
   // 三期（v0.17）：从自动摘要提炼出来的「待确认事实」。这里只放候选，绝不被注入、不算记忆
   factCandidates: path.join(MEM_DIR, "deep", "fact-candidates.jsonl"),
   array: path.join(MEM_DIR, "array"),
+  // v0.36：老的单文件索引（只读兼容，新写入进 array/index/YYYY-MM.jsonl）
   arrayIndex: path.join(MEM_DIR, "array", "index.jsonl"),
+  arrayIndexDir: path.join(MEM_DIR, "array", "index"),
   sessionsIndex: path.join(MEM_DIR, "array", "sessions.jsonl"),
   assets: path.join(MEM_DIR, "assets"),
 };
@@ -432,6 +434,53 @@ function rel(file) {
   return path.relative(MEM_DIR, file).replace(/\\/g, "/");
 }
 
+// ---------------------------------------------------------------------------
+// v0.36：会话索引（array/index）按月分片，跟日记同一套切法（丹阳 2026-10-26：「两份要切的一样」）。
+// 为什么：单文件 index.jsonl 到 6 个月会涨到十几 MB，每次检索都要读它；按月切开每月才 ~2 MB。
+// 兼容：老的 array/index.jsonl 仍然能读（只不再写入），首次运行会把老数据按 ts 月份拆进数组目录。
+// ---------------------------------------------------------------------------
+function arrayIndexFileForMonth(month) {
+  return path.join(PATHS.arrayIndexDir, `${month}.jsonl`);
+}
+
+// 读侧统一入口：老的 index.jsonl（若还在）+ 各月份文件
+function arrayIndexFiles() {
+  const out = [];
+  if (fs.existsSync(PATHS.arrayIndex)) out.push(PATHS.arrayIndex);
+  out.push(...dirJsonl(PATHS.arrayIndexDir));
+  return out;
+}
+
+// 一次性迁移：把老的单文件按 ts 月份拆开，然后把原件挪进 archive（不再被读，留档）
+function migrateArrayIndexIfNeeded() {
+  return safe("会话索引分月迁移", () => {
+    if (!fs.existsSync(PATHS.arrayIndex)) return 0;
+    const rows = readJsonl(PATHS.arrayIndex);
+    if (!rows.length) return 0;
+    const buckets = new Map();
+    for (const row of rows) {
+      const month = String(row?.ts || "").slice(0, 7) || monthKey();
+      if (!buckets.has(month)) buckets.set(month, []);
+      buckets.get(month).push(row);
+    }
+    fs.mkdirSync(PATHS.arrayIndexDir, { recursive: true });
+    for (const [month, list] of buckets) {
+      const file = arrayIndexFileForMonth(month);
+      const existing = readJsonl(file);
+      const seen = new Set(existing.map((r) => `${r?.ts || ""}|${r?.session || ""}|${r?.hash || ""}`));
+      const add = list.filter((r) => !seen.has(`${r?.ts || ""}|${r?.session || ""}|${r?.hash || ""}`));
+      if (add.length) for (const row of add) appendJsonl(file, row);
+    }
+    // 原件留档：挪进 array/archive/，读侧不再读它，避免同一行被算两遍
+    const archiveDir = path.join(PATHS.array, "archive");
+    fs.mkdirSync(archiveDir, { recursive: true });
+    const stamp = nowISO().replace(/[:.]/g, "-").slice(0, 19);
+    fs.renameSync(PATHS.arrayIndex, path.join(archiveDir, `index-legacy-${stamp}.jsonl`));
+    diag(`会话索引已分月：${buckets.size} 个月份文件，原件已留档`);
+    return rows.length;
+  }, 0);
+}
+
 function readText(file) {
   try {
     return fs.readFileSync(file, "utf8");
@@ -517,6 +566,8 @@ function ensureDirs() {
     fs.mkdirSync(path.dirname(PATHS.persona), { recursive: true });
     fs.writeFileSync(PATHS.persona, DEFAULT_PERSONA, "utf8");
   }
+  // v0.36：老的单文件会话索引 → 按月拆分（幂等：文件不在了就什么都不做）
+  try { migrateArrayIndexIfNeeded(); } catch { /* 迁移失败不影响启动 */ }
 }
 
 // v0.34（B-52）：写入守卫的默认上限（字数）。只拦明显超长的粘贴，不拦正常条目。
@@ -1995,7 +2046,7 @@ function searchTargets(layer) {
     ...dirJsonl(PATHS.diaryDir),
   ];
   const deep = [PATHS.sayings, PATHS.guide, ...dirJsonl(PATHS.treeDir)];
-  const array = [PATHS.arrayIndex, PATHS.sessionsIndex];
+  const array = [...arrayIndexFiles(), PATHS.sessionsIndex];
   if (layer === "behavior") return behavior;
   if (layer === "deep") return deep;
   if (layer === "array") return array;
@@ -3321,13 +3372,19 @@ function buildStats() {
     ["behavior/notes.jsonl", PATHS.notes],
     ["deep/sayings.jsonl", PATHS.sayings],
     ["deep/guide.jsonl", PATHS.guide],
-    ["array/index.jsonl", PATHS.arrayIndex],
+    ["array/index/*.jsonl", null],
     ["array/sessions.jsonl", PATHS.sessionsIndex],
     ["behavior/sources.jsonl", PATHS.sources],
   ];
   for (const [label, file] of known) {
-    const lines = fs.existsSync(file) ? readText(file).split(/\r?\n/).filter((l) => l.trim()).length : 0;
-    fileStats.push(`${label}: ${lines} 条`);
+    // file 为 null 表示「一组月份文件」：算跨文件合计
+    const targets = file === null ? arrayIndexFiles() : [file];
+    const lines = targets.reduce(
+      (sum, f) => sum + (fs.existsSync(f) ? readText(f).split(/\r?\n/).filter((l) => l.trim()).length : 0),
+      0,
+    );
+    const months = file === null && targets.length > 1 ? `（${targets.length} 个月）` : "";
+    fileStats.push(`${label}: ${lines} 条${months}`);
   }
   const diaryFiles = dirJsonl(PATHS.diaryDir);
   const diaryLines = diaryFiles.reduce(
@@ -4002,7 +4059,8 @@ function writeTurnDiary(agent, events) {
   appendJsonl(diaryFile, diaryEntry);
 
   const sessionFile = findSessionFile(sessionId);
-  appendJsonl(PATHS.arrayIndex, {
+  // v0.36：会话索引也按月分片（跟日记同一套切法），别让单个 index.jsonl 长到十几 MB
+  appendJsonl(arrayIndexFileForMonth(monthKey()), {
     ts,
     session: sessionId,
     cwd,
@@ -6021,6 +6079,6 @@ const plugin = {
   apply,
 };
 
-export { apply, loadState, saveState, STATE_PATH, buildInjectionText, buildStateInjection, modelRouteOf, sessionMemory, createSessionMemory, sessionMemoryPaths, normalizeSessionId, isSpecialKey, doctorReport, renderDoctor, resolveBackupDir, probeWritable, coreInjection, coreOptions, createLines, lexicalScore, linesConfigDefaults, linesPaths, qualitativeOf, topicTokens, behaviorHint, createSocial, detectScene, normalizeName, personIdOf, registerSocialTools, sceneLabel, socialConfigDefaults, socialPaths, searchSocialContext, backupPolicySummary, compactionStats, compactionStatusLine, noteCompaction, noteAutoSummary, compressCallsIn, nativeCompactionsIn, compressToolCallsIn, compressionKindOf, readCompactionLog, appendCompactionRecord, ingestCompactionEvent, compactionRecords, compactionSelfCheck, dutyBoardData, sendHandoff, pullHandoff, listHandoffs, compactionSuiteDetected, listAutoSummaries, deleteAutoSummary, setFactCaller, factOptions, readFactCandidates, writeFactCandidates, pendingFactCandidates, factCandidateStats, factStatusLine, parseFactCandidates, buildFactPrompt, factInventory, isDuplicateFact, extractFactCandidates, acceptFactCandidate, rejectFactCandidate, updateBackupPolicy, updateAutoSummaryPolicy, autoSummaryConfigView, registerBackupApi, hostIsLoopback, readRequestBody, searchMemory, writeMemory, voidMemory, exportArchive, readQqWatchSettings, writeQqWatchSettings, qqWatchView, briefOf, aliasesOf, mergeAliases, writeGuardOf, writeGuardCheck, similarityOf, backupNow, pruneOldSnapshots, shouldSkipBackup, backupStampOf, writeTurnDiary, isCompressionEvent, renameAssetImage, listAssetImages, assetDetail, AUDIO_SOURCE, AUDIO_KIND, AUDIO_USE, audioClassTag, buildStats, tagsOf, validateTags, checkedTags, TAG_VOCAB, clearMemos, recallSession, decodeSessionFile, findSessionFile, relationInjectionLines, archiveRelationOverflow, locateMemory, jsonlHasHash, rebuildGuide, guideStats, guideLinks, guideNodes, addSource, listSources, findSources, sourceStats, loadSources, sourceTag, entryProvenance, sourceIndex, runAutoSummary, pendingTurns, autoSummaryOptions, buildAutoSummaryEntry, buildSummaryPrompt, summaryStyleLine, parseSummaryText, summaryInputOf, callWithThinkingRetry, setAutoSummaryCaller, defaultConfig, loadConfig, AUTO_SUMMARY_PREFIX };
+export { apply, loadState, saveState, STATE_PATH, buildInjectionText, buildStateInjection, modelRouteOf, sessionMemory, createSessionMemory, sessionMemoryPaths, normalizeSessionId, isSpecialKey, doctorReport, renderDoctor, resolveBackupDir, probeWritable, coreInjection, coreOptions, createLines, lexicalScore, linesConfigDefaults, linesPaths, qualitativeOf, topicTokens, behaviorHint, createSocial, detectScene, normalizeName, personIdOf, registerSocialTools, sceneLabel, socialConfigDefaults, socialPaths, searchSocialContext, backupPolicySummary, compactionStats, compactionStatusLine, noteCompaction, noteAutoSummary, compressCallsIn, nativeCompactionsIn, compressToolCallsIn, compressionKindOf, readCompactionLog, appendCompactionRecord, ingestCompactionEvent, compactionRecords, compactionSelfCheck, dutyBoardData, sendHandoff, pullHandoff, listHandoffs, compactionSuiteDetected, listAutoSummaries, deleteAutoSummary, setFactCaller, factOptions, readFactCandidates, writeFactCandidates, pendingFactCandidates, factCandidateStats, factStatusLine, parseFactCandidates, buildFactPrompt, factInventory, isDuplicateFact, extractFactCandidates, acceptFactCandidate, rejectFactCandidate, updateBackupPolicy, updateAutoSummaryPolicy, autoSummaryConfigView, registerBackupApi, hostIsLoopback, readRequestBody, searchMemory, writeMemory, voidMemory, exportArchive, readQqWatchSettings, writeQqWatchSettings, qqWatchView, briefOf, aliasesOf, mergeAliases, writeGuardOf, writeGuardCheck, similarityOf, backupNow, pruneOldSnapshots, shouldSkipBackup, backupStampOf, writeTurnDiary, isCompressionEvent, renameAssetImage, listAssetImages, assetDetail, arrayIndexFiles, arrayIndexFileForMonth, migrateArrayIndexIfNeeded, AUDIO_SOURCE, AUDIO_KIND, AUDIO_USE, audioClassTag, buildStats, tagsOf, validateTags, checkedTags, TAG_VOCAB, clearMemos, recallSession, decodeSessionFile, findSessionFile, relationInjectionLines, archiveRelationOverflow, locateMemory, jsonlHasHash, rebuildGuide, guideStats, guideLinks, guideNodes, addSource, listSources, findSources, sourceStats, loadSources, sourceTag, entryProvenance, sourceIndex, runAutoSummary, pendingTurns, autoSummaryOptions, buildAutoSummaryEntry, buildSummaryPrompt, summaryStyleLine, parseSummaryText, summaryInputOf, callWithThinkingRetry, setAutoSummaryCaller, defaultConfig, loadConfig, AUTO_SUMMARY_PREFIX };
 export default plugin;
 
