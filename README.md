@@ -383,7 +383,7 @@ API 对应三个动作：`GET ?action=fact-candidates&limit=`（列表 + `pendin
 | `memory_backup` | 立刻备份到 F 盘 |
 | `memory_void` | 标废一条记忆：`hash` 或 `keyword`+`layer`，`reason` 必填；数据不删、不进注入、默认不进检索，`unvoid` 可恢复 |
 | `memory_handoff` | 工作台移交：`send` 留一条交接 / `pull` 取走即标记 / `list` 查看，用于不同会话、不同工作区之间接力 |
-| `memory_export` | 导出档案：往 `~/.dsh/memory/exports/export-<时间>/` 写「档案.md」（人读）+「data.json」（机器读），含三张卡、各层条目、最近日记、标废记录、手册、会话索引；只读，不改记忆 |
+| `memory_export` | 导出档案：往 `~/.dsh/memory-exports/export-<时间>/` 写「档案.md」（人读）+「data.json」（机器读），含三张卡、各层条目、最近日记、标废记录、手册、会话索引；只读，不改记忆 |
 
 > 这里只列常用项。完整清单（23 个工具，含多人多群 4 个）见《全功能说明》第三节。
 
@@ -887,7 +887,7 @@ Copy-Item '<profile 备份目录>\*' '<你的用户名>\.dsh\profiles\<profile>\
 - **0.35.0（2026-10-26）**：**标废 + 别名 + 导出档案**（一批发，不拆版本）。
   ①**标废（B-55）**：新增 `memory_void` / `unvoid`，`reason` 必填。标了废的条目**不进注入、默认不进检索**（要看得带 `includeVoided`），但原文和作废原因都留着，`memory_locate` 查得到、随时能恢复；**绝不物理删除**。用意：淘汰不是删除，是「降级且留账」。
   ②**写入侧别名（B-60）**：`memory_write` 加 `aliases`（最多 8 个、每个 ≤16 字），把「同一件事的其他叫法」一起存进去，之后搜哪个说法都能命中；更新已有条目时别名取并集。这条是评测逼出来的——纯同义改写的问法，纯词法检索的 recall@5 只有 0–25%，光调权重救不了。
-  ③**导出档案（B-66）**：新增 `memory_export`，往 `~/.dsh/memory/exports/export-<时间>/` 写两份：`档案.md`（人读：三张卡、各层条目带 hash/日期/标签/标废原因、最近日记、手册、会话索引）与 `data.json`（机器读，`formatVersion: 1`）。**只读**，不写任何记忆文件。用途：换机器、交给人接手、给下一代模型重算——数据比代码活得久。
+  ③**导出档案（B-66）**：新增 `memory_export`，往 `~/.dsh/memory-exports/export-<时间>/` 写两份：`档案.md`（人读：三张卡、各层条目带 hash/日期/标签/标废原因、最近日记、手册、会话索引）与 `data.json`（机器读，`formatVersion: 1`）。**只读**，不写任何记忆文件。用途：换机器、交给人接手、给下一代模型重算——数据比代码活得久。
   ④**日记全文可选（A-75）**：`config.diary.fullText` 打开后，回合日记除 240 字摘要外再存 `userFull` / `assistantFull`。**加字段不替换**——注入与检索仍只读短字段，所以开全文不会让上下文变长。默认关（隐私面会放大）。
   ⑤**`engines.dsh`（B-51）**：声明 `>=0.2.1-rc.2`，市场卡片不再显示「宿主要求未知」。
   ⑥**修掉三处旧账**：`array/sessions.jsonl` 的 `sessionFile` 一列此前全是空串（定位会话文件时把 `session-` 前缀拼了两遍，A-70）；新装用户的默认人设模板写着我们自己的称呼（A-71）；包内文档里的本机路径与「脱敏检查」两条从来没生效过的正则（A-72）。

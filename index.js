@@ -2121,6 +2121,33 @@ function briefOf(entry, max = BRIEF_MAX_CHARS) {
   return s.length > max ? `${s.slice(0, Math.max(1, max - 1))}…` : s;
 }
 
+// v0.36：日记月份预筛（只为提速，不改结果）
+// 为什么：日记按月分文件，但检索以前是全量扫（月度文件越多越慢，一天约 140 条）。
+// 做法：先用 guide 索引看「哪几个月有候选关键词」——guide 每行都带 file 与 keywords，
+// 命中的月份文件才去扫。**只在确拿到候选时启用**；guide 读不到/一条候选都没有就退回全量扫（保召回）。
+function diaryFilesWithCandidates(tokens) {
+  if (!tokens.length) return null;
+  return safe("日记月份预筛", () => {
+    if (!fs.existsSync(PATHS.guide)) return null;
+    // 只有一个月度文件时预筛没有收益，反而是多余开销——直接不启用
+    if (dirJsonl(PATHS.diaryDir).length <= 1) return null;
+    const rows = readJsonl(PATHS.guide);
+    if (!rows.length) return null;
+    const files = new Set();
+    let sawDiaryRow = false;
+    for (const r of rows) {
+      const file = String(r?.file || "");
+      if (!file.startsWith("behavior/diary/")) continue;
+      sawDiaryRow = true;
+      const kws = Array.isArray(r?.keywords) ? r.keywords.map((k) => String(k).toLowerCase()) : [];
+      if (!kws.length) continue;
+      if (tokens.some((t) => kws.some((k) => k.includes(t) || t.includes(k)))) files.add(file);
+    }
+    if (!sawDiaryRow) return null; // 老数据没有 guide 行，别乱跳过
+    return files;
+  }, null);
+}
+
 function searchMemory(query, layer, limit, tag, includeVoided = false) {
   const q = String(query || "").trim();
   const tagQuery = String(tag || "").trim();
@@ -2150,8 +2177,17 @@ function searchMemory(query, layer, limit, tag, includeVoided = false) {
   }
   const hits = [];
   const srcIdx = sourceIndex();
+  // v0.36：日记按月预筛——只扫「guide 里有候选关键词」的月份文件，没有候选就全扫
+  const diaryPre =
+    layer === "behavior" || layer === "all" || layer === undefined || layer === ""
+      ? diaryFilesWithCandidates(tokens)
+      : null;
   for (const file of searchTargets(layer)) {
     if (!fs.existsSync(file)) continue;
+    if (diaryPre && diaryPre.size) {
+      const relPath = rel(file);
+      if (relPath.startsWith("behavior/diary/") && !diaryPre.has(relPath)) continue;
+    }
     const lines = readText(file).split(/\r?\n/);
     lines.forEach((line, index) => {
       if (!line.trim()) return;
@@ -3084,7 +3120,9 @@ function archiveRow(row) {
 function exportArchive(args = {}) {
   const ts = nowISO();
   const stamp = ts.replace("T", "_").replace(/[:]/g, "").slice(0, 15);
-  const outDir = path.resolve(String(args.outDir || path.join(MEM_DIR, "exports", `export-${stamp}`)));
+  // v0.36：导出档案挪出记忆目录（`~/.dsh/memory-exports/`）。它跟记忆本体不是一类东西：
+  // 一份导出就 300–600 KB，放 memory 里会让记忆目录越滚越大，还容易被当成记忆一起备份/统计。
+  const outDir = path.resolve(String(args.outDir || path.join(DSH_DIR, "memory-exports", `export-${stamp}`)));
   const diaryLimit = Math.max(0, Math.min(5000, Number(args.diaryLimit ?? 300)));
   const includeWorkbook = args.includeWorkbook !== false;
 
