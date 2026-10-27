@@ -21,6 +21,9 @@ const GENERIC_RULES = [
   // 所以「本机绝对路径」和「家目录路径」两条从来没真的命中过——README 里一堆
   // C:\Users\Administrator\… 全被漏掉。改成单反斜杠匹配；占位符 C:\Users\<你的用户名> 不命中。
   { name: '本机绝对路径（Windows）', re: /\b[A-Za-z]:\\(?:Users|Documents|dshf|deepseek-harness)\\(?!<|[你您])/i },
+  // 2026-10-27 补：只认反斜杠会漏掉正斜杠写法——实际漏过一个维护脚本里的 D:/Documents/…，
+  // 所以两种分隔符都扫；占位符（D:/Documents/<你的路径>）不命中。
+  { name: '本机绝对路径（正斜杠）', re: /\b[A-Za-z]:\/(?:Users|Documents|dshf|deepseek-harness)\/(?!<|[你您])/i },
   { name: '家目录路径', re: /C:\\Users\\[A-Za-z0-9_.-]+/ },
   { name: '内网 IP', re: /\b(192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})\b/ },
   { name: '住址相关', re: /(余姚|宁波|浙江宁波)/ },

@@ -1,17 +1,8 @@
 // v0.15：压缩/摘要统计（木偶记忆只记账，压缩本身由官方 compaction 引擎或 bili 的 compress 工具完成）
 // 注意：会改真实 state/runtime.json，测完必须还原（v0.13.4 的教训）。
-import {
-  loadState,
-  saveState,
-  noteCompaction,
-  noteAutoSummary,
-  compactionStats,
-  compressCallsIn,
-  nativeCompactionsIn,
-  compressionKindOf,
-  isCompressionEvent,
-  compactionStatusLine,
-} from "file:///D:/Documents/deepseek-harness/plugins/dsh-puppet-memory/index.js";
+// 静态 import 不能用 new URL() 拼路径，但硬编码本机绝对路径会被脱敏检查扫红——用动态 import。
+const __mod = await import(new URL("../index.js", import.meta.url).href);
+const { loadState, saveState, noteCompaction, noteAutoSummary, compactionStats, compressCallsIn, nativeCompactionsIn, compressionKindOf, isCompressionEvent, compactionStatusLine } = __mod;
 
 let pass = 0;
 const fails = [];
