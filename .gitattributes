@@ -1,0 +1,14 @@
+# 统一行尾：仓库里一律 LF，工作区也检出 LF
+# 起因：以前 core.autocrlf=true，工作区是 CRLF、仓库里是 LF，git 每动一次工作区，
+# 插件目录与 profile 副本（按 LF 拷的）md5 就对不上，预检「插件同步」和「文档副本一致」反复变红。
+* text=auto eol=lf
+
+# 二进制：不要探测、不要转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.zip binary
+*.tgz binary
+*.gz binary
+*.zstd binary
