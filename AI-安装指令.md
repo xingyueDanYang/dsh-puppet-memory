@@ -107,14 +107,21 @@ Copy-Item -Path $srcDir -Destination (Split-Path $dstDir) -Recurse -Force
 ```
 
 写清两条路径再动手——`Write-Output "src=$srcDir"; Write-Output "dst=$dstDir"`，自己看一眼对不对。
+（`$srcDir` 里的**用户名那一段**可能显示成 `ADMINI~1` 这种带 `~1` 的短名——那是 Windows 的 8.3 短名，**不是路径错了**，能正常复制，别去改它。）
 
 ### 2.2 复制完必须做的两个检查
 
 ```powershell
-# ① 看它「里面」有没有那三个文件——直接看见才算对
+# ① 逐项确认那三个文件在（True/False 一眼看清；别靠文件名列表去数）
+foreach ($f in 'index.js','client.js','package.json') {
+  "{0,-14} {1}" -f $f, (Test-Path (Join-Path $dstDir $f))
+}
+# 想同时看看目录里到底有什么（**中文文档会排在前面，这是正常的**，别因为头几行没见到 index.js 就判失败）
 Get-ChildItem $dstDir -File | Select-Object -ExpandProperty Name
 ```
-期望输出里**必须有**：`index.js`、`client.js`、`package.json`。
+
+期望输出：三行**全是 `True`**（`index.js` / `client.js` / `package.json`）。
+（2026-10-27 修订：原来只给「列出文件名」，实测陌生 AI 看到中文文档排在前头，会误判「缺文件」。）
 
 ```powershell
 # ② 有没有「多套一层」——如果这里还能再进一个 dsh-puppet-memory 目录，就是错了

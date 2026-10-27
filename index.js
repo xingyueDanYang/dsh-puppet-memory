@@ -1030,7 +1030,18 @@ function relationInjectionLines(cfg, ratio = 0.55, suppressed = new Set()) {
   const budget = Math.round(maxChars * Math.max(0.3, Math.min(0.8, Number(ratio) || 0.55)));
   // v0.28：本会话屏蔽的条目直接不进注入（数据还在，随时可解除）
   // v0.35（B-55）：标废的条目不进注入；屏蔽表同理（数据都还在，可恢复）
-  const relations = tailJsonl(PATHS.relations, 12).filter((r) => !suppressed.has(String(r?.hash || "")) && !r?.voided);
+  // v0.37（B-74）：已结束（被取代/到期）的条目也不进注入——它是真的，但已经不是现状了
+  const relRows = readJsonl(PATHS.relations);
+  const supersededBy = new Map();
+  for (const row of relRows) {
+    for (const oldHash of Array.isArray(row?.supersedes) ? row.supersedes : []) {
+      if (!oldHash) continue;
+      supersededBy.set(String(oldHash), { reason: `被 #${String(row.hash || "").slice(0, 8)} 取代`, at: String(row.ts || ""), by: String(row.hash || "") });
+    }
+  }
+  const relations = tailJsonl(PATHS.relations, 12).filter(
+    (r) => !suppressed.has(String(r?.hash || "")) && !r?.voided && !endedInfoOf(r, supersededBy),
+  );
   const relLines = relations.map((r) => {
     const n = imageLabelsOf(r).length;
     const a = audioLabelsOf(r).length;
@@ -2414,7 +2425,7 @@ function searchableTextOf(entry, line) {
   return parts.filter(Boolean).join(" ").replace(/\s+/g, " ").trim().slice(0, 800);
 }
 
-const SEARCH_INDEX = { sig: "", docs: [], df: new Map(), avgdl: 0, N: 0 };
+const SEARCH_INDEX = { sig: "", docs: [], df: new Map(), avgdl: 0, N: 0, danglingSupersedes: [] };
 
 function searchIndexSignature(files) {
   return files
@@ -2428,6 +2439,22 @@ function searchIndexSignature(files) {
       }
     })
     .join("|");
+}
+
+// v0.37（B-74 精简版）：「已结束」在**读时推导**，不写库、不加字段、不迁移。
+// 两个机械信号（都不需要模型判断）：
+//   ① 被取代：B 条目的 `supersedes` 里记着 A 的 hash → A 已结束，原因「被 #B 取代」；
+//      （这个字段早就在写：memory_write 更新已有条目时会自动把旧 hash 塞进 supersedes）
+//   ② 到期：条目带 `until`（ISO 时间或日期）且已过 → 已结束，原因「到期」。
+//      （写入侧暂时不产生 until，是给计划类条目留的口子）
+// 为什么不学「语义判断」那一套：那要模型去猜「我嗓子好了」是否等于「感冒不再成立」，猜错就误关；
+// 我们宁可笨一点——只有「我明说了取代」和「时间到了」两种结束。
+function endedInfoOf(entry, supersededBy, now = Date.now()) {
+  const hash = entry?.hash ? String(entry.hash) : "";
+  if (hash && supersededBy.has(hash)) return supersededBy.get(hash);
+  const until = entry?.until ? Date.parse(String(entry.until)) : NaN;
+  if (Number.isFinite(until) && until < now) return { reason: "到期", at: new Date(until).toISOString(), by: "" };
+  return null;
 }
 
 function ensureSearchIndex() {
@@ -2448,12 +2475,30 @@ function ensureSearchIndex() {
         docs.push({ file, lineNo: index + 1, line, low: line.toLowerCase(), entry, toks, len: toks.length, ts: Date.parse(entry?.ts || "") || 0 });
       });
   }
+  // 先扫一遍「谁取代了谁」，再给每条标 ended
+  const supersededBy = new Map();
+  for (const d of docs) {
+    const olds = Array.isArray(d.entry?.supersedes) ? d.entry.supersedes.filter(Boolean) : [];
+    for (const oldHash of olds) {
+      supersededBy.set(String(oldHash), {
+        reason: `被 #${String(d.entry?.hash || "").slice(0, 8)} 取代`,
+        at: String(d.entry?.ts || ""),
+        by: String(d.entry?.hash || ""),
+      });
+    }
+  }
+  // 指向不存在的 hash = 拼错或旧条目被删 → 必须报出来，否则那条永远不结束（静默失败）
+  const allHashes = new Set(docs.map((d) => (d.entry?.hash ? String(d.entry.hash) : "")).filter(Boolean));
+  const dangling = [...supersededBy.keys()].filter((h) => !allHashes.has(h));
+  const now = Date.now();
+  for (const d of docs) d.ended = endedInfoOf(d.entry, supersededBy, now);
   const total = docs.reduce((a, d) => a + d.len, 0);
   SEARCH_INDEX.sig = sig;
   SEARCH_INDEX.docs = docs;
   SEARCH_INDEX.df = df;
   SEARCH_INDEX.N = docs.length;
   SEARCH_INDEX.avgdl = docs.length ? total / docs.length : 0;
+  SEARCH_INDEX.danglingSupersedes = dangling;
   return SEARCH_INDEX;
 }
 
@@ -2494,10 +2539,12 @@ function formatSearchHit(doc, srcIdx) {
   const hs = entry?.hash ? `  #${entry.hash}` : "";
   const provenance = entryProvenance(entry, srcIdx);
   const voidMark = entry?.voided ? `〔已标废：${clip(String(entry.voided.reason || ""), 40)}〕` : "";
-  return `${where}:${doc.lineNo}  ${voidMark}${statePrefixOf(entry)}${clip(doc.line, 300)}${hs}${suffix}${provenance ? `  ${provenance}` : ""}`;
+  // v0.37（B-74）：已结束的条目照样能查回，但必须标出来——「真但过期」不是「假的」
+  const endedMark = doc.ended ? `〔已结束：${clip(String(doc.ended.reason || ""), 30)}${doc.ended.at ? ` · ${String(doc.ended.at).slice(0, 10)}` : ""}〕` : "";
+  return `${where}:${doc.lineNo}  ${endedMark}${voidMark}${statePrefixOf(entry)}${clip(doc.line, 300)}${hs}${suffix}${provenance ? `  ${provenance}` : ""}`;
 }
 
-function searchMemory(query, layer, limit, tag, includeVoided = false, minScore = 0) {
+function searchMemory(query, layer, limit, tag, includeVoided = false, minScore = 0, includeEnded = false) {
   const q = String(query || "").trim();
   const tagQuery = String(tag || "").trim();
   const tagNeedle = tagQuery.toLowerCase();
@@ -2584,7 +2631,11 @@ function searchMemory(query, layer, limit, tag, includeVoided = false, minScore 
     if (q) return `没有找到包含「${q}」${tagNeedle ? `且带标签「${tagQuery}」` : ""}的记忆。`;
     return `没有找到带标签「${tagQuery}」的记忆。`;
   }
-  const picked = candidates
+  // v0.37（B-74）：默认只用「还生效」的；一条都没有时才降级——真但过期好过查无此事
+  const live = candidates.filter((c) => !c.doc.ended);
+  const ended = candidates.filter((c) => c.doc.ended);
+  const useEnded = includeEnded ? candidates : live.length ? live : ended;
+  const picked = useEnded
     .filter((c) => !minScore || c.score >= minScore)
     .sort((a, b) => b.score - a.score || b.ts - a.ts)
     .slice(0, max);
@@ -2594,6 +2645,13 @@ function searchMemory(query, layer, limit, tag, includeVoided = false, minScore 
   }
   const srcIdx = sourceIndex();
   const lines = picked.map((c) => formatSearchHit(c.doc, srcIdx));
+  // 降级时要说清楚：以下是过期的，不是现状
+  const degraded = !includeEnded && !live.length && ended.length > 0;
+  if (degraded) {
+    lines.unshift(
+      `（没有仍然生效的条目；下面 ${picked.length} 条都是〔已结束〕的——真发生过，但已过期或被取代，别当现状用。要看全部带 includeEnded）`,
+    );
+  }
   // v0.34（B-52）要点层：命中不多时先给一份「要点 + hash」速览
   const briefCfg = (() => {
     try {
@@ -4022,6 +4080,21 @@ function buildStats() {
     );
   }
   fileStats.push(tagSummary());
+  // v0.37（B-74）：「已结束」是读时推导的（不写库），所以这里报的是「现在能推出来多少」。
+  // 顺带把 supersedes 指向不存在 hash 的情况报出来——那种条目永远不结束，属于静默失败。
+  try {
+    const idx = ensureSearchIndex();
+    const endedDocs = idx.docs.filter((d) => d && d.ended);
+    const byReplaced = endedDocs.filter((d) => String(d.ended.reason || "").startsWith("被")).length;
+    const byExpire = endedDocs.length - byReplaced;
+    let line = `已结束（读时推导）：${endedDocs.length} 条（被取代 ${byReplaced} / 到期 ${byExpire}）——默认不进检索与注入，用 includeEnded 可查回`;
+    if (idx.danglingSupersedes && idx.danglingSupersedes.length) {
+      line += `；⚠ supersedes 指向不存在的 hash ${idx.danglingSupersedes.length} 个（${idx.danglingSupersedes.slice(0, 3).join("、")}）——这条链是断的，去修`;
+    }
+    fileStats.push(line);
+  } catch {
+    /* 已结束统计失败不影响其它统计 */
+  }
 
   const cfg = loadConfig();
   const state = loadState();
@@ -5925,6 +5998,7 @@ function apply(ctx) {
           tag: { type: "string", description: "按标签过滤（子串匹配，如「第一次」）；可与 query 组合取交集" },
           includeVoided: { type: "boolean", description: "把「已标废」的条目也返回（默认不返回；行首标〔已标废〕）" },
           minScore: { type: "number", description: "只要分数 ≥ 这个值的结果（默认 0＝不过滤）。排序分是 BM25＋加成，量级约 0–20；结果看着偏杂时可以试 3–5" },
+          includeEnded: { type: "boolean", description: "把「已结束」（被取代／到期）的条目也带出来（默认不返回；一条生效的都没有时会自动降级带出，并标注〔已结束〕）" },
           scope: { type: "string", enum: ["context"], description: "v0.21：scope=context 只检索「当前场景可见」的社交记忆（群聊=本群 + 本群发言人；私聊=对方 + 主人的私事；别人的私事、别的群的内容永远不出现）。不传 personId/groupId 时用最近一次识别到的场景" },
           personId: { type: "string", description: "scope=context 时：按某人的场景检索（不传就用最近场景）" },
           groupId: { type: "string", description: "scope=context 时：按某个群检索（不传就用最近场景）" },
@@ -5934,7 +6008,7 @@ function apply(ctx) {
       async execute(args) {
         try {
           if (String(args?.scope || "") === "context") return searchSocialContext(social, args || {});
-          return searchMemory(args?.query, args?.layer, args?.limit, args?.tag, args?.includeVoided === true, Number(args?.minScore) || 0);
+          return searchMemory(args?.query, args?.layer, args?.limit, args?.tag, args?.includeVoided === true, Number(args?.minScore) || 0, args?.includeEnded === true);
         } catch (err) {
           return `检索失败：${err?.message || err}`;
         }
