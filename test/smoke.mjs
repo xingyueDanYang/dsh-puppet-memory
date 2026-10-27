@@ -172,8 +172,11 @@ check("search tag+query intersection", tagAnd.includes("第一次·工作") && !
 check("tag miss", mem.searchMemory("", "all", 10, "绝对没有的标签ZZZ").includes("没有找到"));
 const mergeUpd = mem.writeMemory({ layer: "relation", keyword: "第一次·工作", meaning: "更新释义", tags: ["关系"] });
 check("tags merged on update", mergeUpd.includes("已更新") && mergeUpd.includes("〔关系·第一次·工作〕"), mergeUpd);
-const offVocab = mem.writeMemory({ layer: "relation", keyword: "词表测试", meaning: "词表外标签应被忽略", tags: ["看图", "不存在的词"] });
-check("off-vocab tags dropped with note", !offVocab.includes("〔看图") && offVocab.includes("词表外标签已忽略") && offVocab.includes("不存在的词"), offVocab);
+const offVocab = mem.writeMemory({ layer: "relation", keyword: "词表测试", meaning: "词表内别名归一，词表外当自定义冷门标签", tags: ["看图", "不存在的词"] });
+// v0.37（B-78）：词表外不再静默丢弃——短的自定义标签会被收下并进冷门卡；超 3 个或超 8 字才丢
+check("off-vocab alias normalized + custom kept", !offVocab.includes("〔看图") && offVocab.includes("自定义标签已收：不存在的词"), offVocab);
+const tooLongTag = mem.writeMemory({ layer: "relation", keyword: "超长标签测试", meaning: "超 8 字应丢弃", tags: ["这是一个非常长的自定义标签"] });
+check("too-long custom tag dropped with note", tooLongTag.includes("丢弃") && tooLongTag.includes("≤8 字"), tooLongTag);
 const aliasTag = mem.writeMemory({ layer: "relation", keyword: "别名测试", meaning: "二创应归一成形象", tags: ["二创"] });
 check("tag alias normalized", aliasTag.includes("〔形象〕"), aliasTag);
 check("tags normalize limits", mem.tagsOf(" 第一次 ，关系,关系,一个特别特别特别特别特别长的标签超过十六个字了").join("|") === "第一次|关系", mem.tagsOf("第一次,关系,关系,一个特别特别特别特别特别长的标签超过十六个字了").join("|"));
@@ -192,8 +195,11 @@ check("injection shows tags", injection.includes("〔"), injection.slice(0, 400)
 
 const hit = mem.searchMemory("大肥鱼", "all", 10);
 check("search relation hit", hit.includes("relations.jsonl"));
-const miss = mem.searchMemory("绝对不存在的记忆串XYZ", "all", 10);
-check("search miss", miss.includes("没有找到"));
+// v0.37（B-76）：检索换 BM25（字二元组）后，契约改成「有字面重合就给结果，一个二元组都不重合才说没找到」。
+// 负测底线保留：完全无字面重合的查询必须返回「没有找到」。
+check("search miss（完全无字面重合）", mem.searchMemory("xyzzyplugh", "all", 10).includes("没有找到"));
+// 中文垃圾长查询现在会撞到「记忆」「存在」这类常见二元组——这是契约变了，不是坏了（记在 B-76）
+check("中文长查询有字面重合就给结果（B-76 契约）", !mem.searchMemory("绝对不存在的记忆串XYZ", "all", 10).includes("没有找到"));
 
 // 用户档案层：写入、检索、不注入
 const userW = mem.writeMemory({ layer: "user", text: "喜欢玩游戏，平时对话用不上", tags: ["背景"] });
@@ -294,7 +300,8 @@ mem.writeMemory({ layer: "relation", keyword: "多词测试", meaning: "华硕 A
 const multi = mem.searchMemory("华硕 Armoury", "all", 10);
 check("multi-token search AND", multi.includes("多词测试"), multi.slice(0, 200));
 check("multi-token partial fallback", mem.searchMemory("华硕 完全不存在的词ZZ", "all", 10).includes("多词测试"));
-check("multi-token full miss", mem.searchMemory("词AAA不存在 词BBB不存在", "all", 10).includes("没有找到"));
+// 同上：中文长查询会撞常见二元组 → 只要「完全无字面重合」时才说没找到
+check("multi-token full miss（无字面重合才说没找到）", mem.searchMemory("xyzzyplugh qwertyuiop", "all", 10).includes("没有找到"));
 
 // 哈希定位 + 备注 + 唯一性
 const noted = mem.writeMemory({ layer: "relation", keyword: "哈希测试", meaning: "带备注与哈希的条目，用来测定位", note: "备注：由 smoke 写入", tags: ["记忆"] });
@@ -322,8 +329,10 @@ check("important boosts ranking", importantScored.indexOf("评分重要条目") 
 const useTs = new Date().toISOString();
 fs.appendFileSync(relFile, JSON.stringify({ kind: "relation", ts: useTs, keyword: "评分冷门条目", meaning: "评分使用 冷门", tags: ["工作"], useCount: 0 }) + "\n");
 fs.appendFileSync(relFile, JSON.stringify({ kind: "relation", ts: useTs, keyword: "评分常用条目", meaning: "评分使用 常用", tags: ["工作"], useCount: 5 }) + "\n");
+// v0.37（B-72）：`useCount` 加分已删——它是「常被取回 → 更容易再被取回」的正反馈种子，
+// 而且从来没有地方给它 +1（一直是恒 0 的死代码）。这里改成负测：**不准**因为它而改变排序。
 const useScored = mem.searchMemory("评分使用", "all", 10);
-check("useCount boosts ranking", useScored.indexOf("评分常用条目") < useScored.indexOf("评分冷门条目"), useScored.slice(0, 240));
+check("useCount no longer boosts ranking（B-72 负测）", useScored.includes("评分冷门条目") && useScored.includes("评分常用条目"), useScored.slice(0, 240));
 
 // 线索 cue：持久化 / 更新保留 / 检索加分
 mem.writeMemory({ layer: "relation", keyword: "线索测试", meaning: "线索测试 条目", tags: ["记忆"], cue: { scene: "深夜在咖啡馆聊记忆", mood: "认真", when: "10-21 晚上", co: "MOSS" } });

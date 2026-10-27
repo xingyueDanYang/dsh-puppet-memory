@@ -99,6 +99,10 @@ const PATHS = {
   arrayIndexDir: path.join(MEM_DIR, "array", "index"),
   sessionsIndex: path.join(MEM_DIR, "array", "sessions.jsonl"),
   assets: path.join(MEM_DIR, "assets"),
+  // v0.36（B-61）：重要会话原文副本（整份 .zstd 拷贝 + 带 sha256 的索引）。
+  // 不进 memory_export、不进发布包——里面是未脱敏的原话。
+  rawSessions: path.join(MEM_DIR, "assets", "raw-sessions"),
+  rawIndex: path.join(MEM_DIR, "assets", "raw-sessions", "index.jsonl"),
 };
 
 // 2026-10-26（A-71）：默认人设模板改成中性占位。
@@ -841,21 +845,57 @@ const TAG_ALIASES = {
   补录: "待办", 旧账: "关系", 测试: "待办",
 };
 
-// 校验标签：别名归一、词表外丢弃，返回保留的标签与被丢弃的原始词；-标签/!标签 删除标记原样放行
+// v0.37（B-78）：词表外的「冷门标签」不再静默丢弃——允许自定义，但要防膨胀。
+// 丹阳 2026-10-27：「以后标签会变多，主要是存一些冷门标签」。冷门标签的价值是「我自己知道这个入口」，
+// 所以必须能存；但完全自由的词表一年后必烂（"语音2""语音_重要"），所以限死：
+// 每条最多 3 个、每个最多 8 字、只做归一不做语义合并（"星露谷"与"星露谷物语"算两个，猜错合并代价更大）。
+const CUSTOM_TAG_MAX = 3;
+const CUSTOM_TAG_LEN = 8;
+// 条数 ≤ 这个数的自定义标签算「冷门」，进标签卡（连搜三次不相关时才去读）
+const RARE_TAG_MAX_COUNT = 2;
+
+function normalizeTag(raw) {
+  return String(raw ?? "")
+    .replace(/\s+/g, "")
+    .replace(/[，,。.、;；:："'‘“”()（）[\]【】<>《》]/g, "")
+    .trim();
+}
+
+function isVocabTag(tag) {
+  return TAG_VOCAB.includes(String(tag || ""));
+}
+
+// 校验标签：别名归一 → 词表内保留 → 词表外当自定义（限个数与长度）→ 超限的丢弃并报给调用方。
+// -标签/!标签 删除标记原样放行（只在更新合并时有意义）。
 function validateTags(tags) {
   const kept = [];
   const dropped = [];
-  for (const tag of Array.isArray(tags) ? tags : []) {
-    if (typeof tag === "string" && (tag.startsWith("-") || tag.startsWith("!"))) {
+  let customs = 0;
+  for (const raw of Array.isArray(tags) ? tags : []) {
+    if (typeof raw !== "string") continue;
+    if (raw.startsWith("-") || raw.startsWith("!")) {
+      const mark = `${raw[0]}${normalizeTag(raw.slice(1))}`;
+      if (mark.length > 1 && !kept.includes(mark)) kept.push(mark);
+      continue;
+    }
+    const tag = normalizeTag(raw);
+    if (!tag) continue;
+    if (TAG_ALIASES[tag]) {
+      if (!kept.includes(TAG_ALIASES[tag])) kept.push(TAG_ALIASES[tag]);
+      continue;
+    }
+    if (TAG_VOCAB.includes(tag)) {
       if (!kept.includes(tag)) kept.push(tag);
       continue;
     }
-    const canonical = TAG_ALIASES[tag] || tag;
-    if (!TAG_VOCAB.includes(canonical)) {
-      dropped.push(tag);
+    // 自定义冷门标签
+    if ([...tag].length > CUSTOM_TAG_LEN || customs >= CUSTOM_TAG_MAX) {
+      dropped.push(raw);
       continue;
     }
-    if (!kept.includes(canonical)) kept.push(canonical);
+    if (kept.includes(tag)) continue;
+    customs += 1;
+    kept.push(tag);
   }
   return { tags: kept.slice(0, MAX_TAGS), dropped };
 }
@@ -865,10 +905,14 @@ function cleanTags(tags) {
   return (Array.isArray(tags) ? tags : []).filter((t) => typeof t === "string" && !t.startsWith("-") && !t.startsWith("!"));
 }
 
-// writeMemory 用：归一 + 返回给模型看的提示（词表外的标签不静默吞掉）
+// writeMemory 用：归一 + 返回给模型看的提示（超限的标签不静默吞掉；收下的自定义也会说出来）
 function checkedTags(value) {
   const { tags, dropped } = validateTags(tagsOf(value));
-  return { tags, note: dropped.length ? `（词表外标签已忽略：${dropped.join("、")}；可用词表：${TAG_VOCAB.join("/")}）` : "" };
+  const customs = tags.filter((t) => !isVocabTag(t) && !t.startsWith("-") && !t.startsWith("!"));
+  const parts = [];
+  if (customs.length) parts.push(`自定义标签已收：${customs.join("、")}（会进冷门标签卡）`);
+  if (dropped.length) parts.push(`丢弃：${dropped.join("、")}（自定义最多 ${CUSTOM_TAG_MAX} 个、每个 ≤${CUSTOM_TAG_LEN} 字）`);
+  return { tags, note: parts.length ? `（${parts.join("；")}）` : "" };
 }
 
 // 更新已有条目时合并标签：新标签在前、保留旧标签；前缀 - 或 ! 表示删除该标签（整理词表用）
@@ -2199,7 +2243,9 @@ function diaryFilesWithCandidates(tokens) {
   }, null);
 }
 
-function searchMemory(query, layer, limit, tag, includeVoided = false) {
+// v0.36 的老实现（关键词子串 + 命中词数打分）：**保留**为对照与回滚路径，
+// 新的 searchMemory 走 BM25（见下面）。`config.search.engine = "keyword"` 时可切回来。
+function searchMemoryKeyword(query, layer, limit, tag, includeVoided = false) {
   const q = String(query || "").trim();
   const tagQuery = String(tag || "").trim();
   const tagNeedle = tagQuery.toLowerCase();
@@ -2315,6 +2361,251 @@ function searchMemory(query, layer, limit, tag, includeVoided = false) {
   const prependCount = briefCfg.enabled === false ? 0 : Math.max(0, Number(briefCfg.prependHits ?? 3) || 0);
   if (prependCount > 0) {
     const heads = picked
+      .filter((h) => h.brief)
+      .slice(0, prependCount)
+      .map((h, i) => `${i + 1}. ${h.brief}${h.hash ? `  #${h.hash}` : ""}`);
+    if (heads.length) lines.unshift(`【要点】\n${heads.join("\n")}`);
+  }
+  return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// v0.37（B-76）：检索换成 BM25（中文按字二元组）
+// 为什么换：`release/eval-matrix.mjs` 实测（语料 2124 条，A 组同义改写 20 条 / B 组现实口语 20 条）——
+//   关键词子串   A 5%／15%     B 90%／90%
+//   BM25         A 55%／65%    B 95%／100%
+// 老的「命中词数 × 2」排不准同义改写：「改它要注意什么」撞不上「市场/插件改动」。
+// 换成 BM25（词频 × 逆文档频率 × 长度归一化）后 A 组从 5% 抬到 55%/65%，B 组补到 100%。
+// 标签扩散实测无收益、还拖低 B 组（90%→75%），所以不做（与 B-64「记但不做」一致）。
+// 索引是派生层：按「文件:大小:mtime」失效，文件没变就复用；变了整份重建（实测 6475 条文档冷启 144 ms）。
+// 落地后插件侧复验（`release/eval-recall.mjs`，同一套 20+20 用例）：
+//   A 组 0%／5% → **50%／70%**；B 组 65%／90% → **95%／100%**；
+//   热检索 26.5 ms → **3.3 ms**（中位 3.0 / p95 5.9）。
+// 契约变化（要知道）：以前「整词都不命中」会回「没有找到」，现在只要有一个二元组重合就给结果。
+//   试过用 idf 覆盖率门槛挡假命中，一挡就把 A 组打回 10%/10%——宁可多给，也不把真命中挡掉。
+//   负测底线保留：完全无字面重合（如 `xyzzyplugh`）仍然回「没有找到」。
+// ---------------------------------------------------------------------------
+const CJK_SEG = /[\u4e00-\u9fff]+|[a-z0-9_]+/g;
+const BM25_K1 = 1.2;
+const BM25_B = 0.75;
+
+function searchTokensOf(text) {
+  const out = [];
+  const s = String(text || "").toLowerCase();
+  CJK_SEG.lastIndex = 0;
+  let m;
+  while ((m = CJK_SEG.exec(s))) {
+    const seg = m[0];
+    if (/^[a-z0-9_]/.test(seg)) {
+      if (seg.length >= 2) out.push(seg);
+      continue;
+    }
+    if (seg.length === 1) out.push(seg);
+    for (let i = 0; i + 1 < seg.length; i++) out.push(seg.slice(i, i + 2));
+  }
+  return out;
+}
+
+// 可检索文本：条目的正文字段 + 标签（日记没有 keyword/meaning，正文在 user/assistant）
+function searchableTextOf(entry, line) {
+  if (!entry) return String(line || ""); // persona.md 这类非 JSON 行
+  const parts = [entry.keyword, entry.meaning, entry.text, entry.note, entry.brief, entry.user, entry.assistant, entry.summary];
+  if (Array.isArray(entry.tags)) parts.push(entry.tags.join(" "));
+  return parts.filter(Boolean).join(" ").replace(/\s+/g, " ").trim().slice(0, 800);
+}
+
+const SEARCH_INDEX = { sig: "", docs: [], df: new Map(), avgdl: 0, N: 0 };
+
+function searchIndexSignature(files) {
+  return files
+    .map((f) => {
+      // 没建过的文件不该刷日志：这里直接 try/catch，不走 safe()（safe 会把 ENOENT 记一条）
+      try {
+        const st = fs.statSync(f);
+        return `${f}:${st.size}:${Math.round(st.mtimeMs)}`;
+      } catch {
+        return `${f}:0`;
+      }
+    })
+    .join("|");
+}
+
+function ensureSearchIndex() {
+  const files = [...new Set(searchTargets("all"))];
+  const sig = searchIndexSignature(files);
+  if (SEARCH_INDEX.sig === sig && SEARCH_INDEX.docs.length) return SEARCH_INDEX;
+  const docs = [];
+  const df = new Map();
+  for (const file of files) {
+    if (!fs.existsSync(file)) continue;
+    readText(file)
+      .split(/\r?\n/)
+      .forEach((line, index) => {
+        if (!line.trim()) return;
+        const entry = parseJsonlLine(line);
+        const toks = searchTokensOf(searchableTextOf(entry, line));
+        for (const t of new Set(toks)) df.set(t, (df.get(t) || 0) + 1);
+        docs.push({ file, lineNo: index + 1, line, low: line.toLowerCase(), entry, toks, len: toks.length, ts: Date.parse(entry?.ts || "") || 0 });
+      });
+  }
+  const total = docs.reduce((a, d) => a + d.len, 0);
+  SEARCH_INDEX.sig = sig;
+  SEARCH_INDEX.docs = docs;
+  SEARCH_INDEX.df = df;
+  SEARCH_INDEX.N = docs.length;
+  SEARCH_INDEX.avgdl = docs.length ? total / docs.length : 0;
+  return SEARCH_INDEX;
+}
+
+// BM25：只对查询里出现的 token 计分（词频 × idf × 长度归一化）
+function bm25ScoreOf(doc, qTokens, index) {
+  const counts = new Map();
+  for (const t of doc.toks) if (qTokens.has(t)) counts.set(t, (counts.get(t) || 0) + 1);
+  if (!counts.size) return 0;
+  const dl = doc.len || 1;
+  const avgdl = index.avgdl || 1;
+  let score = 0;
+  for (const [t, tfv] of counts) {
+    const dfv = index.df.get(t) || 0;
+    const idf = Math.log(1 + (index.N - dfv + 0.5) / (dfv + 0.5));
+    score += idf * ((tfv * (BM25_K1 + 1)) / (tfv + BM25_K1 * (1 - BM25_B + (BM25_B * dl) / avgdl)));
+  }
+  return score;
+}
+
+function formatSearchHit(doc, srcIdx) {
+  const entry = doc.entry;
+  const file = doc.file;
+  const where = file === PATHS.persona ? "behavior/persona.md" : rel(file);
+  const metas = imageMetaOf(entry);
+  const audios = audioMetaOf(entry);
+  let suffix = "";
+  if (metas.length) {
+    const list = metas.map((m) => `${m.label}${m.exists ? ` → ${m.file}` : "（缺失）"}`);
+    suffix += `  [图${metas.length}: ${list.join(" | ")}]`;
+  }
+  if (audios.length) {
+    const list = audios.map((m) => {
+      const transcript = m.transcript ? `「${clip(m.transcript, 60)}」` : "";
+      return `${m.label}${m.exists ? ` → ${m.file}` : "（缺失）"}${transcript}`;
+    });
+    suffix += `  [音${audios.length}: ${list.join(" | ")}]`;
+  }
+  const hs = entry?.hash ? `  #${entry.hash}` : "";
+  const provenance = entryProvenance(entry, srcIdx);
+  const voidMark = entry?.voided ? `〔已标废：${clip(String(entry.voided.reason || ""), 40)}〕` : "";
+  return `${where}:${doc.lineNo}  ${voidMark}${statePrefixOf(entry)}${clip(doc.line, 300)}${hs}${suffix}${provenance ? `  ${provenance}` : ""}`;
+}
+
+function searchMemory(query, layer, limit, tag, includeVoided = false, minScore = 0) {
+  const q = String(query || "").trim();
+  const tagQuery = String(tag || "").trim();
+  const tagNeedle = tagQuery.toLowerCase();
+  const max = Math.max(1, Math.min(100, Number(limit) || 20));
+  const tokens = q
+    .toLowerCase()
+    .split(/[\s,，、;；|/]+/)
+    .filter(Boolean);
+  if (!q && !tagNeedle) {
+    if (layer === "user" || layer === "memo") {
+      const listed = [];
+      for (const file of searchTargets(layer)) {
+        if (!fs.existsSync(file)) continue;
+        readText(file)
+          .split(/\r?\n/)
+          .forEach((line, index) => {
+            if (line.trim()) listed.push(`${rel(file)}:${index + 1}  ${clip(line, 300)}`);
+          });
+      }
+      if (!listed.length) return layer === "memo" ? "便签是空的。" : "用户档案还是空的。";
+      return listed.slice(-max).join("\n");
+    }
+    return "缺少 query 或 tag 参数；layer=memo 或 layer=user 时可不传，直接列出该层";
+  }
+  const index = ensureSearchIndex();
+  const allowed = new Set(searchTargets(layer));
+  // v0.36（A-79）：日记按月预筛——只扫「guide 里有候选关键词」的月份
+  const diaryPre =
+    layer === "behavior" || layer === "all" || layer === undefined || layer === ""
+      ? diaryFilesWithCandidates(tokens)
+      : null;
+  const qTokens = new Set(searchTokensOf(q));
+  const candidates = [];
+  const now = Date.now();
+  for (const doc of index.docs) {
+    if (!allowed.has(doc.file)) continue;
+    if (diaryPre && diaryPre.size) {
+      const relPath = rel(doc.file);
+      if (relPath.startsWith("behavior/diary/") && !diaryPre.has(relPath)) continue;
+    }
+    const entry = doc.entry;
+    // v0.35（B-55）：标废条目默认不进检索结果
+    if (entry?.voided && !includeVoided) continue;
+    let tagHit = true;
+    if (tagNeedle) {
+      const entryTags = Array.isArray(entry?.tags) ? entry.tags.map((t) => String(t).toLowerCase()) : [];
+      tagHit = entryTags.some((t) => t.includes(tagNeedle));
+    }
+    if (!tagHit) continue;
+    // 候选门：整词命中，或者至少命中一个二元组（完全不重合的行提前丢掉，BM25 只在候选里算）
+    // 试过用「起 idf 覆盖率门槛」挡假命中（BM25_COVERAGE_MIN），但同义改写本来就命中得少，
+    // 一挡就把 A 组从 50%/70% 打回 10%/10%——**宁可多给，也别把真命中挡掉**。
+    // 于是契约改成：有字面重合就给结果，一个二元组都不重合才说「没有找到」。
+    let kwMatched = 0;
+    for (const t of tokens) if (doc.low.includes(t)) kwMatched += 1;
+    if (!kwMatched && qTokens.size) {
+      let anyGram = false;
+      for (const g of qTokens) {
+        if (doc.low.includes(g)) {
+          anyGram = true;
+          break;
+        }
+      }
+      if (!anyGram) continue;
+    }
+    let score = bm25ScoreOf(doc, qTokens, index);
+    // 整词全中给一点加成：精确词（编号、人名、英文）仍应排在模糊匹配前面
+    if (tokens.length && kwMatched === tokens.length) score += 1;
+    const tsMs = doc.ts;
+    const ageDays = Number.isFinite(tsMs) && tsMs ? (now - tsMs) / 86400000 : 999;
+    // v0.34.1（B-56）：时间是相关性的劣质代理，只当小权重项
+    score += ageDays <= 7 ? 1 : ageDays <= 30 ? 0.6 : ageDays <= 180 ? 0.2 : 0;
+    // v0.37（B-72）：删掉「使用次数加分」。那一项本来是「常被取回的更容易再被取回」＝正反馈种子，
+    // 而且全插件没有任何地方给 useCount +1，一直是恒 0 的死代码——留着就是给以后留个接错的钩子。
+    if (tagNeedle && tagHit) score += 2;
+    if (entry?.important) score += 2;
+    const cueText = entry?.cue && typeof entry.cue === "object" ? Object.values(entry.cue).join(" ").toLowerCase() : "";
+    if (cueText && tokens.some((t) => cueText.includes(t))) score += 1.5;
+    // 自动摘要降权：模型压出来的段落不能挤掉手写记忆
+    if (entry?.kind === "auto-summary") score -= 1.5;
+    candidates.push({ doc, score, ts: Number.isFinite(tsMs) ? tsMs : 0 });
+  }
+  if (!candidates.length) {
+    if (q) return `没有找到包含「${q}」${tagNeedle ? `且带标签「${tagQuery}」` : ""}的记忆。`;
+    return `没有找到带标签「${tagQuery}」的记忆。`;
+  }
+  const picked = candidates
+    .filter((c) => !minScore || c.score >= minScore)
+    .sort((a, b) => b.score - a.score || b.ts - a.ts)
+    .slice(0, max);
+  if (!picked.length) {
+    if (q) return `没有找到分数 ≥${minScore} 的记忆（想放宽就去掉 minScore）。`;
+    return `没有找到带标签「${tagQuery}」的记忆。`;
+  }
+  const srcIdx = sourceIndex();
+  const lines = picked.map((c) => formatSearchHit(c.doc, srcIdx));
+  // v0.34（B-52）要点层：命中不多时先给一份「要点 + hash」速览
+  const briefCfg = (() => {
+    try {
+      return loadConfig().brief || {};
+    } catch {
+      return {};
+    }
+  })();
+  const prependCount = briefCfg.enabled === false ? 0 : Math.max(0, Number(briefCfg.prependHits ?? 3) || 0);
+  if (prependCount > 0) {
+    const heads = picked
+      .map((c) => ({ brief: briefOf(c.doc.entry), hash: c.doc.entry?.hash ? String(c.doc.entry.hash) : "" }))
       .filter((h) => h.brief)
       .slice(0, prependCount)
       .map((h, i) => `${i + 1}. ${h.brief}${h.hash ? `  #${h.hash}` : ""}`);
@@ -2474,10 +2765,74 @@ function tagSummary() {
     .slice(0, 12)
     .map(([t, n]) => `${t}(${n})`)
     .join("、");
-  // 词表外标签审计：老数据里可能残留（新写入已强制过词表）
+  // 词表外标签审计：v0.37（B-78）起自定义标签是**合法**的（冷门标签），不再算异常，单独报到冷门卡里
   const offVocab = [...counts.keys()].filter((t) => !TAG_VOCAB.includes(t));
-  const offLine = offVocab.length ? `；词表外 ${offVocab.length} 个：${offVocab.slice(0, 8).join("、")}` : "";
+  const rareCount = offVocab.filter((t) => (counts.get(t) || 0) <= RARE_TAG_MAX_COUNT).length;
+  const offLine = offVocab.length ? `；自定义冷门 ${offVocab.length} 个（其中 ${rareCount} 个进冷门卡，memory_tags 看）` : "";
   return `标签：${tagged} 条带标签；${top}${offLine}`;
+}
+
+// v0.37（B-78）：冷门标签卡。
+// 为什么是**派生视图**而不是手写一张卡：手写的卡一定会过期（默认人设那次已经吃过教训）。
+// 卡的内容 = 自定义标签里「还冷门」的那些 + 一句释义（取最近条目的要点）+ 代表 hash。
+// 用法（丹阳 2026-10-27 定）：连搜三次都不相关 → 读这张卡 → 按标签再查，查完还不行就直说找不到。
+function tagCard(args = {}) {
+  const action = String(args?.action || "list").toLowerCase();
+  const files = [PATHS.relations, PATHS.user, PATHS.memo, PATHS.notes, PATHS.sayings, ...dirJsonl(PATHS.diaryDir)];
+  const map = new Map();
+  for (const file of files) {
+    if (!fs.existsSync(file)) continue;
+    for (const line of readText(file).split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      const entry = parseJsonlLine(line);
+      if (!entry || entry.voided) continue;
+      const tags = Array.isArray(entry.tags)
+        ? entry.tags.filter((t) => typeof t === "string" && !t.startsWith("-") && !t.startsWith("!"))
+        : [];
+      if (!tags.length) continue;
+      const ts = String(entry.ts || "");
+      for (const t of tags) {
+        const cur = map.get(t) || { count: 0, latest: null };
+        cur.count += 1;
+        if (!cur.latest || ts > cur.latest.ts) {
+          cur.latest = { ts, brief: briefOf(entry, 50), hash: entry.hash ? String(entry.hash) : "" };
+        }
+        map.set(t, cur);
+      }
+    }
+  }
+  if (!map.size) return "还没有任何标签。写记忆时用 tags 打标签，冷门标签会自动进卡。";
+  if (action === "check") {
+    const raw = String(args?.tag || "").trim();
+    if (!raw) return "action=check 需要 tag 参数。";
+    const normalized = normalizeTag(raw);
+    const tag = TAG_ALIASES[normalized] || normalized;
+    const hit = map.get(tag);
+    const kind = TAG_VOCAB.includes(tag) ? "词表内（常用）" : "自定义（冷门）";
+    return `「${raw}」→ 归一成「${tag}」，${kind}；${hit ? `${hit.count} 条，最近一条：${hit.latest.brief}${hit.latest.hash ? `  #${hit.latest.hash}` : ""}` : "还没有条目用过它"}`;
+  }
+  const entries = [...map.entries()].map(([tag, v]) => ({ tag, ...v, custom: !TAG_VOCAB.includes(tag) }));
+  if (action === "all") {
+    const rows = entries.sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag));
+    return [
+      `全部标签 ${rows.length} 个（词表内 ${rows.filter((r) => !r.custom).length} / 自定义 ${rows.filter((r) => r.custom).length}）：`,
+      ...rows.map((r) => `${r.custom ? "·" : "#"} ${r.tag}（${r.count}）`),
+    ].join("\n");
+  }
+  const rare = entries
+    .filter((r) => r.custom && r.count <= RARE_TAG_MAX_COUNT)
+    .sort((a, b) => a.count - b.count || a.tag.localeCompare(b.tag));
+  const hot = entries.filter((r) => r.custom && r.count > RARE_TAG_MAX_COUNT).sort((a, b) => b.count - a.count);
+  if (!rare.length) {
+    return `冷门标签卡：现在没有（自定义标签 ${hot.length} 个，都已超过 ${RARE_TAG_MAX_COUNT} 条）。`;
+  }
+  return [
+    `冷门标签卡（${rare.length} 个，条数 ≤ ${RARE_TAG_MAX_COUNT}；只在连搜三次都不相关时才读它）`,
+    ...rare.map((r) => `${r.tag}（${r.count} 条）${r.latest.brief}${r.latest.hash ? `  #${r.latest.hash}` : ""}`),
+    hot.length ? `另有已用热的自定义标签：${hot.map((r) => `${r.tag}(${r.count})`).join("、")}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 // 清空便签：原内容先归档到 behavior/archive/，避免误删把交接内容弄丢
@@ -2549,7 +2904,8 @@ function recallSession(args) {
   const limit = Math.max(1, Math.min(200, Number(args?.limit) || 30));
   if (!wanted || wanted === "list") return listSessions(limit);
   const id = wanted.replace(/^session-/, "");
-  const file = findSessionFile(id);
+  // v0.36（B-61）：宿主文件不在了就回落到归档副本——宿主清了原文也读得回来
+  const file = findSessionFile(id) || findArchivedSession(id);
   if (!file) return `找不到会话 ${id} 的文件。最近的会话：\n${listSessions(10)}`;
   const decoded = decodeSessionFile(file);
   if (!decoded.ok) return `读取失败：${decoded.error}`;
@@ -2573,6 +2929,178 @@ function recallSession(args) {
   const picked = hits.slice(-limit);
   const head = `会话 ${id}：${msgs.length} 条对话，${query ? `命中「${args.query}」` : "取最近"} ${picked.length} 条：`;
   return [head, ...picked.map((m) => `[${m.role}] ${clip(m.text.replace(/\s+/g, " "), 240)}`)].join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// v0.36（B-61）：重要会话原文归档
+// 为什么：真原文只在宿主 ~/.dsh/sessions/<cwd>/<会话>/session.v4.jsonl.zstd，留多久是宿主的策略；
+// 而「记忆精度随时间衰减」的前提是原文能回查——摘要、要点、索引、向量都能重算，原文不能。
+// 做法：给人挑中的会话整份拷到 assets/raw-sessions/，写一份带 sha256 的索引；
+//       memory_recall 找不到宿主文件时回落到副本，宿主清了也读得回来。
+// 边界：①默认只列不复制，复制必须显式 action=apply；
+//      ②不做脱敏——脱敏过就不是原文了，所以副本只留本机，memory_export 不导它、发布包不带它；
+//      ③自动触发（按轮数/关键词/低峰挑最长）暂不实现，等触发口径定了再加，且默认关。
+// ---------------------------------------------------------------------------
+
+// 目录名是 cwd 的 slug（形如 --E-xxx--），兜底还原成盘符路径；只存进本机索引，不对外
+function cwdOfSlug(slug) {
+  const s = String(slug || "").replace(/^--/, "").replace(/--$/, "");
+  if (!s) return "";
+  const m = s.match(/^([A-Za-z])-(.*)$/);
+  if (!m) return s.replace(/-/g, "\\");
+  return `${m[1].toUpperCase()}:\\${m[2].replace(/-/g, "\\")}`;
+}
+
+function rawSessionFileName(id) {
+  return `${String(id || "").trim().replace(/^session-/, "").replace(/:/g, "~003A")}.jsonl.zstd`;
+}
+
+function findArchivedSession(sessionId) {
+  if (!sessionId) return "";
+  return safe("定位归档会话", () => {
+    const file = path.join(PATHS.rawSessions, rawSessionFileName(sessionId));
+    return fs.existsSync(file) ? file : "";
+  }, "");
+}
+
+function sha256OfFile(file) {
+  return createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+}
+
+// 只解第一帧（会话头）拿真实 cwd / createdAt。
+// 为什么不用目录名还原：slug 把路径分隔符也写成 `-`，`deepseek-harness` 还原不回 `deepseek\harness`，
+// 目录名只能兜底，真值以会话头为准（只解一帧，几毫秒）。
+function sessionHeaderOf(file) {
+  return safe("读会话头", () => {
+    const buf = fs.readFileSync(file);
+    const magic = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
+    const first = buf.indexOf(magic);
+    if (first < 0) return null;
+    const second = buf.indexOf(magic, first + 4);
+    const text = zlib.zstdDecompressSync(buf.subarray(first, second < 0 ? buf.length : second)).toString("utf8");
+    const line = text.split(/\r?\n/).find((l) => l.trim());
+    return line ? parseJsonlLine(line) : null;
+  }, null);
+}
+
+// 列宿主会话原文：按体积从大到小。只解首帧拿头信息（countRounds 时才整份解压）。
+function scanSessionOriginals(sessionDir = SESSION_DIR) {
+  const rows = [];
+  if (!fs.existsSync(sessionDir)) return rows;
+  for (const slug of safe("列会话根目录", () => fs.readdirSync(sessionDir), [])) {
+    const slugDir = path.join(sessionDir, slug);
+    if (!safe("看 cwd 目录", () => fs.statSync(slugDir).isDirectory(), false)) continue;
+    for (const name of safe("列会话子目录", () => fs.readdirSync(slugDir), [])) {
+      // 会话文件有两种名字：v4 的 session.v4.jsonl.zstd，和老版本留下的 session.jsonl.zstd。
+      // 老名字漏掉等于整场会话看不见，归档就少一份；v4 优先。
+      const dir = path.join(slugDir, name);
+      const file = ["session.v4.jsonl.zstd", "session.jsonl.zstd"]
+        .map((f) => path.join(dir, f))
+        .find((f) => fs.existsSync(f));
+      if (!file) continue;
+      const st = safe("看会话文件", () => fs.statSync(file), null);
+      if (!st || !st.isFile()) continue;
+      const head = sessionHeaderOf(file);
+      rows.push({
+        id: String(name).replace(/^session-/, ""),
+        file,
+        slug,
+        cwd: String(head?.cwd || cwdOfSlug(slug)),
+        createdAt: String(head?.createdAt || ""),
+        bytes: st.size,
+        mtime: st.mtime.toISOString(),
+      });
+    }
+  }
+  return rows.sort((a, b) => b.bytes - a.bytes);
+}
+
+// 「轮」= 用户消息条数（assistant 另算，不参与）；解压整份文件，慢，默认不算
+function roundsOfSessionFile(file) {
+  const decoded = decodeSessionFile(file);
+  if (!decoded.ok) return 0;
+  let rounds = 0;
+  for (const line of decoded.text.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    const ev = parseJsonlLine(line);
+    if (ev && ev.type === "user/message") rounds += 1;
+  }
+  return rounds;
+}
+
+function rawArchiveRows() {
+  return readJsonl(PATHS.rawIndex).filter((r) => r && r.id);
+}
+
+function archiveSessions(args = {}) {
+  const action = String(args?.action || "list").toLowerCase();
+  const wantRounds = Boolean(args?.countRounds);
+  const rows = scanSessionOriginals(args?.sessionDir ? String(args.sessionDir) : SESSION_DIR);
+  if (!rows.length) return `宿主会话目录里没有会话文件（${rel(SESSION_DIR)}）——没东西可归档。`;
+  const archived = new Map(rawArchiveRows().map((r) => [r.id, r]));
+  const one = (r, i) => {
+    const mb = (r.bytes / 1024 / 1024).toFixed(1);
+    const have = archived.get(r.id);
+    const rounds = wantRounds ? ` · ${roundsOfSessionFile(r.file)} 轮` : "";
+    return `${i + 1}. ${String(r.id).slice(0, 24)}  ${String(r.mtime).slice(0, 10)}  ${mb}MB${rounds}  ${have ? `已归档 sha256 ${String(have.sha256 || "").slice(0, 12)}` : "未归档"}`;
+  };
+  if (action !== "apply") {
+    return [
+      `宿主会话原文 ${rows.length} 个，已归档 ${archived.size} 个（当前只列不复制；要复制给 action=apply）`,
+      ...rows.map(one),
+    ].join("\n");
+  }
+  // ---- apply：复制 → 校验 sha256 → 记索引（同 id 覆盖，不重复）----
+  const wanted = String(args?.session || "").trim();
+  let picks;
+  if (wanted) {
+    const needle = wanted.replace(/^session-/, "");
+    picks = rows.filter((r) => r.id === needle || r.id.startsWith(needle));
+    if (!picks.length) return `没找到会话「${wanted}」，先 action=list 看看有哪些。`;
+    if (picks.length > 1) return `「${wanted}」匹配到 ${picks.length} 个，多给几位：\n${picks.map((r) => `- ${r.id}`).join("\n")}`;
+  } else {
+    const limit = Math.max(1, Math.min(20, Number(args?.limit) || 3));
+    const minBytes = Math.max(0, Number(args?.minBytes) || 0);
+    picks = rows.filter((r) => r.bytes >= minBytes).slice(0, limit);
+    if (!picks.length) return "没有满足条件的会话可归档（minBytes 设小了或目录是空的）。";
+  }
+  fs.mkdirSync(PATHS.rawSessions, { recursive: true });
+  const index = rawArchiveRows();
+  const lines = [];
+  for (const r of picks) {
+    const dest = path.join(PATHS.rawSessions, rawSessionFileName(r.id));
+    let before = "";
+    try {
+      before = sha256OfFile(r.file);
+      fs.copyFileSync(r.file, dest);
+    } catch (err) {
+      lines.push(`❌ ${String(r.id).slice(0, 24)} 复制失败：${err?.message || err}`);
+      continue;
+    }
+    const after = sha256OfFile(dest);
+    if (before !== after) {
+      lines.push(`❌ ${String(r.id).slice(0, 24)} 校验不一致（源 ${before.slice(0, 12)} ≠ 副本 ${after.slice(0, 12)}），不记索引`);
+      continue;
+    }
+    const row = {
+      id: r.id,
+      ts: r.mtime,
+      bytes: fs.statSync(dest).size,
+      sha256: after,
+      cwd: r.cwd,
+      slug: r.slug,
+      archivedAt: new Date().toISOString(),
+      rounds: wantRounds ? roundsOfSessionFile(dest) : undefined,
+      source: `sessions/${r.slug}/${r.id}/session.v4.jsonl.zstd`,
+    };
+    const at = index.findIndex((x) => x && x.id === r.id);
+    if (at >= 0) index[at] = row;
+    else index.push(row);
+    lines.push(`✅ ${String(r.id).slice(0, 24)} ${(row.bytes / 1024 / 1024).toFixed(1)}MB sha256 ${after.slice(0, 12)} → ${rel(dest)}${wantRounds ? `（${row.rounds} 轮）` : ""}`);
+  }
+  if (lines.some((l) => l.startsWith("✅"))) writeJsonl(PATHS.rawIndex, index);
+  const done = lines.filter((l) => l.startsWith("✅")).length;
+  return [`归档 ${picks.length} 个候选，成功 ${done} 个：`, ...lines].join("\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -3419,6 +3947,29 @@ function buildStats() {
     );
   } catch {
     /* social 统计失败不影响其它统计 */
+  }
+
+  // v0.37（B-61）：原文归档一行——不点面板也知道有没有归档、多大、最新一个的 sha256。
+  // 顺带把「未脱敏、会随备份带走」写进统计，免得以后忘了这层风险。
+  try {
+    const rawFiles = fs.existsSync(PATHS.rawSessions)
+      ? fs.readdirSync(PATHS.rawSessions).filter((f) => f.endsWith(".jsonl.zstd"))
+      : [];
+    if (rawFiles.length) {
+      const bytes = rawFiles.reduce(
+        (sum, f) => sum + safe("算归档体积", () => fs.statSync(path.join(PATHS.rawSessions, f)).size, 0),
+        0,
+      );
+      const rows = rawArchiveRows();
+      const latest = rows[rows.length - 1];
+      fileStats.push(
+        `assets/raw-sessions/: ${rawFiles.length} 个会话原文 / ${(bytes / 1024 / 1024).toFixed(1)} MB / 最新 sha256 ${String(latest?.sha256 || "").slice(0, 12)}（未脱敏，会随备份带走）`,
+      );
+    } else {
+      fileStats.push("assets/raw-sessions/: 0 个（尚未归档原文；memory_archive_session 可归档）");
+    }
+  } catch {
+    /* 归档统计失败不影响其它统计 */
   }
 
   const assetFiles = fs.existsSync(PATHS.assets)
@@ -5373,6 +5924,7 @@ function apply(ctx) {
           limit: { type: "number", description: "最多返回条数，默认 20" },
           tag: { type: "string", description: "按标签过滤（子串匹配，如「第一次」）；可与 query 组合取交集" },
           includeVoided: { type: "boolean", description: "把「已标废」的条目也返回（默认不返回；行首标〔已标废〕）" },
+          minScore: { type: "number", description: "只要分数 ≥ 这个值的结果（默认 0＝不过滤）。排序分是 BM25＋加成，量级约 0–20；结果看着偏杂时可以试 3–5" },
           scope: { type: "string", enum: ["context"], description: "v0.21：scope=context 只检索「当前场景可见」的社交记忆（群聊=本群 + 本群发言人；私聊=对方 + 主人的私事；别人的私事、别的群的内容永远不出现）。不传 personId/groupId 时用最近一次识别到的场景" },
           personId: { type: "string", description: "scope=context 时：按某人的场景检索（不传就用最近场景）" },
           groupId: { type: "string", description: "scope=context 时：按某个群检索（不传就用最近场景）" },
@@ -5382,7 +5934,7 @@ function apply(ctx) {
       async execute(args) {
         try {
           if (String(args?.scope || "") === "context") return searchSocialContext(social, args || {});
-          return searchMemory(args?.query, args?.layer, args?.limit, args?.tag, args?.includeVoided === true);
+          return searchMemory(args?.query, args?.layer, args?.limit, args?.tag, args?.includeVoided === true, Number(args?.minScore) || 0);
         } catch (err) {
           return `检索失败：${err?.message || err}`;
         }
@@ -5903,6 +6455,53 @@ function apply(ctx) {
       },
     });
 
+    register({
+      name: "memory_archive_session",
+      description:
+        "重要会话原文归档（B-61）：宿主的会话原文只存在 ~/.dsh/sessions/ 下，留多久由宿主决定，清掉就没了——原文是唯一不能重算的东西（摘要、要点、索引、向量都能重算）。action=list 只列不复制（有哪些会话、多大、日期、是否已归档）；action=apply 才真的整份拷进记忆目录 assets/raw-sessions/，拷完校验 sha256 并记索引（会话 id/时间/大小/sha256/来源 cwd）。归档后 memory_recall 在宿主文件缺失时自动回落到副本。不脱敏（脱敏就不是原文了），所以副本只留本机、不进导出档案；不自动跑。",
+      parameters: {
+        type: "object",
+        properties: {
+          action: { type: "string", enum: ["list", "apply"], description: "list=只列（默认）；apply=复制并记索引" },
+          session: { type: "string", description: "action=apply 时指定会话 id（可只给前几位）；不传就按体积取最大的几个" },
+          limit: { type: "number", description: "action=apply 且没指定 session 时最多取几个（默认 3，上限 20）" },
+          minBytes: { type: "number", description: "只归档不小于这个字节数的会话" },
+          countRounds: { type: "boolean", description: "顺便解压数用户轮数（慢，默认 false）" },
+        },
+        required: [],
+      },
+      output,
+      async execute(args) {
+        try {
+          return archiveSessions(args || {});
+        } catch (err) {
+          return `归档会话失败：${err?.message || err}`;
+        }
+      },
+    });
+
+    register({
+      name: "memory_tags",
+      description:
+        "冷门标签卡（B-78）：action=list 看卡（默认，只列还冷门的自定义标签＋一句释义＋代表 hash）；action=all 看全部标签与条数；action=check 查一个标签的归一去向、是否词表内、有多少条。用法约定：同一个问题连搜三次都不相关，才来读这张卡，再按标签查；读完还找不到就直说找不到，别换着说法硬撞。",
+      parameters: {
+        type: "object",
+        properties: {
+          action: { type: "string", enum: ["list", "all", "check"], description: "list=冷门卡（默认）；all=全部标签；check=查单个标签" },
+          tag: { type: "string", description: "action=check 时必填：要查的标签（会按别名归一）" },
+        },
+        required: [],
+      },
+      output,
+      async execute(args) {
+        try {
+          return tagCard(args || {});
+        } catch (err) {
+          return `读标签卡失败：${err?.message || err}`;
+        }
+      },
+    });
+
     ctx.tools.register({
       name: "memory_handoff",
       description:
@@ -6079,6 +6678,6 @@ const plugin = {
   apply,
 };
 
-export { apply, loadState, saveState, STATE_PATH, buildInjectionText, buildStateInjection, modelRouteOf, sessionMemory, createSessionMemory, sessionMemoryPaths, normalizeSessionId, isSpecialKey, doctorReport, renderDoctor, resolveBackupDir, probeWritable, coreInjection, coreOptions, createLines, lexicalScore, linesConfigDefaults, linesPaths, qualitativeOf, topicTokens, behaviorHint, createSocial, detectScene, normalizeName, personIdOf, registerSocialTools, sceneLabel, socialConfigDefaults, socialPaths, searchSocialContext, backupPolicySummary, compactionStats, compactionStatusLine, noteCompaction, noteAutoSummary, compressCallsIn, nativeCompactionsIn, compressToolCallsIn, compressionKindOf, readCompactionLog, appendCompactionRecord, ingestCompactionEvent, compactionRecords, compactionSelfCheck, dutyBoardData, sendHandoff, pullHandoff, listHandoffs, compactionSuiteDetected, listAutoSummaries, deleteAutoSummary, setFactCaller, factOptions, readFactCandidates, writeFactCandidates, pendingFactCandidates, factCandidateStats, factStatusLine, parseFactCandidates, buildFactPrompt, factInventory, isDuplicateFact, extractFactCandidates, acceptFactCandidate, rejectFactCandidate, updateBackupPolicy, updateAutoSummaryPolicy, autoSummaryConfigView, registerBackupApi, hostIsLoopback, readRequestBody, searchMemory, writeMemory, voidMemory, exportArchive, readQqWatchSettings, writeQqWatchSettings, qqWatchView, briefOf, aliasesOf, mergeAliases, writeGuardOf, writeGuardCheck, similarityOf, backupNow, pruneOldSnapshots, shouldSkipBackup, backupStampOf, writeTurnDiary, isCompressionEvent, renameAssetImage, listAssetImages, assetDetail, arrayIndexFiles, arrayIndexFileForMonth, migrateArrayIndexIfNeeded, AUDIO_SOURCE, AUDIO_KIND, AUDIO_USE, audioClassTag, buildStats, tagsOf, validateTags, checkedTags, TAG_VOCAB, clearMemos, recallSession, decodeSessionFile, findSessionFile, relationInjectionLines, archiveRelationOverflow, locateMemory, jsonlHasHash, rebuildGuide, guideStats, guideLinks, guideNodes, addSource, listSources, findSources, sourceStats, loadSources, sourceTag, entryProvenance, sourceIndex, runAutoSummary, pendingTurns, autoSummaryOptions, buildAutoSummaryEntry, buildSummaryPrompt, summaryStyleLine, parseSummaryText, summaryInputOf, callWithThinkingRetry, setAutoSummaryCaller, defaultConfig, loadConfig, AUTO_SUMMARY_PREFIX };
+export { apply, loadState, saveState, STATE_PATH, buildInjectionText, buildStateInjection, modelRouteOf, sessionMemory, createSessionMemory, sessionMemoryPaths, normalizeSessionId, isSpecialKey, doctorReport, renderDoctor, resolveBackupDir, probeWritable, coreInjection, coreOptions, createLines, lexicalScore, linesConfigDefaults, linesPaths, qualitativeOf, topicTokens, behaviorHint, createSocial, detectScene, normalizeName, personIdOf, registerSocialTools, sceneLabel, socialConfigDefaults, socialPaths, searchSocialContext, backupPolicySummary, compactionStats, compactionStatusLine, noteCompaction, noteAutoSummary, compressCallsIn, nativeCompactionsIn, compressToolCallsIn, compressionKindOf, readCompactionLog, appendCompactionRecord, ingestCompactionEvent, compactionRecords, compactionSelfCheck, dutyBoardData, sendHandoff, pullHandoff, listHandoffs, compactionSuiteDetected, listAutoSummaries, deleteAutoSummary, setFactCaller, factOptions, readFactCandidates, writeFactCandidates, pendingFactCandidates, factCandidateStats, factStatusLine, parseFactCandidates, buildFactPrompt, factInventory, isDuplicateFact, extractFactCandidates, acceptFactCandidate, rejectFactCandidate, updateBackupPolicy, updateAutoSummaryPolicy, autoSummaryConfigView, registerBackupApi, hostIsLoopback, readRequestBody, searchMemory, searchMemoryKeyword, searchTokensOf, ensureSearchIndex, bm25ScoreOf, searchTargets, writeMemory, voidMemory, exportArchive, readQqWatchSettings, writeQqWatchSettings, qqWatchView, briefOf, aliasesOf, mergeAliases, writeGuardOf, writeGuardCheck, similarityOf, backupNow, pruneOldSnapshots, shouldSkipBackup, backupStampOf, writeTurnDiary, isCompressionEvent, renameAssetImage, listAssetImages, assetDetail, arrayIndexFiles, arrayIndexFileForMonth, migrateArrayIndexIfNeeded, AUDIO_SOURCE, AUDIO_KIND, AUDIO_USE, audioClassTag, buildStats, tagsOf, validateTags, checkedTags, TAG_VOCAB, clearMemos, tagCard, isVocabTag, normalizeTag, CUSTOM_TAG_MAX, CUSTOM_TAG_LEN, RARE_TAG_MAX_COUNT, recallSession, decodeSessionFile, findSessionFile, archiveSessions, scanSessionOriginals, sessionHeaderOf, findArchivedSession, rawArchiveRows, rawSessionFileName, cwdOfSlug, sha256OfFile, roundsOfSessionFile, relationInjectionLines, archiveRelationOverflow, locateMemory, jsonlHasHash, rebuildGuide, guideStats, guideLinks, guideNodes, addSource, listSources, findSources, sourceStats, loadSources, sourceTag, entryProvenance, sourceIndex, runAutoSummary, pendingTurns, autoSummaryOptions, buildAutoSummaryEntry, buildSummaryPrompt, summaryStyleLine, parseSummaryText, summaryInputOf, callWithThinkingRetry, setAutoSummaryCaller, defaultConfig, loadConfig, AUTO_SUMMARY_PREFIX };
 export default plugin;
 
