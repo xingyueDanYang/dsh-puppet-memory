@@ -17,6 +17,7 @@ write("behavior/persona.md", ["# 人设", "- 称呼：雪风"]);
 write("behavior/relations.jsonl", [
   J({ kind: "relation", ts: now, keyword: "守夜人", meaning: "小说设定：七条加最终条例", hash: "r0000001" }),
   J({ kind: "relation", ts: now, keyword: "钢盆", meaning: "不锈钢盆是饭碗的梗", hash: "r0000002" }),
+  J({ kind: "relation", ts: now, keyword: "青鸟（小说设定）", meaning: "关键词带括号说明也要能命中", hash: "r0000003" }),
 ]);
 write("behavior/user.jsonl", [J({ kind: "user", ts: now, keyword: "白米饭", text: "用户知道我爱吃白米饭", hash: "u0000001" })]);
 write("behavior/notes.jsonl", [J({ kind: "note", ts: now, text: "本地出图方案用 ComfyUI", hash: "n0000001", tags: ["出图"] })]);
@@ -48,6 +49,10 @@ try {
   // ---- 命中 notes tag ----
   const r3 = buildRecallInjection(cfg, "帮我看看出图");
   ok("notes 标签命中", r3.includes("ComfyUI"), r3);
+
+  // ---- 关键词带括号说明：拆词干也要能命中 ----
+  const r4 = buildRecallInjection(cfg, "青鸟那本小说的设定呢");
+  ok("带括号的关键词能命中", r4.includes("关键词带括号说明也要能命中"), r4);
 
   // ---- 不命中：一个字都不加 ----
   ok("完全无关 → 空串", buildRecallInjection(cfg, "今天天气不错") === "");

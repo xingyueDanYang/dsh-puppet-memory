@@ -1208,13 +1208,24 @@ function buildRecallInjection(cfg, userText, { nowMs = Date.now() } = {}) {
   const text = String(userText || "").toLowerCase();
   if (text.trim().length < 2) return "";
   const hits = [];
+  // 关键词可能带括号说明（如「守夜人（小说设定）」）：拆成词干再比，避免整串包含不了就漏
+  const keyStemsOf = (keyword) => {
+    const raw = String(keyword || "").trim();
+    if (!raw) return [];
+    const stems = raw
+      .split(/[（(〔[、,，;；\/\s]+/)
+      .map((x) => x.replace(/[）)〕\]】]+$/, "").trim())
+      .filter((x) => x.length >= 2);
+    if (stems.length) return stems;
+    return raw.length >= 2 ? [raw] : [];
+  };
   const pushHit = (layer, key, entry) => {
-    const kw = String(key || "").trim();
-    if (!kw || kw.length < 2) return;
-    if (!text.includes(kw.toLowerCase())) return;
+    const stems = keyStemsOf(key);
+    if (!stems.length) return;
+    if (!stems.some((s) => text.includes(s.toLowerCase()))) return;
     const brief = briefOf(entry);
     if (!brief) return;
-    hits.push({ layer, key: kw, brief, hash: entry?.hash ? String(entry.hash) : "" });
+    hits.push({ layer, key: stems[0], brief, hash: entry?.hash ? String(entry.hash) : "" });
   };
   try {
     for (const e of tailJsonl(PATHS.relations, 200)) {
