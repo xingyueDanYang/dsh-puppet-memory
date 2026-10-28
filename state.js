@@ -192,6 +192,31 @@ export function behaviorHint(primary) {
   return "按话题走，工作就推进、情绪就先接。";
 }
 
+/**
+ * 从 pre-step 的消息列表里取「最后一条真实用户消息」。
+ * 没有用户消息、或全是插件自己注入的，返回 { text: "", skipped }。
+ * v0.37（B-84）：抽成独立函数，给「事件触发取记忆」复用；判定逻辑与 updateFromMessages 内联版一致。
+ */
+export function lastUserText(messages = []) {
+  const list = Array.isArray(messages) ? messages : [];
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    const m = list[i];
+    if (!m || m.role !== "user") continue;
+    // 我们自己注入的消息不算用户发言
+    const src = m.source || {};
+    if (src.kind && String(src.kind).startsWith("plugin:")) continue;
+    const text = typeof m.content === "string"
+      ? m.content
+      : Array.isArray(m.content)
+        ? m.content.map((b) => (b && b.type === "text" ? b.text || "" : "")).join("\n")
+        : "";
+    if (!String(text || "").trim()) continue;
+    const key = String(m.id || "") || crypto.createHash("sha1").update(`${text}`).digest("hex").slice(0, 12);
+    return { text, key };
+  }
+  return { text: "", skipped: "no-user-message" };
+}
+
 export function createLines({ memDir, getConfig = () => null, now = () => Date.now() } = {}) {
   if (!memDir) throw new Error("createLines 需要 memDir");
   const paths = linesPaths(memDir);
@@ -530,29 +555,16 @@ export function createLines({ memDir, getConfig = () => null, now = () => Date.n
 
   // 从 pre-step 的完整消息列表里找「最后一条真实用户消息」，吃一次信号。
   function updateFromMessages(messages = []) {
-    const list = Array.isArray(messages) ? messages : [];
-    for (let i = list.length - 1; i >= 0; i -= 1) {
-      const m = list[i];
-      if (!m || m.role !== "user") continue;
-      // 我们自己注入的消息不算用户发言
-      const src = m.source || {};
-      if (src.kind && String(src.kind).startsWith("plugin:")) continue;
-      const text = typeof m.content === "string"
-        ? m.content
-        : Array.isArray(m.content)
-          ? m.content.map((b) => (b && b.type === "text" ? b.text || "" : "")).join("\n")
-          : "";
-      if (!String(text || "").trim()) continue;
-      const key = String(m.id || "") || crypto.createHash("sha1").update(`${text}`).digest("hex").slice(0, 12);
-      const state = load();
-      if (state.lastMessageKey === key) return { text: "", skipped: "same-message" };
-      const result = update(text);
-      const after = load();
-      after.lastMessageKey = key;
-      save(after);
-      return { text, key, result };
-    }
-    return { text: "", skipped: "no-user-message" };
+    const found = lastUserText(messages);
+    if (!found.text) return { text: "", skipped: found.skipped };
+    const key = found.key;
+    const state = load();
+    if (state.lastMessageKey === key) return { text: "", skipped: "same-message" };
+    const result = update(found.text);
+    const after = load();
+    after.lastMessageKey = key;
+    save(after);
+    return { text: found.text, key, result };
   }
 
   return {

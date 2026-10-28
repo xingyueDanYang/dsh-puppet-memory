@@ -33,8 +33,9 @@ import os from "node:os";
 import path from "node:path";
 import zlib from "node:zlib";
 import { createSocial, detectScene, normalizeName, personIdOf, registerSocialTools, sceneLabel, socialConfigDefaults, socialPaths } from "./social.js";
-import { behaviorHint, createLines, lexicalScore, linesConfigDefaults, linesPaths, qualitativeOf, topicTokens } from "./state.js";
+import { behaviorHint, createLines, lastUserText, lexicalScore, linesConfigDefaults, linesPaths, qualitativeOf, topicTokens } from "./state.js";
 import { createSessionMemory, isSpecialKey, normalizeSessionId, sessionMemoryPaths } from "./sessionmem.js";
+import { createRules, formatRuleRow, parseRulesMarkdown, rulesDefaults } from "./rules.js";
 
 const PLUGIN_NAME = "dsh-puppet-memory";
 const DISPLAY_NAME = "木偶记忆";
@@ -1132,11 +1133,135 @@ function sessionMemory() {
   return sessionMemSingleton;
 }
 
+/** v0.37（B-87）：当前时间一行。拿不到时钟/格式化失败就返回空串——不瞎写。 */
+function formatNowLine(nowMs = Date.now()) {
+  try {
+    const d = new Date(nowMs);
+    if (Number.isNaN(d.getTime())) return "";
+    const pad = (n) => String(n).padStart(2, "0");
+    const week = "日一二三四五六"[d.getDay()];
+    let tz = "";
+    try {
+      tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+    } catch {
+      tz = "";
+    }
+    return `【现在】${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())} 周${week}${tz ? `（${tz}）` : ""}`;
+  } catch {
+    return "";
+  }
+}
+
+/** v0.37（B-87）：把绝对时刻说成「X 天前」——每次现算，不把相对词存进记忆 */
+function ageLabelOf(ts, nowMs = Date.now()) {
+  const t = Date.parse(String(ts || ""));
+  if (Number.isNaN(t)) return "";
+  const diff = nowMs - t;
+  if (diff < 0) return "未来";
+  const min = Math.floor(diff / 60000);
+  if (min < 60) return min <= 1 ? "刚刚" : `${min} 分钟前`;
+  const h = Math.floor(min / 60);
+  if (h < 24) return `${h} 小时前`;
+  const day = Math.floor(h / 24);
+  if (day < 30) return `${day} 天前`;
+  return `${Math.floor(day / 30)} 个月前`;
+}
+
+const HANDOFF_STALE_MS = 7 * 86400000;
+
+/**
+ * v0.37（B-88）：把 open 的交接读成一张「座位号纸条」塞进注入。
+ * 只读：不改 status（取走仍归 memory_handoff action=pull）；>7 天的按 stale 跳过。
+ */
+function buildHandoffInjection(cfg, { nowMs = Date.now() } = {}) {
+  if (cfg?.handoff?.injectOpen === false) return "";
+  let rows = [];
+  try {
+    rows = readHandoffs();
+  } catch {
+    return "";
+  }
+  const fresh = [];
+  for (const r of rows) {
+    if (!r || r.status !== "open") continue;
+    const at = Date.parse(String(r.at || ""));
+    if (Number.isNaN(at)) continue;
+    if (nowMs - at > HANDOFF_STALE_MS) continue;
+    fresh.push(r);
+  }
+  if (!fresh.length) return "";
+  const lines = fresh.slice(-3).map((r) => `· ${clip(String(r.summary || "").replace(/\s+/g, " ").trim(), 80)}`);
+  return [
+    "<puppet_handoff>",
+    "以下是留给这个工作台的交接纸条（上一个会话/另一张桌子留下的「下一步该做什么」，取走后不再出现，别当长期记忆用）：",
+    clip(lines.join("\n"), 300),
+    "</puppet_handoff>",
+  ].join("\n");
+}
+
+/**
+ * v0.37（B-84）：事件触发取记忆——按用户这句话里的关键词，从 relations / user / notes 里取回几条要点。
+ * 零模型调用；命中才注入；总长 ≤300 字；靠 briefOf 给一行要点，细节仍要 memory_search。
+ */
+function buildRecallInjection(cfg, userText, { nowMs = Date.now() } = {}) {
+  if (cfg?.recall?.enabled === false) return "";
+  const text = String(userText || "").toLowerCase();
+  if (text.trim().length < 2) return "";
+  const hits = [];
+  const pushHit = (layer, key, entry) => {
+    const kw = String(key || "").trim();
+    if (!kw || kw.length < 2) return;
+    if (!text.includes(kw.toLowerCase())) return;
+    const brief = briefOf(entry);
+    if (!brief) return;
+    hits.push({ layer, key: kw, brief, hash: entry?.hash ? String(entry.hash) : "" });
+  };
+  try {
+    for (const e of tailJsonl(PATHS.relations, 200)) {
+      if (!e || e.voided) continue;
+      pushHit("relation", e.keyword, e);
+    }
+    for (const e of tailJsonl(PATHS.user, 200)) {
+      if (!e || e.voided) continue;
+      pushHit("user", e.keyword, e);
+    }
+    for (const e of tailJsonl(PATHS.notes, 60)) {
+      if (!e || e.voided) continue;
+      const tags = Array.isArray(e.tags) ? e.tags : [];
+      for (const t of tags) pushHit("note", t, e);
+    }
+  } catch {
+    return "";
+  }
+  if (!hits.length) return "";
+  const seen = new Set();
+  const picked = [];
+  for (const h of hits) {
+    const k = `${h.layer}:${h.key}:${h.brief}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    picked.push(h);
+    if (picked.length >= 3) break;
+  }
+  const lines = picked.map((h) => `· [${h.layer}] ${h.brief}${h.hash ? ` #${h.hash}` : ""}`);
+  return [
+    "<puppet_recall>",
+    "以下是按你这句话里的关键词顺手取回的几条记忆（不是全部；要细节用 memory_search）：",
+    clip(lines.join("\n"), 300),
+    "</puppet_recall>",
+  ].join("\n");
+}
+
 function buildInjectionText(cfg, coreUsed = 0, lines = null, opts = {}) {
   const total = Math.max(200, Number(cfg?.inject?.maxChars) || DEFAULT_INJECT_MAX);
   // 核心记忆先占预算，剩下的才给「人设+关系+笔记+日记」——避免开了核心卡，注入总量变长
   const maxChars = Math.max(300, total - Math.max(0, Number(coreUsed) || 0));
   const parts = [];
+
+  // v0.37（B-87）：先给「现在」——记忆里有过去、这里没有现在，模型就只能猜「刚才」有多刚
+  const nowLine = formatNowLine();
+  if (nowLine && !(opts.suppressed instanceof Set && opts.suppressed.has("now"))) parts.push(nowLine);
+  const nowMs = Date.now();
 
   const persona = readText(PATHS.persona)
     .replace(/^#.*$/gm, "")
@@ -1178,7 +1303,11 @@ function buildInjectionText(cfg, coreUsed = 0, lines = null, opts = {}) {
   pickedDiaries.sort((a, b) => String(a.ts || "").localeCompare(String(b.ts || "")));
   if (pickedDiaries.length) {
     const line = pickedDiaries
-      .map((d) => `[${String(d.ts || "").slice(5, 10)}${d.important ? "★" : ""}] ${tagsPrefixOf(d)}${clip(d.user || d.text || "", 80)}`)
+      .map((d) => {
+        const age = ageLabelOf(d.ts, nowMs);
+        const stamp = `${String(d.ts || "").slice(5, 10)}${d.important ? "★" : ""}${age ? `·${age}` : ""}`;
+        return `[${stamp}] ${tagsPrefixOf(d)}${clip(d.user || d.text || "", 80)}`;
+      })
       .join("；");
     parts.push(`【最近日记】${clip(line, 420)}`);
   }
@@ -2544,7 +2673,44 @@ function formatSearchHit(doc, srcIdx) {
   return `${where}:${doc.lineNo}  ${endedMark}${voidMark}${statePrefixOf(entry)}${clip(doc.line, 300)}${hs}${suffix}${provenance ? `  ${provenance}` : ""}`;
 }
 
-function searchMemory(query, layer, limit, tag, includeVoided = false, minScore = 0, includeEnded = false) {
+// v0.37（B-77）：规则册实例。模块级单例，apply 里复用同一份，检索/工具都走它。
+let rulesSingleton = null;
+function rulesForSearch() {
+  if (!rulesSingleton) rulesSingleton = createRules({ memDir: MEM_DIR });
+  return rulesSingleton;
+}
+
+const SEARCH_LAYERS = ["behavior", "deep", "array", "user", "memo"];
+const SEARCH_STATUS = ["done", "failed", "heard"];
+
+/** 解析 YYYY-MM-DD / ISO 成毫秒；endOfDay=true 时补到当天 23:59:59.999（本机时区） */
+function parseTimeBound(value, endOfDay = false) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (m) {
+    const d = new Date(
+      Number(m[1]), Number(m[2]) - 1, Number(m[3]),
+      endOfDay ? 23 : 0, endOfDay ? 59 : 0, endOfDay ? 59 : 0, endOfDay ? 999 : 0,
+    );
+    return Number.isNaN(d.getTime()) ? NaN : d.getTime();
+  }
+  const t = Date.parse(raw);
+  return Number.isNaN(t) ? NaN : t;
+}
+
+function searchMemory(query, layer, limit, tag, includeVoided = false, minScore = 0, includeEnded = false, extra = {}) {
+  // 兼容两种调用：旧的位置参数；新的 options 对象（memory_search 工具用后者）
+  if (layer && typeof layer === "object") {
+    extra = layer;
+    layer = extra.layer;
+    limit = extra.limit;
+    tag = extra.tag;
+    includeVoided = extra.includeVoided === true;
+    minScore = Number(extra.minScore) || 0;
+    includeEnded = extra.includeEnded === true;
+  }
+  const opts = extra && typeof extra === "object" ? extra : {};
   const q = String(query || "").trim();
   const tagQuery = String(tag || "").trim();
   const tagNeedle = tagQuery.toLowerCase();
@@ -2553,29 +2719,69 @@ function searchMemory(query, layer, limit, tag, includeVoided = false, minScore 
     .toLowerCase()
     .split(/[\s,，、;；|/]+/)
     .filter(Boolean);
+
+  // ---- v0.37（B-76③）查询参数：层数 / 时间窗 / 三态 / kind ----
+  const layerList = (() => {
+    const arr = Array.isArray(opts.layers) ? opts.layers.map((x) => String(x).trim()).filter(Boolean) : [];
+    if (arr.length) return arr;
+    const layered = String(layer || "").split(",").map((x) => x.trim()).filter(Boolean);
+    return layered.length ? layered : ["all"];
+  })();
+  const badLayer = layerList.find((l) => l !== "all" && !SEARCH_LAYERS.includes(l));
+  if (badLayer) return `不认识的层「${badLayer}」；可选：${SEARCH_LAYERS.join(" / ")} / all`;
+  const statusFilter = String(opts.status || "").trim();
+  if (statusFilter && !SEARCH_STATUS.includes(statusFilter)) {
+    return `status 只能是 ${SEARCH_STATUS.join(" / ")}，我不猜。`;
+  }
+  const kindFilter = String(opts.kind || "").trim();
+  const sinceMs = parseTimeBound(opts.since, false);
+  const untilMs = parseTimeBound(opts.until, true);
+  if (Number.isNaN(sinceMs)) return `since 不是合法日期：「${opts.since}」。用 YYYY-MM-DD 或带时区的 ISO。`;
+  if (Number.isNaN(untilMs)) return `until 不是合法日期：「${opts.until}」。用 YYYY-MM-DD 或带时区的 ISO。`;
+  if (sinceMs !== null && untilMs !== null && sinceMs > untilMs) {
+    return "since 晚于 until，这个时间窗是空的；先改一下再查。";
+  }
+
+  // kind=rule：走规则册（B-77），不混进普通记忆
+  if (kindFilter === "rule") {
+    const engine = rulesForSearch();
+    const all = engine.all();
+    if (engine.errorOf()) return `${engine.errorOf()}（修好之前 kind=rule 不可靠）`;
+    if (!all.length) return `规则册还没数据化（读不到 deep/workbook/10-规则册.md）。`;
+    if (!q) return all.slice(0, max).map(formatRuleRow).join("\n");
+    const res = engine.search(q);
+    if (!res.rows.length) return `规则册里没有匹配「${q}」的条目（共 ${all.length} 条）。`;
+    return res.rows.slice(0, max).map(formatRuleRow).join("\n");
+  }
+
   if (!q && !tagNeedle) {
-    if (layer === "user" || layer === "memo") {
+    const listable = layerList.filter((l) => l === "user" || l === "memo");
+    if (listable.length) {
       const listed = [];
-      for (const file of searchTargets(layer)) {
-        if (!fs.existsSync(file)) continue;
-        readText(file)
-          .split(/\r?\n/)
-          .forEach((line, index) => {
-            if (line.trim()) listed.push(`${rel(file)}:${index + 1}  ${clip(line, 300)}`);
-          });
+      for (const one of listable) {
+        for (const file of searchTargets(one)) {
+          if (!fs.existsSync(file)) continue;
+          readText(file)
+            .split(/\r?\n/)
+            .forEach((line, index) => {
+              if (line.trim()) listed.push(`${rel(file)}:${index + 1}  ${clip(line, 300)}`);
+            });
+        }
       }
-      if (!listed.length) return layer === "memo" ? "便签是空的。" : "用户档案还是空的。";
+      if (!listed.length) return listable.includes("memo") ? "便签是空的。" : "用户档案还是空的。";
       return listed.slice(-max).join("\n");
     }
     return "缺少 query 或 tag 参数；layer=memo 或 layer=user 时可不传，直接列出该层";
   }
   const index = ensureSearchIndex();
-  const allowed = new Set(searchTargets(layer));
+  const allowed = new Set();
+  for (const one of layerList) for (const file of searchTargets(one)) allowed.add(file);
   // v0.36（A-79）：日记按月预筛——只扫「guide 里有候选关键词」的月份
   const diaryPre =
-    layer === "behavior" || layer === "all" || layer === undefined || layer === ""
+    layerList.some((l) => l === "behavior" || l === "all")
       ? diaryFilesWithCandidates(tokens)
       : null;
+
   const qTokens = new Set(searchTokensOf(q));
   const candidates = [];
   const now = Date.now();
@@ -2588,6 +2794,16 @@ function searchMemory(query, layer, limit, tag, includeVoided = false, minScore 
     const entry = doc.entry;
     // v0.35（B-55）：标废条目默认不进检索结果
     if (entry?.voided && !includeVoided) continue;
+    // v0.37（B-76③）：三态 / 时间窗 / kind 过滤（先过滤再算分，省算力也让计数准确）
+    if (statusFilter && String(entry?.state || "") !== statusFilter) continue;
+    if (sinceMs !== null && !(Number(doc.ts) >= sinceMs)) continue;
+    if (untilMs !== null && !(Number(doc.ts) <= untilMs)) continue;
+    if (kindFilter) {
+      const kindOfEntry = String(entry?.kind || "");
+      const fileIsDiary = rel(doc.file).startsWith("behavior/diary/");
+      const kindHit = kindFilter === "diary" ? fileIsDiary || kindOfEntry === "diary" : kindOfEntry === kindFilter;
+      if (!kindHit) continue;
+    }
     let tagHit = true;
     if (tagNeedle) {
       const entryTags = Array.isArray(entry?.tags) ? entry.tags.map((t) => String(t).toLowerCase()) : [];
@@ -2627,9 +2843,17 @@ function searchMemory(query, layer, limit, tag, includeVoided = false, minScore 
     if (entry?.kind === "auto-summary") score -= 1.5;
     candidates.push({ doc, score, ts: Number.isFinite(tsMs) ? tsMs : 0 });
   }
+  const filterNote = [
+    statusFilter ? `status=${statusFilter}` : "",
+    kindFilter ? `kind=${kindFilter}` : "",
+    sinceMs !== null ? `since=${opts.since}` : "",
+    untilMs !== null ? `until=${opts.until}` : "",
+    layerList.some((l) => l !== "all") ? `layers=${layerList.join(",")}` : "",
+  ].filter(Boolean).join("、");
   if (!candidates.length) {
-    if (q) return `没有找到包含「${q}」${tagNeedle ? `且带标签「${tagQuery}」` : ""}的记忆。`;
-    return `没有找到带标签「${tagQuery}」的记忆。`;
+    const suffix = filterNote ? `（加了过滤：${filterNote}）` : "";
+    if (q) return `没有找到包含「${q}」${tagNeedle ? `且带标签「${tagQuery}」` : ""}的记忆${suffix}。`;
+    return `没有找到带标签「${tagQuery}」的记忆${suffix}。`;
   }
   // v0.37（B-74）：默认只用「还生效」的；一条都没有时才降级——真但过期好过查无此事
   const live = candidates.filter((c) => !c.doc.ended);
@@ -5415,6 +5639,14 @@ function apply(ctx) {
   } catch (err) {
     diag(`启动自检：state/ 目录不可用（${err?.message || err}）`);
   }
+  // v0.37（B-77）：规则册数据化。md 是唯一源，rules.jsonl 只是派生；解析失败不影响注入。
+  rulesSingleton = createRules({ memDir: MEM_DIR });
+  try {
+    rulesSingleton.ensure();
+    if (rulesSingleton.errorOf()) diag(`规则册数据化：${rulesSingleton.errorOf()}`);
+  } catch (err) {
+    diag(`启动自检：规则册解析失败（${err?.message || err}）`);
+  }
   try {
     const bk = resolveBackupDir(loadConfig().backup || {});
     diag(`启动自检：记忆目录=${MEM_DIR}${bootError ? `（不可写：${bootError}）` : ""}；备份目录=${bk.dir || "不可用"}${bk.note ? `（${bk.note}）` : ""}`);
@@ -5673,6 +5905,18 @@ function apply(ctx) {
         const stateForInject = stateText && !suppressed.has("state") && lastStateInjected.get(sessionId) !== stateDigest ? stateText : "";
         // 完整摘要（人设+关系+笔记+日记）：mode=first-step 时只在第一次注入
         const text = firstStepDone ? "" : buildInjectionText(cfg, coreText ? core.length : 0, linesView, { suppressed });
+        // v0.37（B-84 / B-88）：事件触发取记忆 + open 交接纸条。各自独立成块，内容不变不重复。
+        let handoffText = "";
+        let recallText = "";
+        try {
+          if (!suppressed.has("handoff")) handoffText = buildHandoffInjection(cfg);
+          if (!suppressed.has("recall")) {
+            const userText = lastUserText(decision.messages || []).text;
+            recallText = buildRecallInjection(cfg, userText);
+          }
+        } catch (err) {
+          diag(`交接/召回注入失败：${err?.message || err}`);
+        }
         // v0.21 多人记忆骨架：社交档案注入（默认关；认不出场景就不注入，宁可少说也不串台）
         let socialText = "";
         let scene = null;
@@ -5685,8 +5929,8 @@ function apply(ctx) {
         } catch (err) {
           diag(`社交档案注入失败：${err?.message || err}`);
         }
-        if (!text && !socialText && !rulesForInject && !coreText && !coreStateForInject && !stateForInject && !resetNote) return decision;
-        const digest = sha1(`${text}\u0000${socialText}\u0000${rulesForInject}\u0000${coreText}\u0000${coreStateForInject}\u0000${stateForInject}\u0000${resetNote}`);
+        if (!text && !socialText && !handoffText && !recallText && !rulesForInject && !coreText && !coreStateForInject && !stateForInject && !resetNote) return decision;
+        const digest = sha1(`${text}\u0000${socialText}\u0000${handoffText}\u0000${recallText}\u0000${rulesForInject}\u0000${coreText}\u0000${coreStateForInject}\u0000${stateForInject}\u0000${resetNote}`);
         if (lastInjected.get(sessionId) === digest) {
           if (injectMode === "first-step") injectedOnce.add(sessionId);
           return decision;
@@ -5727,9 +5971,11 @@ function apply(ctx) {
               `<puppet_social>\n以下是当前场景的社交档案（由 ${DISPLAY_NAME} 插件按「场景 + 对象」注入，不是用户消息）：\n${socialText}\n只按这份档案说话；档案里没有的别人的事，不要主动提起。\n</puppet_social>`,
             )
           : null;
+        const handoffMessage = handoffText ? injectionMessage(handoffText) : null;
+        const recallMessage = recallText ? injectionMessage(recallText) : null;
         return {
           kind: "enter",
-          messages: [...(decision.messages || []), ...(resetMessage ? [resetMessage] : []), ...(rulesMessage ? [rulesMessage] : []), ...(coreMessage ? [coreMessage] : []), ...(coreStateMessage ? [coreStateMessage] : []), ...(stateMessage ? [stateMessage] : []), ...(text ? [injectionMessage(text)] : []), ...(socialMessage ? [socialMessage] : [])],
+          messages: [...(decision.messages || []), ...(resetMessage ? [resetMessage] : []), ...(rulesMessage ? [rulesMessage] : []), ...(coreMessage ? [coreMessage] : []), ...(coreStateMessage ? [coreStateMessage] : []), ...(stateMessage ? [stateMessage] : []), ...(handoffMessage ? [handoffMessage] : []), ...(recallMessage ? [recallMessage] : []), ...(text ? [injectionMessage(text)] : []), ...(socialMessage ? [socialMessage] : [])],
         };
       } catch (err) {
         log("warn", `pre-step 注入失败：${err?.message || err}`);
@@ -5993,7 +6239,12 @@ function apply(ctx) {
         type: "object",
         properties: {
           query: { type: "string", description: "要查的关键词或短语（可省略，只用 tag 时）" },
-          layer: { type: "string", enum: ["behavior", "deep", "array", "user", "memo", "all"], description: "限定层，默认 all" },
+          layer: { type: "string", enum: ["behavior", "deep", "array", "user", "memo", "all"], description: "限定层，默认 all；也可以用逗号写多层，如「behavior,deep」" },
+          layers: { type: "array", items: { type: "string" }, description: "多层的写法（数组）：如 [\"behavior\",\"deep\"]；和 layer 同时给时以 layers 为准" },
+          since: { type: "string", description: "只要这个时间之后的条目：YYYY-MM-DD（本机时区当天 00:00 起）或带时区的 ISO" },
+          until: { type: "string", description: "只要这个时间之前的条目：YYYY-MM-DD（含当天 23:59:59）或带时区的 ISO" },
+          status: { type: "string", enum: ["done", "failed", "heard"], description: "只看某个可信状态：done 做过 / failed 没做成 / heard 听说（未标状态的条目不命中）" },
+          kind: { type: "string", description: "只找某类条目：rule＝规则册（走 deep/rules.jsonl）、diary＝日记、turn／note／auto-summary 等按条目 kind 精确匹配" },
           limit: { type: "number", description: "最多返回条数，默认 20" },
           tag: { type: "string", description: "按标签过滤（子串匹配，如「第一次」）；可与 query 组合取交集" },
           includeVoided: { type: "boolean", description: "把「已标废」的条目也返回（默认不返回；行首标〔已标废〕）" },
@@ -6008,9 +6259,76 @@ function apply(ctx) {
       async execute(args) {
         try {
           if (String(args?.scope || "") === "context") return searchSocialContext(social, args || {});
-          return searchMemory(args?.query, args?.layer, args?.limit, args?.tag, args?.includeVoided === true, Number(args?.minScore) || 0, args?.includeEnded === true);
+          return searchMemory(args?.query, {
+            layer: args?.layer,
+            layers: args?.layers,
+            limit: args?.limit,
+            tag: args?.tag,
+            includeVoided: args?.includeVoided === true,
+            minScore: Number(args?.minScore) || 0,
+            includeEnded: args?.includeEnded === true,
+            since: args?.since,
+            until: args?.until,
+            status: args?.status,
+            kind: args?.kind,
+          });
         } catch (err) {
           return `检索失败：${err?.message || err}`;
+        }
+      },
+    });
+
+    register({
+
+      name: "memory_rules",
+      description:
+        "规则册（deep/workbook/10-规则册.md）的只读视图：action=list 列条目（默认只列生效）、action=get 按编号看一条全文（如 R-12）、action=search 按关键词查。规则册 md 是唯一源，这里读的是派生索引 deep/rules.jsonl（md 变了自动重建，只读不改 md）。",
+      parameters: {
+        type: "object",
+        properties: {
+          action: { type: "string", enum: ["list", "get", "search"], description: "默认 list" },
+          id: { type: "string", description: "action=get 用：编号，如 R-12 / N-01 / M-07 / P-08 / X-09" },
+          query: { type: "string", description: "action=search 用：关键词" },
+          level: { type: "string", description: "action=list 用：只列某区（M / N / R / P / X）" },
+          state: { type: "string", description: "action=list 用：只看某个状态（生效 / 暂停 / 失效）；默认只列生效" },
+          limit: { type: "number", description: "最多几条，默认 50" },
+        },
+      },
+      async execute(args) {
+        try {
+          const action = String(args?.action || "list");
+          const engine = rulesForSearch();
+          const rows = engine.all();
+          if (engine.errorOf()) return engine.errorOf();
+          if (!rows.length) return "规则册还没数据化：读不到 deep/workbook/10-规则册.md。";
+          if (action === "get") {
+            const row = engine.get(args?.id);
+            if (!row) return `规则册里没有「${args?.id}」。用 action=list 看有哪些编号。`;
+            const lines = [
+              `${row.id}${row.state === "生效" ? "" : `〔${row.state}〕`} ${row.title}`,
+              `分区：${row.section || "-"}　状态：${row.state}${row.decidedAt ? `　日期：${row.decidedAt}` : ""}`,
+              "规则：" + row.body,
+            ];
+            if (row.source) lines.push("出处：" + row.source);
+            if (row.why) lines.push("为什么：" + row.why);
+            lines.push(`行号：第 ${row.line} 行`);
+            return lines.join("\n");
+          }
+          if (action === "search") {
+            const q = String(args?.query || "").trim();
+            if (!q) return "action=search 需要 query。";
+            const res = engine.search(q);
+            if (!res.rows.length) return `规则册里没有匹配「${q}」的条目（共 ${rows.length} 条）。`;
+            const max = Math.max(1, Math.min(100, Number(args?.limit) || 20));
+            return res.rows.slice(0, max).map(formatRuleRow).join("\n");
+          }
+          const active = rows.filter((r) => r.state === "生效").length;
+          const res = engine.list({ level: args?.level, state: args?.state, limit: args?.limit });
+          if (!res.rows.length) return `没有符合条件的规则条目（共 ${rows.length} 条，生效 ${active} 条）。`;
+          const more = res.total > res.rows.length ? `\n…还有 ${res.total - res.rows.length} 条，用 level/state/limit 缩小` : "";
+          return `规则册（共 ${rows.length} 条，生效 ${active} 条）\n${res.rows.map(formatRuleRow).join("\n")}${more}`;
+        } catch (err) {
+          return `读规则册失败：${err?.message || err}`;
         }
       },
     });
@@ -6752,6 +7070,6 @@ const plugin = {
   apply,
 };
 
-export { apply, loadState, saveState, STATE_PATH, buildInjectionText, buildStateInjection, modelRouteOf, sessionMemory, createSessionMemory, sessionMemoryPaths, normalizeSessionId, isSpecialKey, doctorReport, renderDoctor, resolveBackupDir, probeWritable, coreInjection, coreOptions, createLines, lexicalScore, linesConfigDefaults, linesPaths, qualitativeOf, topicTokens, behaviorHint, createSocial, detectScene, normalizeName, personIdOf, registerSocialTools, sceneLabel, socialConfigDefaults, socialPaths, searchSocialContext, backupPolicySummary, compactionStats, compactionStatusLine, noteCompaction, noteAutoSummary, compressCallsIn, nativeCompactionsIn, compressToolCallsIn, compressionKindOf, readCompactionLog, appendCompactionRecord, ingestCompactionEvent, compactionRecords, compactionSelfCheck, dutyBoardData, sendHandoff, pullHandoff, listHandoffs, compactionSuiteDetected, listAutoSummaries, deleteAutoSummary, setFactCaller, factOptions, readFactCandidates, writeFactCandidates, pendingFactCandidates, factCandidateStats, factStatusLine, parseFactCandidates, buildFactPrompt, factInventory, isDuplicateFact, extractFactCandidates, acceptFactCandidate, rejectFactCandidate, updateBackupPolicy, updateAutoSummaryPolicy, autoSummaryConfigView, registerBackupApi, hostIsLoopback, readRequestBody, searchMemory, searchMemoryKeyword, searchTokensOf, ensureSearchIndex, bm25ScoreOf, searchTargets, writeMemory, voidMemory, exportArchive, readQqWatchSettings, writeQqWatchSettings, qqWatchView, briefOf, aliasesOf, mergeAliases, writeGuardOf, writeGuardCheck, similarityOf, backupNow, pruneOldSnapshots, shouldSkipBackup, backupStampOf, writeTurnDiary, isCompressionEvent, renameAssetImage, listAssetImages, assetDetail, arrayIndexFiles, arrayIndexFileForMonth, migrateArrayIndexIfNeeded, AUDIO_SOURCE, AUDIO_KIND, AUDIO_USE, audioClassTag, buildStats, tagsOf, validateTags, checkedTags, TAG_VOCAB, clearMemos, tagCard, isVocabTag, normalizeTag, CUSTOM_TAG_MAX, CUSTOM_TAG_LEN, RARE_TAG_MAX_COUNT, recallSession, decodeSessionFile, findSessionFile, archiveSessions, scanSessionOriginals, sessionHeaderOf, findArchivedSession, rawArchiveRows, rawSessionFileName, cwdOfSlug, sha256OfFile, roundsOfSessionFile, relationInjectionLines, archiveRelationOverflow, locateMemory, jsonlHasHash, rebuildGuide, guideStats, guideLinks, guideNodes, addSource, listSources, findSources, sourceStats, loadSources, sourceTag, entryProvenance, sourceIndex, runAutoSummary, pendingTurns, autoSummaryOptions, buildAutoSummaryEntry, buildSummaryPrompt, summaryStyleLine, parseSummaryText, summaryInputOf, callWithThinkingRetry, setAutoSummaryCaller, defaultConfig, loadConfig, AUTO_SUMMARY_PREFIX };
+export { apply, loadState, saveState, STATE_PATH, buildInjectionText, buildStateInjection, buildHandoffInjection, buildRecallInjection, formatNowLine, ageLabelOf, modelRouteOf, sessionMemory, createSessionMemory, sessionMemoryPaths, normalizeSessionId, isSpecialKey, doctorReport, renderDoctor, resolveBackupDir, probeWritable, coreInjection, coreOptions, createLines, lexicalScore, linesConfigDefaults, linesPaths, qualitativeOf, topicTokens, behaviorHint, createSocial, detectScene, normalizeName, personIdOf, registerSocialTools, sceneLabel, socialConfigDefaults, socialPaths, searchSocialContext, backupPolicySummary, compactionStats, compactionStatusLine, noteCompaction, noteAutoSummary, compressCallsIn, nativeCompactionsIn, compressToolCallsIn, compressionKindOf, readCompactionLog, appendCompactionRecord, ingestCompactionEvent, compactionRecords, compactionSelfCheck, dutyBoardData, sendHandoff, pullHandoff, listHandoffs, compactionSuiteDetected, listAutoSummaries, deleteAutoSummary, setFactCaller, factOptions, readFactCandidates, writeFactCandidates, pendingFactCandidates, factCandidateStats, factStatusLine, parseFactCandidates, buildFactPrompt, factInventory, isDuplicateFact, extractFactCandidates, acceptFactCandidate, rejectFactCandidate, updateBackupPolicy, updateAutoSummaryPolicy, autoSummaryConfigView, registerBackupApi, hostIsLoopback, readRequestBody, searchMemory, searchMemoryKeyword, searchTokensOf, ensureSearchIndex, bm25ScoreOf, searchTargets, writeMemory, voidMemory, exportArchive, readQqWatchSettings, writeQqWatchSettings, qqWatchView, briefOf, aliasesOf, mergeAliases, writeGuardOf, writeGuardCheck, similarityOf, backupNow, pruneOldSnapshots, shouldSkipBackup, backupStampOf, writeTurnDiary, isCompressionEvent, renameAssetImage, listAssetImages, assetDetail, arrayIndexFiles, arrayIndexFileForMonth, migrateArrayIndexIfNeeded, AUDIO_SOURCE, AUDIO_KIND, AUDIO_USE, audioClassTag, buildStats, tagsOf, validateTags, checkedTags, TAG_VOCAB, clearMemos, tagCard, isVocabTag, normalizeTag, CUSTOM_TAG_MAX, CUSTOM_TAG_LEN, RARE_TAG_MAX_COUNT, recallSession, decodeSessionFile, findSessionFile, archiveSessions, scanSessionOriginals, sessionHeaderOf, findArchivedSession, rawArchiveRows, rawSessionFileName, cwdOfSlug, sha256OfFile, roundsOfSessionFile, relationInjectionLines, archiveRelationOverflow, locateMemory, jsonlHasHash, rebuildGuide, guideStats, guideLinks, guideNodes, addSource, listSources, findSources, sourceStats, loadSources, sourceTag, entryProvenance, sourceIndex, runAutoSummary, pendingTurns, autoSummaryOptions, buildAutoSummaryEntry, buildSummaryPrompt, summaryStyleLine, parseSummaryText, summaryInputOf, callWithThinkingRetry, setAutoSummaryCaller, defaultConfig, loadConfig, AUTO_SUMMARY_PREFIX, createRules, parseRulesMarkdown, formatRuleRow, rulesForSearch, parseTimeBound };
 export default plugin;
 
