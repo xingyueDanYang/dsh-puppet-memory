@@ -6305,6 +6305,7 @@ function apply(ctx) {
           limit: { type: "number", description: "最多几条，默认 50" },
         },
       },
+      output,
       async execute(args) {
         try {
           const action = String(args?.action || "list");
