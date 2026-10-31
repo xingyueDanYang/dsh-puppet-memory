@@ -95,6 +95,37 @@ try {
   ok("kind=rule 只出规则行", kindHit.includes("R-01") && !kindHit.includes("普通记忆里的同名条目"));
   ok("kind=rule 输出带行号", kindHit.includes("行"));
 
+  // ---- v0.39.0：规则绑定插件（〔绑定：xxx〕）——只有对应工具启用才列出来 ----
+  const BOUND_BOOK = `# 绑定测试规则册
+
+## 硬性约定（生效中）
+
+| 编号 | 规则 | 出处 | 为什么 |
+|---|---|---|---|
+| R-20 | 看B站之前先查这个册子 〔绑定：bili〕 | 2026-10-31 | 只在用 B站时相关 |
+| R-21 | 通用规矩，没有绑定 | 2026-10-31 | 跟插件无关 |
+| R-22 | QQ 的规矩 〔绑定：qq, qqbot〕 | 2026-10-31 | 只在用 QQ 时相关 |
+`;
+  const boundRows = parseRulesMarkdown(BOUND_BOOK);
+  const boundById = Object.fromEntries(boundRows.map((r) => [r.id, r]));
+  ok("绑定标记不进正文", !boundById["R-20"].body.includes("绑定"), boundById["R-20"].body);
+  ok("绑定解析成数组", JSON.stringify(boundById["R-20"].bind) === '["bili"]', JSON.stringify(boundById["R-20"].bind));
+  ok("一行可以绑多个插件", JSON.stringify(boundById["R-22"].bind) === '["qq","qqbot"]', JSON.stringify(boundById["R-22"].bind));
+  ok("没绑定的行没有 bind 字段", boundById["R-21"].bind === undefined);
+
+  writeFile("deep/workbook/10-规则册.md", BOUND_BOOK);
+  const bEngine = createRules({ memDir: TMP });
+  ok("判断不了工具表时全都列（宁可多列）", bEngine.list({}).rows.length === 3, String(bEngine.list({}).rows.length));
+  const onlyBili = bEngine.list({ isActive: (b) => b === "bili" });
+  ok("启用 bili 时 B站规则可见", onlyBili.rows.some((r) => r.id === "R-20"));
+  ok("没启用的 qq 规则被隐藏", onlyBili.hidden === 1 && onlyBili.hiddenIds.includes("R-22"), JSON.stringify(onlyBili.hiddenIds));
+  const noneActive = bEngine.list({ isActive: () => false });
+  ok("全没启用只剩通用规则", noneActive.rows.length === 1 && noneActive.hidden === 2, `${noneActive.rows.length}/${noneActive.hidden}`);
+  ok("all=true 时全列", bEngine.list({ isActive: () => false, all: true }).rows.length === 3);
+  const boundSearch = bEngine.search("规矩", { isActive: () => false });
+  ok("search 也按绑定过滤", boundSearch.rows.every((r) => r.id !== "R-22") && boundSearch.hidden >= 1, JSON.stringify(boundSearch.hiddenIds));
+  ok("search all=true 不被过滤", bEngine.search("规矩", { isActive: () => false, all: true }).rows.some((r) => r.id === "R-22"));
+
   // ---- 规则册缺失：给明确提示，不崩 ----
   const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-puppet-rules-empty-"));
   const none = createRules({ memDir: emptyDir });

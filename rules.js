@@ -16,6 +16,48 @@ const RULE_ID = /^\|?\s*([MNPRX]-\d+)\s*\|/;
 const BULLET_ID = /^- \*\*([MNPRX]-\d+)\s+([^*]*)\*\*(.*)$/;
 const DATE = /(20\d\d-\d\d-\d\d)/;
 
+// v0.39.0（B-95）规则绑定插件：行内标记 `〔绑定：bili, qq〕`
+// 绑定的规则在对应工具没启用时**不列出来**（memory_rules list/search 默认过滤），
+// 这样「B站规则」只有装了/启用了 B站工具才会被看到，不必每次注入全部规则。
+// 绑定名的匹配口径：**工具名前缀**（大小写不敏感）。例：绑定 `bili` 命中 bili_subtitle / bili_frames / bili_search。
+const BIND_TOKEN = /〔绑定[：:]\s*([^〕]+)〕/g;
+
+/** 从一行里取出所有绑定名（并去掉标记本身），返回 {binds, text} */
+function stripBinds(line) {
+  const binds = [];
+  const text = String(line || "").replace(BIND_TOKEN, (_m, names) => {
+    for (const n of String(names).split(/[,，、;；\s]+/)) {
+      const v = n.trim().toLowerCase();
+      if (v) binds.push(v);
+    }
+    return "";
+  });
+  return { binds, text: text.replace(/\s{2,}/g, " ").trimEnd() };
+}
+
+/** 规则是否属于「当前可用」：没绑定的永远可用；绑定的看工具前缀是否在 enabled 里 */
+export function ruleBindVisible(row, isActive) {
+  const binds = Array.isArray(row?.bind) ? row.bind : [];
+  if (!binds.length) return true;
+  if (typeof isActive !== "function") return true; // 判断不了就别藏（宁可多列）
+  return binds.some((b) => {
+    try {
+      return Boolean(isActive(b));
+    } catch {
+      return true;
+    }
+  });
+}
+
+/** 按绑定过滤一批规则，返回 {visible, hidden}（hidden 只给数量/编号用） */
+export function splitByBind(rows, isActive) {
+  const visible = [];
+  const hidden = [];
+  for (const r of rows) (ruleBindVisible(r, isActive) ? visible : hidden).push(r);
+  return { visible, hidden };
+}
+
+
 const SECTION_NAMES = {
   元规则: "元规则",
   不可协商区: "不可协商区",
@@ -35,7 +77,9 @@ export function parseRulesMarkdown(text) {
   let lineNo = 0;
   for (const raw of String(text || "").split(/\r?\n/)) {
     lineNo += 1;
-    const line = raw.trimEnd();
+    const rawLine = raw.trimEnd();
+    // 〔绑定：xxx〕标记不进正文，只记进 row.bind
+    const { binds, text: line } = stripBinds(rawLine);
     const head = line.match(/^##\s+(.+)$/);
     if (head) {
       const name = head[1].trim();
@@ -58,6 +102,7 @@ export function parseRulesMarkdown(text) {
         why: "",
         state: "生效",
         decidedAt: (rest.match(DATE) || [])[1] || "",
+        ...(binds.length ? { bind: binds } : {}),
         line: lineNo,
       });
       continue;
@@ -117,6 +162,7 @@ export function parseRulesMarkdown(text) {
     rows.push({
       id, level, section: section || "", title, body, source, why, state, decidedAt,
       ...(replacement ? { replacement } : {}),
+      ...(binds.length ? { bind: binds } : {}),
       line: lineNo,
     });
   }
@@ -195,14 +241,22 @@ export function createRules({ memDir } = {}) {
     return ensure();
   }
 
-  function list({ level = "", state = "", limit = 50 } = {}) {
+  function list({ level = "", state = "", limit = 50, isActive = null, all = false } = {}) {
     ensure();
     const max = Math.max(1, Math.min(500, Number(limit) || 50));
     let rows = cache.rows;
     if (level) rows = rows.filter((r) => r.level === String(level).toUpperCase());
     const wantState = String(state || "").trim();
     rows = rows.filter((r) => (wantState ? r.state === wantState : r.state !== "失效"));
-    return { rows: rows.slice(0, max), total: rows.length, error: cache.error };
+    // v0.39.0：绑定了插件、但那个插件当前不可用的规则默认不列（all=true 才全列）
+    const split = all ? { visible: rows, hidden: [] } : splitByBind(rows, isActive);
+    return {
+      rows: split.visible.slice(0, max),
+      total: split.visible.length,
+      hidden: split.hidden.length,
+      hiddenIds: split.hidden.map((r) => r.id),
+      error: cache.error,
+    };
   }
 
   function get(id) {
@@ -211,10 +265,10 @@ export function createRules({ memDir } = {}) {
     return cache.rows.find((r) => r.id.toUpperCase() === want) || null;
   }
 
-  function search(query) {
+  function search(query, { isActive = null, all = false } = {}) {
     ensure();
     const q = String(query || "").trim().toLowerCase();
-    if (!q) return { rows: [], total: 0, error: cache.error };
+    if (!q) return { rows: [], total: 0, hidden: 0, error: cache.error };
     const tokens = q.split(/[\s,，、;；|/]+/).filter(Boolean);
     const hits = [];
     for (const r of cache.rows) {
@@ -225,7 +279,9 @@ export function createRules({ memDir } = {}) {
       hits.push({ row: r, score: n + (hay.includes(q) ? 2 : 0) });
     }
     hits.sort((a, b) => b.score - a.score);
-    return { rows: hits.map((h) => h.row), total: hits.length, error: cache.error };
+    const rows = hits.map((h) => h.row);
+    const split = all ? { visible: rows, hidden: [] } : splitByBind(rows, isActive);
+    return { rows: split.visible, total: split.visible.length, hidden: split.hidden.length, hiddenIds: split.hidden.map((r) => r.id), error: cache.error };
   }
 
   return { mdPath, index, ensure, all, list, get, search, errorOf: () => cache.error };
