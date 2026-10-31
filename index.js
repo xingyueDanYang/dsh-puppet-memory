@@ -2635,6 +2635,66 @@ function diaryFilesWithCandidates(tokens) {
 
 // v0.36 的老实现（关键词子串 + 命中词数打分）：**保留**为对照与回滚路径，
 // 新的 searchMemory 走 BM25（见下面）。`config.search.engine = "keyword"` 时可切回来。
+// 借 basic-memory 的「按段读」（2026-10-31 丹阳：「2 应该优先」）：
+// 手册 / 规则册这类 md 不在 JSONL 检索目标里，整篇读进来又太贵。这里按 `##` 小节匹配，
+// 只回「文件 › 小节 + 前 300 字」，命中多小节时每个文件最多回几条（perFile）。
+function mdSectionHits(tokens, { perFile = 3 } = {}) {
+  const out = [];
+  const dirs = [path.join(MEM_DIR, "deep", "workbook"), path.join(MEM_DIR, "deep")];
+  const files = [];
+  for (const d of dirs) {
+    try {
+      for (const f of fs.readdirSync(d)) {
+        if (!f.endsWith(".md")) continue;
+        const abs = path.join(d, f);
+        if (!files.includes(abs)) files.push(abs);
+      }
+    } catch {
+      /* 目录不在就跳过 */
+    }
+  }
+  for (const abs of files) {
+    let text = "";
+    try {
+      text = fs.readFileSync(abs, "utf8");
+    } catch {
+      continue;
+    }
+    const sections = [];
+    let head = "";
+    let buf = [];
+    for (const ln of text.split(/\r?\n/)) {
+      if (/^#{1,3}\s+/.test(ln)) {
+        if (buf.length) sections.push({ head, body: buf.join("\n") });
+        head = ln.replace(/^#{1,3}\s*/, "").trim();
+        buf = [];
+        continue;
+      }
+      buf.push(ln);
+    }
+    if (buf.length) sections.push({ head, body: buf.join("\n") });
+    let taken = 0;
+    for (const sec of sections) {
+      if (taken >= perFile) break;
+      const hay = `${sec.head} ${sec.body}`.toLowerCase();
+      const matched = tokens.filter((t) => hay.includes(t)).length;
+      // 和 JSONL 同一口径：多词要求全部命中，单词命中即可
+      if (!matched || matched < tokens.length) continue;
+      const body = sec.body.replace(/[|]{2,}/g, " ").replace(/\s+/g, " ").trim();
+      out.push({
+        text: `${rel(abs)}${sec.head ? ` › ${sec.head}` : ""}  ${clip(body, 300)}`,
+        score: matched * 2 + 1.5,
+        strict: true,
+        ts: 0,
+        brief: "",
+        hash: "",
+      });
+      taken += 1;
+    }
+  }
+  return out;
+}
+
 function searchMemoryKeyword(query, layer, limit, tag, includeVoided = false) {
   const q = String(query || "").trim();
   const tagQuery = String(tag || "").trim();
@@ -2729,6 +2789,10 @@ function searchMemoryKeyword(query, layer, limit, tag, includeVoided = false) {
       const voidMark = entry?.voided ? `〔已标废：${clip(String(entry.voided.reason || ""), 40)}〕` : "";
       hits.push({ text: `${where}:${index + 1}  ${voidMark}${statePrefixOf(entry)}${clip(line, 300)}${hs}${suffix}${provenance ? `  ${provenance}` : ""}`, score, strict: textHit, ts: Number.isFinite(tsMs) ? tsMs : 0, brief, hash: entry?.hash ? String(entry.hash) : "" });
     });
+  }
+  if (!tagNeedle && tokens.length) {
+    const mdOk = !layer || layer === "all" || layer === "deep" || layer === "behavior";
+    if (mdOk) for (const h of mdSectionHits(tokens)) hits.push(h);
   }
   if (!hits.length) {
     if (q) return `没有找到包含「${q}」${tagNeedle ? `且带标签「${tagQuery}」` : ""}的记忆。`;
