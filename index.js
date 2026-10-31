@@ -305,6 +305,34 @@ function transcriptFor(src, item) {
   return "";
 }
 
+// 借 OpenViking 的 URI 守卫（2026-10-31 丹阳批了「3 没多少影响可以先做」）：
+// 工具参数里的路径只许指向数据区，系统目录与磁盘根一律拒绝——防止把 C:\Windows 当备份目录、
+// 或把系统文件拷进资产库这类误操作。路径不存在不在这里管（调用处各有自己的报错）。
+const DENY_PATH_PREFIXES = [
+  "C:\\Windows",
+  "C:\\Program Files",
+  "C:\\Program Files (x86)",
+  "C:\\ProgramData",
+  "C:\\Recovery",
+  "C:\\$Recycle.Bin",
+  "C:\\System Volume Information",
+  "C:\\Users\\All Users",
+  "C:\\Users\\Default",
+];
+function guardToolPath(input, { label = "路径" } = {}) {
+  const raw = String(input == null ? "" : input).trim();
+  if (!raw) throw new Error(`${label}为空`);
+  const abs = path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(process.cwd(), raw);
+  const low = abs.toLowerCase();
+  const root = path.parse(abs).root;
+  if (abs === root || /^[a-z]:\\?$/i.test(abs)) throw new Error(`${label}指向磁盘根目录，拒绝：${abs}`);
+  for (const deny of DENY_PATH_PREFIXES) {
+    const d = deny.toLowerCase();
+    if (low === d || low.startsWith(`${d}\\`)) throw new Error(`${label}指向系统目录，拒绝：${abs}`);
+  }
+  return abs;
+}
+
 function storeAssets(list) {
   const input = Array.isArray(list) ? list : list ? [list] : [];
   if (!input.length) return [];
@@ -313,11 +341,18 @@ function storeAssets(list) {
   const refs = [];
   for (const item of input) {
     const isObj = item && typeof item === "object";
-    const src = String(isObj ? item.path || item.src || "" : item || "").trim();
+    const srcRaw = String(isObj ? item.path || item.src || "" : item || "").trim();
     const wantedName = isObj ? item.name : "";
-    if (!src) continue;
-    let ext = path.extname(src).toLowerCase();
+    if (!srcRaw) continue;
+    let ext = path.extname(srcRaw).toLowerCase();
     let type = assetTypeOfExt(ext);
+    let src;
+    try {
+      src = guardToolPath(srcRaw, { label: "媒体文件" });
+    } catch (err) {
+      refs.push({ error: err?.message || String(err), type });
+      continue;
+    }
     try {
       if (!fs.existsSync(src)) {
         refs.push({ error: `找不到文件：${src}`, type });
@@ -1787,7 +1822,12 @@ function cloudBackupNow(options = {}) {
   if (!password) {
     return "云备份需要密码（密码不落盘，插在哪都行就是不能写进配置）：先把环境变量 DSH_MEMORY_BACKUP_PASS 设好，或调用时传 password 参数。";
   }
-  const dir = String(options.dir || "").trim() || cloudBackupDir(cloud);
+  let dir;
+  try {
+    dir = guardToolPath(String(options.dir || "").trim() || cloudBackupDir(cloud), { label: "云备份目录" });
+  } catch (err) {
+    return `云备份失败：${err?.message || err}`;
+  }
   const includeSessions = options.sessions !== undefined ? Boolean(options.sessions) : cloud.includeSessions === true;
   const includeAssets = options.assets !== undefined ? Boolean(options.assets) : cloud.includeAssets !== false;
   const res = createCloudBackup({ memDir: MEM_DIR, dshDir: DSH_DIR, outDir: dir, password, includeSessions, includeAssets });
@@ -4662,7 +4702,12 @@ function exportArchive(args = {}) {
   const stamp = ts.replace("T", "_").replace(/[:]/g, "").slice(0, 15);
   // v0.36：导出档案挪出记忆目录（`~/.dsh/memory-exports/`）。它跟记忆本体不是一类东西：
   // 一份导出就 300–600 KB，放 memory 里会让记忆目录越滚越大，还容易被当成记忆一起备份/统计。
-  const outDir = path.resolve(String(args.outDir || path.join(DSH_DIR, "memory-exports", `export-${stamp}`)));
+  let outDir;
+  try {
+    outDir = guardToolPath(String(args.outDir || path.join(DSH_DIR, "memory-exports", `export-${stamp}`)), { label: "导出目录" });
+  } catch (err) {
+    return `导出失败：${err?.message || err}`;
+  }
   const diaryLimit = Math.max(0, Math.min(5000, Number(args.diaryLimit ?? 300)));
   const includeWorkbook = args.includeWorkbook !== false;
 
