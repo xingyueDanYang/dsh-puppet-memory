@@ -673,7 +673,7 @@ function defaultConfig() {
     search: { engine: "scan" },
     // v0.39（B-94）：取词器 + 提词器。默认关——它每回合要调一次小模型判「这算不算回忆」。
     // 取词器只管取（重要库优先），提词器只管判 + 给一句自然语言提示，不贴资料块。
-    cueprompt: { enabled: false, maxCandidates: 7, maxHintChars: 140, model: null, mode: "assist" },
+    cueprompt: { enabled: false, maxCandidates: 7, maxHintChars: 140, model: null, mode: "assist", minSharedTerms: 1 },
     // 多人记忆（v0.21 骨架）：默认关闭注入。关着时工具仍可显式读写 social/，但一个字都不注入。
     // 只有 enabled=true 且能从 session header 认出场景（群/私聊 + 对象）时，才按场景注入档案。
     social: socialConfigDefaults(),
@@ -1863,6 +1863,8 @@ function cuepromptView() {
     enabled: c.enabled === true,
     mode: String(c.mode || "assist"),
     maxCandidates: Number(c.maxCandidates) || 7,
+    // 触发门槛：至少几个不同的词同时命中（默认 1；2 = 两个词都对上才抛回忆）
+    minSharedTerms: Number(c.minSharedTerms) || 1,
     model: c.model || null,
   };
 }
@@ -1884,7 +1886,13 @@ function updateCuePrompt(body = {}) {
     cur.mode = m;
     changed = true;
   }
-  if (!changed) return { ok: false, error: "没有要改的字段（enabled / mode）" };
+  if (patch.minSharedTerms !== undefined) {
+    const n = Number(patch.minSharedTerms);
+    if (!Number.isInteger(n) || n < 1 || n > 6) return { ok: false, error: "minSharedTerms 只能是 1–6 的整数" };
+    cur.minSharedTerms = n;
+    changed = true;
+  }
+  if (!changed) return { ok: false, error: "没有要改的字段（enabled / mode / minSharedTerms）" };
   cfg.cueprompt = { ...defaultConfig().cueprompt, ...cur };
   saveConfig(cfg);
   diag(`面板：取词器 ${cfg.cueprompt.enabled ? "开" : "关"}（模式 ${cfg.cueprompt.mode}）`);
@@ -6599,6 +6607,8 @@ function apply(ctx) {
                 userText,
                 searchFn: (q, n) => cueHitsOf(q, n),
                 limit: Number(cfg.cueprompt.maxCandidates) || 7,
+                // 触发门槛：至少几个不同的词同时命中（1=原行为，2=「两个词都对上」才算）
+                minSharedTerms: Number(cfg.cueprompt.minSharedTerms) || 1,
               });
               diag(`取词：候选 ${picked.candidates.length}（重要 ${picked.fromImportant} / 事件 ${picked.fromEvent || 0} / 常规 ${picked.fromNormal} / 记错跳过 ${picked.blocked}）`);
               // 路由要从会话 header 取：不传 session 时宿主里拿不到默认模型，caller 会是 null（实测踩到）
