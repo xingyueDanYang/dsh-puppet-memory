@@ -173,6 +173,40 @@ const IMAGE_EXT = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif", ".
 const AUDIO_EXT = new Set([".mp3", ".wav", ".m4a", ".aac", ".ogg", ".opus", ".flac", ".webm", ".amr"]);
 const ASSET_INDEX = path.join(MEM_DIR, "assets", "index.json");
 
+// 附件路径常常没有扩展名（~/.dsh/attachments/v1/objects/…/<sha256>），按扩展名会直接判「不存」，
+// 于是图片/音频被静默丢掉（2026-10-31 实测踩到：几张官方立绘写完记忆后资产库里没有）。
+// 这里按文件头嗅探，只认几个明确魔数，认不出就报错而不是悄悄跳过。
+function sniffAssetExt(src) {
+  let head;
+  try {
+    const fd = fs.openSync(src, "r");
+    const buf = Buffer.alloc(16);
+    fs.readSync(fd, buf, 0, 16, 0);
+    fs.closeSync(fd);
+    head = buf;
+  } catch {
+    return null;
+  }
+  const ascii = (a, b) => head.subarray(a, b).toString("latin1");
+  if (head[0] === 0x89 && head[1] === 0x50 && head[2] === 0x4e) return { type: "image", ext: ".png" };
+  if (head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff) return { type: "image", ext: ".jpg" };
+  if (ascii(0, 4) === "RIFF" && ascii(8, 12) === "WEBP") return { type: "image", ext: ".webp" };
+  if (ascii(0, 3) === "GIF") return { type: "image", ext: ".gif" };
+  if (ascii(4, 8) === "ftyp") {
+    const brand = ascii(8, 12).toLowerCase();
+    if (brand.includes("avif") || brand.includes("avis") || brand.includes("heic") || brand.includes("mif1")) return { type: "image", ext: ".avif" };
+    return { type: "audio", ext: ".m4a" };
+  }
+  if (ascii(0, 2) === "BM") return { type: "image", ext: ".bmp" };
+  if (ascii(0, 4) === "OggS") return { type: "audio", ext: ".ogg" };
+  if (ascii(0, 3) === "ID3") return { type: "audio", ext: ".mp3" };
+  if (head[0] === 0xff && (head[1] === 0xfb || head[1] === 0xf3 || head[1] === 0xf2)) return { type: "audio", ext: ".mp3" };
+  if (ascii(0, 4) === "fLaC") return { type: "audio", ext: ".flac" };
+  if (ascii(0, 4) === "RIFF" && ascii(8, 12) === "WAVE") return { type: "audio", ext: ".wav" };
+  if (head[0] === 0x1a && head[1] === 0x45 && head[2] === 0xdf && head[3] === 0xa3) return { type: "audio", ext: ".webm" };
+  return null;
+}
+
 // 按扩展名判断资产类型；不认识的扩展名返回空串（不存）
 function assetTypeOfExt(ext) {
   const e = String(ext || "").toLowerCase();
@@ -282,14 +316,23 @@ function storeAssets(list) {
     const src = String(isObj ? item.path || item.src || "" : item || "").trim();
     const wantedName = isObj ? item.name : "";
     if (!src) continue;
-    const ext = path.extname(src).toLowerCase();
-    const type = assetTypeOfExt(ext);
+    let ext = path.extname(src).toLowerCase();
+    let type = assetTypeOfExt(ext);
     try {
       if (!fs.existsSync(src)) {
         refs.push({ error: `找不到文件：${src}`, type });
         continue;
       }
-      if (!type) continue;
+      if (!type) {
+        // 无扩展名（附件路径常见）→ 按文件头嗅探；认不出就报错，别静默丢
+        const sniff = sniffAssetExt(src);
+        if (!sniff) {
+          refs.push({ error: `认不出格式（扩展名为空）：${src}`, type: "" });
+          continue;
+        }
+        type = sniff.type;
+        ext = sniff.ext;
+      }
       const buf = fs.readFileSync(src);
       const digest = createHash("sha256").update(buf).digest("hex");
       const known = idx.bySha[digest];
