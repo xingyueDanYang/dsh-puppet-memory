@@ -1,6 +1,6 @@
 # 木偶记忆（Puppet Memory）
 
-> ⚠️ **main 分支是开发中的版本，可能比 Release 新**。当前最新发布为 `0.39.0`（2026-10-31，兼容 DSH 0.2.1-rc.5）：取词器/提词器、到期提醒、SQLite 派生索引、**云盘加密备份**、**规则册绑定插件**、工具使用规则。上一个稳定版是 0.37.1（热修：`memory_rules` 在 0.37.0 里因漏 `output` 声明没注册上）。历史稳定版见 Release 列表。开发过程记录在 `过程/` 目录。
+> ⚠️ **main 分支是开发中的版本，可能比 Release 新**。当前最新发布为 `0.40.0`（2026-11-02，兼容 DSH 0.2.1-rc.5）：**记忆授权索引（memory_grants）**、**开幕表（一次性提醒 / 农历生日）**、**检索字面兜底**、**guide 去重与指针解析**，以及 0.39.0 的取词器/提词器、到期提醒、云盘加密备份、规则册绑定插件。上一个稳定版是 0.37.1（热修：`memory_rules` 在 0.37.0 里因漏 `output` 声明没注册上）。历史稳定版见 Release 列表。开发过程记录在 `过程/` 目录。
 
 > 原名 `dsh-memory`，2026-10-20 更名。DSH（DeepSeek Harness）的跨会话记忆插件：记忆按用途分五层打底（常驻 / 按需·行为 / 按需·知识 / 账本 / 临时），外加三线状态、多人多群、会话级记忆管理。
 
@@ -395,6 +395,8 @@ API 对应三个动作：`GET ?action=fact-candidates&limit=`（列表 + `pendin
 | `memory_search` | 按层检索（behavior/deep/array/user/memo/all，`layer` 可逗号写多层或有 `layers` 数组）；多词用空格/顿号分隔、默认取交集；`tag` 按标签；`since`/`until` 时间窗；`status` 三态；`kind`（`rule` 直接查规则册） |
 | `memory_rules` | 规则册只读视图：`action=list`（默认只列生效，可按 `level`/`state`）、`action=get id=R-12`、`action=search query=…`；读派生索引 `deep/rules.jsonl`，md 改了自动重建。**v0.39.0 规则能绑定插件**：规则行末写 `〔绑定：bili〕`（多个用逗号，按工具名前缀匹配，如 `bili` 命中 `bili_subtitle`），对应工具没启用时这条不进 list/search，`all=true` 强制全看 |
 | `memory_cue` | 取词器/提词器（B-94）：`action=list` 看重要库、`events` 看回忆事件（按话题归并，带一句总结和「我的一步 / 双方」溯源）、`misrecall` 看记错表、`forget` 删一条记错、`promote`/`demote` 手动升降、`stats` 汇总 |
+| `memory_grants` | 记忆授权索引（B-97，只读 observe 档）：按四条确定性判据算「这条记忆允许做什么」——`read` 永远允许、`inject` 看是否标废、`cite` 要有出处（`source`）、`share` 还要求原文照抄且不是听说；`action=list` / `check`（按 hash、keyword 看四项判定与理由）/ `stats`（分布：能引用多少、没出处多少）/ `shadow`（影子记录，复盘误伤率）。只读：不改任何记忆条目，只维护派生文件 `deep/grants.jsonl` |
+| `memory_opening` | 开幕表读写（B-99）：一张「特殊日子 / 一次性提醒」表，**每天第一次打开时读一次**。`add` 支持 `inDays`（30=一个月后）或 `date` 写一次性提醒（当天提示、提示完自动销账；那天没开就补一句「错过了 N 天」）；`repeat=yearly` 每年同日；`lunar` 农历（如 09-16，按换算表每年自动补下一年的行）。`list` 看全部、`remove` 按 hash/label 删 |
 | `memory_locate` | 用 `hash`（可只给前 8 位）或 `keyword` 精确定位原文：返回 文件:行号 + 完整 JSONL 行，用于「摘要只剩一句话、想找回原话」 |
 | `memory_stats` | 记忆规模、图片/音频资产（张数/段数/体积）、标签汇总、开关状态、最近备份 |
 | `memory_image` | 管理记忆资产：`action=list` 列出图片与音频（音频带分类〔来源·内容·用途〕与时长，可按三组筛选，带已登记出处）、`action=meta` 看单条详情、`action=rename` 改名并同步更新所有引用和出处表 |
@@ -922,6 +924,12 @@ Copy-Item '<profile 备份目录>\*' '<你的用户名>\.dsh\profiles\<profile>\
 插件自身异常只影响它自己（工具不注册 / 注入为空），宿主启动时会记录错误但继续跑；排查看 `~/.dsh/memory/diag.log`。
 
 ## 版本历史
+- **0.40.0（2026-11-02）**：四件新东西，都默认不打扰。
+  ①**记忆授权索引（`memory_grants`，只读 observe 档）**：四条确定性判据——`read` 永远允许、`inject` 看是否标废、`cite` 必须有出处（`source`）、`share` 还要求原文照抄且不是听说。先把「每条记忆允许我做什么」算出来记进 `deep/grants.jsonl`，**只算不拦**；`shadow` 把「本该拒绝」的动作记进 `deep/grants-shadow.jsonl`，用来在真去拦之前复盘误伤率。真库首跑：2880 条里 `cite` 放行 4%、`share` 0.4%、没出处 96%。
+  ②**开幕表（`memory_opening`）**：特殊日子与一次性提醒单独一条通道，**每天第一次打开 DSH 读一次**（同一天不重复，跨天恢复）。农历生日按 `deep/opening-lunar-map.json` 换算、**一次只补下一年**（走过那一年再补）；一次性提醒提前 7 天预告、当天提示、提示过销账，错过最多留 30 天补一句。行带 `hash`+`source`，所以事后也搜得到出处。
+  ③**检索字面兜底（`config.search.charFallback`，默认关）**：BM25 一个二元组都不重合时（问「住几楼」、原文写「住四楼」），按**单字 IDF 覆盖率**再挑最多 4 条**追加在结果末尾**（插队会顶掉真命中，实测修 4 坏 4）。公开示例 108 题：检索命中 93→103，端到端通过 84→89（82.4%）。
+  ④**guide 去重与指针解析**：`deep/guide.jsonl` 是「线索→条目」的派生索引，过去同一条会重复返回（实测一条重复 9 次），现在按 `entry.hash` 去重、优先留真条目；命中的指针行会按 `file`+`hash` 把真条目读出来再渲染，读不到就原样返回。真库清理掉 179 条失效指针。
+  测试 59 套全绿（新增 `grants` 30 / `opening-table` 26 / `guide-dedupe` 7 / `search-charbk` 7），工具数 28→29。
 - **0.39.0（2026-10-31）**：**取词器 + 提词器（B-94，两步两分）**，默认关（`config.cueprompt.enabled`），开着时每回合可能多一次小模型调用。取词器只管取：从你这句话取二字词，按 **事件总结 → 重要库 → 常规检索 → 常规为空回扫重要** 出候选（每回合最多 7 条；事件最多占 2 条、要两个词重合——防「回忆过的更容易再被回忆」）；提词器只管判：小模型判断这批候选里哪条和你这句话是同一件事，置信度 <0.5 不出提示、0.5–0.7 带「我不太确定」。判定分三种：确认 +1（两次确认升重要，放 `deep/important.jsonl`，常规检索不再检索它）；反对只记 `objections`，并且**当场翻原文和门牌核对**；否认记失败并进记错表（30 天），回原文确认后自动撤销。每次回忆落一条事件（按月分片 + 月索引），事件带一句**总结**和溯源（`summaryBy`: `ai`=我的一步 / `both`=双方确认）。新增工具 `memory_cue`。
   ②**云盘加密备份**：`memory_backup` 加 `mode=cloud`，把记忆库打成一个加密包（`PMB2` = tar → deflate → AES-256-GCM / PBKDF2 20 万轮）写进百度网盘同步目录，客户端开着就自动上传；包旁生成 `.sha256`、`.manifest.json`、`backup-ledger.jsonl` 和 **`恢复说明.txt`**（纯文本、不含密码，内嵌 17 行独立解密脚本——只剩 txt 和包也能自己解开）。密码不落盘（只读参数或 `DSH_MEMORY_BACKUP_PASS`）；默认只留最近 3 个包；命令行 `tools/cloud-backup.mjs` / 恢复 `tools/cloud-restore.mjs`（先校 sha256、只解到独立目录）；Windows 双击版 `tools/cloud-backup.cmd`。
   ③**规则册绑定插件**：规则行末写 `〔绑定：bili〕`（多个用逗号，按工具名前缀匹配），对应工具没启用时这条不进 `memory_rules` 的 list/search，`all=true` 强制全看；拿不到工具表时按「全可见」处理，不静默吞规则。已用：P-09 → `bili`、R-01 → `qq`。

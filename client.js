@@ -375,6 +375,7 @@ window.__ModuleLoader__.load({
       const [data, setData] = useState(null)
       const [form, setForm] = useState(null)
       const [facts, setFacts] = useState(null)
+      const [cue, setCue] = useState(null) // 取词器/提词器开关与模式
       const [busy, setBusy] = useState(false)
       const [notice, setNotice] = useState('')
       const [error, setError] = useState('')
@@ -383,12 +384,14 @@ window.__ModuleLoader__.load({
         setBusy(true)
         setError('')
         try {
-          const [res, factRes] = await Promise.all([callApi('status'), callApi('fact-candidates')])
+          const [res, factRes, cueRes] = await Promise.all([callApi('status'), callApi('fact-candidates'), callApi('cueprompt')])
           if (!res || res.ok !== true) throw new Error((res && res.error) || '读取备份策略失败')
           setData(res)
           setForm(formFromConfig(res.config))
           if (factRes && factRes.ok === true) setFacts(factRes)
           else setFacts({ ok: false, items: [], pending: 0, error: (factRes && factRes.error) || '接口不可用' })
+          if (cueRes && cueRes.ok === true) setCue(cueRes)
+          else setCue({ ok: false, enabled: false, mode: 'assist', error: (cueRes && cueRes.error) || '接口不可用' })
         } catch (err) {
           setError(err && err.message ? err.message : String(err))
         } finally {
@@ -453,6 +456,23 @@ window.__ModuleLoader__.load({
         }
       }
 
+      const saveCue = async (patch) => {
+        setBusy(true)
+        setError('')
+        setNotice('')
+        try {
+          const cur = cue && cue.ok ? { enabled: cue.enabled, mode: cue.mode } : { enabled: false, mode: 'assist' }
+          const res = await callApi('save-cueprompt', { ...cur, ...patch })
+          if (!res || res.ok !== true) throw new Error((res && res.error) || '保存失败')
+          setCue(res)
+          setNotice(res.message || '已保存')
+        } catch (err) {
+          setError(err && err.message ? err.message : String(err))
+        } finally {
+          setBusy(false)
+        }
+      }
+
       const runtime = (data && data.runtime) || {}
       const config = (data && data.config) || {}
 
@@ -463,6 +483,40 @@ window.__ModuleLoader__.load({
         h('button', { className: 'pmb-btn', disabled: busy, onClick: backupNow }, '立即备份一次'),
         h('button', { className: 'pmb-btn', disabled: busy, onClick: load }, '刷新'),
       )
+
+      const cueCard = cue
+        ? h(
+            'div',
+            { className: 'pmb-card' },
+            h('div', { className: 'pmb-title' }, '取词器 / 提词器'),
+            cue.ok === false ? h('div', { className: 'pmb-err' }, cue.error || '接口不可用') : null,
+            h(Row, { label: '总开关' },
+              h(Check, {
+                checked: cue.enabled === true,
+                disabled: busy,
+                text: cue.enabled === true ? '开（每回合取词 + 小模型判读）' : '关（完全不启动：不取词、不判读、不调模型）',
+                onChange: (v) => saveCue({ enabled: v }),
+              }),
+            ),
+            h(Row, { label: '运行模式' },
+              h('select', {
+                className: 'pmb-input',
+                // 截图里「assist（照常注…」被截断：下拉框要给够宽度，四个模式说明才看得全
+                style: { minWidth: '22rem', maxWidth: '100%' },
+                value: cue.mode || 'assist',
+                disabled: busy || cue.enabled !== true,
+                onChange: (ev) => saveCue({ mode: ev.target.value }),
+              },
+                h('option', { value: 'assist' }, 'assist（照常注入提示，默认）'),
+                h('option', { value: 'shadow' }, 'shadow（只审计不注入：观察用）'),
+                h('option', { value: 'enforce' }, 'enforce（只注入高置信 ≥0.7）'),
+              ),
+            ),
+            h('div', { className: 'pmb-note' },
+              '关掉之后下一轮就生效（配置每轮热读，不用重启）：取词、判读、写事件全停，一分钱模型调用都不花。'
+              + 'shadow 是「照跑但不往上下文里塞」，适合先看它一天会抛几次。'),
+          )
+        : null
 
       const statusCard = h(
         'div',
@@ -582,6 +636,7 @@ window.__ModuleLoader__.load({
         notice ? h('div', { className: 'pmb-ok' }, notice) : null,
         actions,
         statusCard,
+        cueCard,
         policyCard,
         compactionCard,
         factCard,

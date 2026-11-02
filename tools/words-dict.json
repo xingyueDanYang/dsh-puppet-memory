@@ -1,0 +1,1 @@
+{"meta":{"generatedAt":"2026-10-29T12:02:22.834Z","source":"本机记忆语料挖掘 + tools/words-extra.txt 人工补充","mined":0,"extra":0,"words":0,"note":"纯中文词表，供 words.js 做逆向最大匹配分词；不含标点/数字/英文。"},"words":[]}
