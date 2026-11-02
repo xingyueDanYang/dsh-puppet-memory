@@ -109,6 +109,27 @@ try {
   ok("remove 删除成功", rm.ok === true && rm.removed === 1, JSON.stringify(rm));
   ok("删完表里没有了", readTable().length === 0, JSON.stringify(readTable()));
 
+
+  // 14) 农历小月（腊月只有廿九）：按「提前」处理，并在注入里说明
+  fs.writeFileSync(
+    MAP,
+    JSON.stringify({ "12-30": { "2027": { date: "2028-01-25", kind: "shift_before", lunarDay: 29, note: "该年腊月只有 29 天，按提前算" } } }),
+    "utf8",
+  );
+  writeTable([{ lunar: "12-30", label: "腊月三十生日", kind: "birthday", source: "测试" }]);
+  const tShift = String(mod.buildOpeningInjection(cfg, { nowMs: at("2028-01-20") }));
+  ok("小月按提前处理并出提醒", tShift.includes("还有 5 天") && tShift.includes("2028-01-25"), tShift.slice(0, 200));
+  const shiftRow = readTable().find((r) => r.date === "2028-01-25");
+  ok("补出的行带「提前」说明", Boolean(shiftRow) && String(shiftRow.note).includes("提前"), JSON.stringify(shiftRow).slice(0, 160));
+
+  // 15) 每年同日的 2/29：非闰年提前到 2/28
+  writeTable([{ date: "2024-02-29", label: "闰日纪念", repeat: "yearly" }]);
+  const tLeap = String(mod.buildOpeningInjection(cfg, { nowMs: at("2027-02-25") }));
+  ok("非闰年 2/29 提前到 2/28", tLeap.includes("2027-02-28"), tLeap.slice(0, 200));
+  ok("并说明原因", tLeap.includes("没有 2 月 29"), tLeap.slice(0, 200));
+  const tLeap2 = String(mod.buildOpeningInjection(cfg, { nowMs: at("2028-02-25") }));
+  ok("闰年仍按 2/29", tLeap2.includes("2028-02-29"), tLeap2.slice(0, 200));
+
   // 13) 文件缺失不崩
   fs.unlinkSync(TABLE);
   const t10 = String(mod.buildOpeningInjection(cfg, { nowMs: at("2027-10-15") }));

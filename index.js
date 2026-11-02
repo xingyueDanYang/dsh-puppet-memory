@@ -1542,9 +1542,21 @@ function ensureOpeningLunarRows({ persist = true, nowMs = Date.now() } = {}) {
     const m = map[key(src.lunar)] || {};
     // 一次只算一年：今年还没过就用今年，过了就补明年。走过那一年，下次检查才补下一年。
     // 闰月规则（丹阳 2026-11-02 定）：「闰九月应该是算一次」——按常规月算，闰月不另开一天。
-    const candidates = [m[String(year)], m[String(year + 1)]].filter((x) => typeof x === "string" && x && x >= today);
+    // v0.40.1（A-118）：换算表的值可以是字符串（旧格式）或 {date,kind,lunarDay,note}
+    // kind=shift_before 表示「该年没有这个农历日，按提前算」（丹阳 2026-11-02 定：提前还能补过，延后就没机会）
+    const norm = (v) => {
+      if (typeof v === "string" && v) return { date: v, kind: "exact", note: "" };
+      if (v && typeof v === "object" && typeof v.date === "string" && v.date) return { date: v.date, kind: String(v.kind || "exact"), note: String(v.note || "") };
+      return null;
+    };
+    // 换算表按「农历年」索引：腊月三十会落到**下一年**的阳历（如农历 2027-12-29 → 2028-01-25），
+    // 所以三个农历年都要看，取第一个还没过的（哪个在前用哪个）
+    const candidates = [norm(m[String(year - 1)]), norm(m[String(year)]), norm(m[String(year + 1)])]
+      .filter((x) => x && x.date >= today)
+      .sort((a, b) => String(a.date).localeCompare(String(b.date)));
     if (!candidates.length) continue;
-    const solar = candidates[0];
+    const solar = candidates[0].date;
+    const shiftNote = candidates[0].kind !== "exact" ? `（${candidates[0].note || "该年没有这个农历日，按提前算"}）` : "";
     if (rows.some((r) => r && String(r.date || "") === solar && String(r.label || "") === String(src.label || ""))) continue;
     const hash = sha1(`opening|${solar}|${src.label}`).slice(0, 16);
     added.push({
@@ -1552,7 +1564,7 @@ function ensureOpeningLunarRows({ persist = true, nowMs = Date.now() } = {}) {
       date: solar,
       label: src.label,
       kind: src.kind || "event",
-      note: src.note || "",
+      note: `${src.note || ""}${shiftNote}`,
       source: src.source || "",
       from: "lunar",
       lunar: key(src.lunar),
@@ -1595,21 +1607,29 @@ function buildOpeningInjection(cfg, { nowMs = Date.now(), persist = true } = {})
   const dayMs = 86400000;
   const todayMs = new Date(`${today}T00:00:00`).getTime();
   // 每年同日的行，把日期换到今年；一次性行用原日期
+  // 返回 {day, note}：day 是该年实际用的日期，note 是给用户看的说明（提前/换算）
   const dayOf = (r) => {
     const raw = String(r.date || "");
-    if (r.repeat === "yearly" && /^\d{4}-\d{2}-\d{2}$/.test(raw)) return `${year}${raw.slice(4)}`;
-    return raw;
+    if (r.repeat !== "yearly" || !/^\d{4}-\d{2}-\d{2}$/.test(raw)) return { day: raw, note: "" };
+    // v0.40.1（A-118）：2 月 29 日不是每年都有；非闰年按「提前到 2-28」处理（丹阳 2026-11-02 定的规则）
+    if (raw.slice(5) === "02-29") {
+      const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+      if (leap) return { day: `${year}-02-29`, note: "" };
+      return { day: `${year}-02-28`, note: "（今年没有 2 月 29，按提前到 2-28）" };
+    }
+    return { day: `${year}${raw.slice(4)}`, note: "" };
   };
   const hits = [];
   for (const r of rows) {
-    const day = dayOf(r);
+    const { day, note: dayNote } = dayOf(r);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) continue;
     const t = new Date(`${day}T00:00:00`).getTime();
     if (!Number.isFinite(t)) continue;
     const diff = Math.round((t - todayMs) / dayMs);
     const oneShot = r.repeat !== "yearly" && !r.lunar && !r.date ? false : r.repeat !== "yearly" && !r.lunar;
-    if (diff === 0) hits.push(`今天：${r.label}${r.note ? `（${clip(String(r.note), 60)}）` : ""}`);
-    else if (diff > 0 && diff <= Number(opt.lookaheadDays)) hits.push(`还有 ${diff} 天：${day} ${r.label}`);
+    const tail = `${dayNote}${r.note ? `（${clip(String(r.note), 60)}）` : ""}`;
+    if (diff === 0) hits.push(`今天：${r.label}${tail}`);
+    else if (diff > 0 && diff <= Number(opt.lookaheadDays)) hits.push(`还有 ${diff} 天：${day} ${r.label}${dayNote}`);
     else if (diff < 0 && diff >= -30 && oneShot) hits.push(`错过了 ${-diff} 天：${day} 的提醒：${r.label}${r.note ? `（${clip(String(r.note), 60)}）` : ""}`);
   }
   if (!hits.length) return "";
