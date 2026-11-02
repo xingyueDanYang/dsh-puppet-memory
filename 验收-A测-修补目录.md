@@ -94,6 +94,11 @@
 | A-18 | 「加载更早」点了没反应、「切会话」也不生效——`callApi` 把 `&session=…` 拼进 action 再 encodeURIComponent，`&` 变 `%26`，服务端拿到 `session-memory&session=…` 直接 404（老 bug，默认会话不传参所以没暴露） | 〔数据〕 | `callApi(action, payload, query)` 加第三个参数单独传查询参数；会话读取/翻页改用它；新增静态守门测试 `test/api-query.mjs`（禁止 `callApi('动作&参数')` 写法） | HTTP 端到端：一页 100 条 + before 第二页 100 条、无重叠；`test/api-query.mjs` 4 项通过 | `git revert` |
 | A-17 | 整页按「功能清单」堆出来的：顶部按钮墙、同权重卡片、每条三个按钮并排、一屏术语（用户 2026-10-23 22:1x 原话「这页面做的确实不行」） | 〔接口〕 | 按宿主自带设置页的排版语言重做：分成「当前会话 / 屏蔽整块 / 片段」三组，每组「一行一件事」（左标题+说明、右控件）；每条片段只留「⋯」，展开/屏蔽/删掉收进菜单；分页只留列表底部一处；「回合」改「对话」 | 点清单 v2（20 项） | `git revert` 该提交（旧版备份 `~/.dsh/client.js.bak`） |
 
+## 0.40.0（2026-11-02，授权索引 + 开幕表 + 字面兜底 + guide 去重）
+
+发布事实：GitHub Release `#431095169`（tag `v0.40.0`，latest 指向它）、Gitee Release `#1265376`（tag `v0.40.0`）、npm `dsh-puppet-memory@0.40.0`（npmmirror 已同步）；tgz sha256 `513349d6…`（GitHub 附件实测一致）、zip `12822bd9…`；市场卡片仍指 `releases/latest/download/dsh-puppet-memory.tgz`，无需改。
+坑：GitHub 侧 `github.com:443` 被封，git push 走不通，且远端与本地历史不是同一条（远端 tree `818d4484` ≠ 本地 `400ea29` 的 `6ebfa77a`）⇒ 用 `gh-api-push.mjs` 的「单提交 diff」会漏 9 个提交。这次改用一次性脚本 `release/_sync-gh-040.mjs`：**上传 HEAD 的完整文件树（137 个 blob）→ 无 base tree → commit（parent=远端 main）→ 更新 main → 建 tag**，一次补齐。以后 GitHub 落后多个提交时可以直接用它。
+
 ## 0.39.0（2026-10-31，B-94 取词器/提词器 + 云备份 + 规则绑定）
 
 | 编号 | 现象 | 影响面 | 修法 | 怎么验 | 回滚 |
