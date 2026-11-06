@@ -39,6 +39,7 @@ import { createSearchIndex, sqliteAvailable, sqliteUnavailableReason } from "./s
 import { bigramsOf, createCuePrompter, selfEchoOf, stripInjected, verdictOf, worthCueing } from "./cueprompt.js";
 import { createRules, formatRuleRow, parseRulesMarkdown, rulesDefaults } from "./rules.js";
 import { createGrants, formatGrantRow, grantOfEntry, grantsDefaults, grantsStats, GRANT_ACTIONS } from "./grants.js";
+import { createSelfLayer, SELF_KINDS, selfDefaults } from "./self-layer.js";
 import { createCloudBackup, defaultCloudDir, listCloudPacks, pruneCloudPacks, verifyCloudBackup } from "./cloudbackup.js";
 
 const PLUGIN_NAME = "dsh-puppet-memory";
@@ -760,6 +761,13 @@ function defaultConfig() {
     cueprompt: { enabled: false, maxCandidates: 7, maxHintChars: 140, model: null, mode: "assist", minSharedTerms: 1 },
     // 多人记忆（v0.21 骨架）：默认关闭注入。关着时工具仍可显式读写 social/，但一个字都不注入。
     // 只有 enabled=true 且能从 session header 认出场景（群/私聊 + 对象）时，才按场景注入档案。
+    // v0.41（B-101）：自我层——我自己挑出来要记住的风格/习惯/事情。
+    // 写入走工具（memory_self），指纹留索引；预算独立，不跟核心卡抢；审计按「每几段一次」的节奏走。
+    self: {
+      enabled: true,
+      inject: { enabled: true, maxChars: 400 },
+      audit: { enabled: true, everyN: 4, fixPerTurn: 2 },
+    },
     social: socialConfigDefaults(),
     // 三线状态（v0.23）：词表+衰减+锚点，纯本地计算、不调模型；关掉不影响其它功能
     lines: linesConfigDefaults(),
@@ -776,6 +784,9 @@ function loadConfig() {
   const merged = { ...defaultConfig(), ...cfg };
   merged.inject = { ...defaultConfig().inject, ...(cfg.inject || {}) };
   merged.inject.core = { ...defaultConfig().inject.core, ...((cfg.inject && cfg.inject.core) || {}) };
+  merged.self = { ...defaultConfig().self, ...(cfg.self || {}) };
+  merged.self.inject = { ...defaultConfig().self.inject, ...((cfg.self && cfg.self.inject) || {}) };
+  merged.self.audit = { ...defaultConfig().self.audit, ...((cfg.self && cfg.self.audit) || {}) };
   merged.backup = { ...defaultConfig().backup, ...(cfg.backup || {}) };
   merged.backup.cloud = { ...defaultConfig().backup.cloud, ...((cfg.backup && cfg.backup.cloud) || {}) };
   merged.sessions = { ...defaultConfig().sessions, ...(cfg.sessions || {}) };
@@ -3623,6 +3634,13 @@ let grantsSingleton = null;
 function grantsForSearch() {
   if (!grantsSingleton) grantsSingleton = createGrants({ memDir: MEM_DIR });
   return grantsSingleton;
+}
+
+// v0.41（B-101）自我层：我自己的认知（风格/习惯/事情），指纹比对防丢
+let selfSingleton = null;
+function selfLayer() {
+  if (!selfSingleton) selfSingleton = createSelfLayer({ memDir: MEM_DIR, log });
+  return selfSingleton;
 }
 
 const SEARCH_LAYERS = ["behavior", "deep", "array", "user", "memo"];
@@ -7266,9 +7284,32 @@ function apply(ctx) {
         const dueMessage = dueText ? injectionMessage(dueText) : null;
         const openingMessage = openingText ? injectionMessage(openingText) : null;
         const cueMessage = cueText ? injectionMessage(cueText) : null;
+        // v0.41（B-101）自我层：独立预算，不跟核心卡抢；审计按节奏走（有排队先补，没排队等够 N 段再查）
+        let selfText = "";
+        try {
+          const sc = cfg.self || {};
+          const injectOn = sc.enabled !== false && !(sc.inject && sc.inject.enabled === false);
+          if (injectOn) {
+            if (sc.audit && sc.audit.enabled !== false) {
+              const t = selfLayer().tick({ everyN: sc.audit.everyN, fixPerTurn: sc.audit.fixPerTurn });
+              if (t && (t.audited || (t.repaired && t.repaired.length))) diag(`自我层节奏：${JSON.stringify(t)}`);
+            }
+            selfText = selfLayer().injectText((sc.inject && sc.inject.maxChars) || 400);
+          }
+        } catch (err) {
+          diag(`自我层注入失败：${err?.message || err}`);
+        }
+        const selfMessage = selfText
+          ? injectionMessage(
+              `<puppet_self>
+以下是${DISPLAY_NAME}自己的认知（behavior/self.jsonl：我自己挑出来要记住的风格 / 习惯 / 事情；独立预算，不占核心卡）：
+${selfText}
+</puppet_self>`,
+            )
+          : null;
         return {
           kind: "enter",
-          messages: [...(decision.messages || []), ...(resetMessage ? [resetMessage] : []), ...(rulesMessage ? [rulesMessage] : []), ...(coreMessage ? [coreMessage] : []), ...(coreStateMessage ? [coreStateMessage] : []), ...(stateMessage ? [stateMessage] : []), ...(handoffMessage ? [handoffMessage] : []), ...(recallMessage ? [recallMessage] : []), ...(dueMessage ? [dueMessage] : []), ...(openingMessage ? [openingMessage] : []), ...(cueMessage ? [cueMessage] : []), ...(text ? [injectionMessage(text)] : []), ...(socialMessage ? [socialMessage] : [])],
+          messages: [...(decision.messages || []), ...(resetMessage ? [resetMessage] : []), ...(rulesMessage ? [rulesMessage] : []), ...(coreMessage ? [coreMessage] : []), ...(coreStateMessage ? [coreStateMessage] : []), ...(selfMessage ? [selfMessage] : []), ...(stateMessage ? [stateMessage] : []), ...(handoffMessage ? [handoffMessage] : []), ...(recallMessage ? [recallMessage] : []), ...(dueMessage ? [dueMessage] : []), ...(openingMessage ? [openingMessage] : []), ...(cueMessage ? [cueMessage] : []), ...(text ? [injectionMessage(text)] : []), ...(socialMessage ? [socialMessage] : [])],
         };
       } catch (err) {
         log("warn", `pre-step 注入失败：${err?.message || err}`);
@@ -7730,6 +7771,87 @@ function apply(ctx) {
           return `授权索引（${res.total} 条命中，只读）\n${res.rows.map(formatGrantRow).join("\n")}${more}`;
         } catch (err) {
           return `读授权索引失败：${err?.message || err}`;
+        }
+      },
+    });
+
+    // v0.41（B-101）：自我层——把「我自己怎么想的」也记下来，用指纹防丢
+    register({
+
+      name: "memory_self",
+      description:
+        "自我层（B-101）：记我自己挑出来要记住的东西——风格（怎么写、怎么说）、习惯（做事顺序、容易踩的坑）、事情（我判断重要但没人让我记的）。每条写入都留一份镜像并记指纹（指纹 = kind|text|importance 的 sha1）；审计时比对三个文件，发现丢了/被改了就从镜像补回来。节奏：每几段话自动查一次，不对就补；这次没补完，下一段继续；补完了再等几段再查（config.self.audit.everyN / fixPerTurn，默认 4 / 2）。注入独立 400 字预算，不占核心卡。action=write 写一条 | list 列条目 | audit 只查不补 | repair 按 id 从镜像修（不给 id 就按节奏补一小批）| void 标废（不删）| stats 看规模与文件位置。",
+
+      parameters: {
+        type: "object",
+        properties: {
+          action: { type: "string", enum: ["write", "list", "audit", "repair", "void", "stats"], description: "默认 list" },
+          kind: { type: "string", enum: SELF_KINDS, description: "action=write/list 用：style 风格 / habit 习惯 / fact 事情 / lesson 教训 / other 其它" },
+          text: { type: "string", description: "action=write 用：一句话（写具体的，别写空话）" },
+          importance: { type: "number", description: "action=write 用：0-3，默认 1；注入时按它排序" },
+          id: { type: "string", description: "action=repair/void 用：条目 id（可只给前几位）" },
+          reason: { type: "string", description: "action=void 用：为什么标废" },
+          includeVoid: { type: "boolean", description: "action=list 用：连标废的一起列" },
+          limit: { type: "number", description: "最多几条，默认 50" },
+        },
+      },
+      output,
+      async execute(args) {
+        try {
+          const engine = selfLayer();
+          const action = String(args?.action || "list");
+          if (action === "write") {
+            const row = engine.write({
+              kind: args?.kind,
+              text: args?.text,
+              importance: args?.importance,
+              source: "self",
+            });
+            return `已写入自我层：${row.id}〔${row.kind}·重要度 ${row.importance}〕${row.text}
+文件：${engine.files.entriesFile}`;
+          }
+          if (action === "audit") {
+            const a = engine.audit();
+            if (!a.issues.length) return `自我层对账干净：${a.total} 条，镜像 ${a.mirrorTotal} 条，指纹一致（上次审计 ${a.auditedAt || "从未"}）。`;
+            const lines = a.issues.map((i) => `${i.id}：${i.type}——${i.detail}${i.canRestore ? "（可从镜像恢复）" : "（镜像里没有，恢复不了）"}`);
+            return [`自我层对账：${a.total} 条，镜像 ${a.mirrorTotal} 条，${a.issues.length} 条有问题`, ...lines, "", "用 action=repair 补（不给 id 就按节奏补一小批）。"].join("\n");
+          }
+          if (action === "repair") {
+            if (args?.id) {
+              const r = engine.repairOne(String(args.id));
+              return r.ok ? `已修：${r.id}（${r.action}）` : `修不了：${r.id}——${r.reason}`;
+            }
+            const issues = engine.audit().issues.map((x) => x.id);
+            if (!issues.length) return "对账干净，没有要修的。";
+            const sc = loadConfig().self || {};
+            const fixCount = Math.max(1, Number((sc.audit && sc.audit.fixPerTurn) || 2));
+            const batch = issues.slice(0, fixCount).map((id) => engine.repairOne(id));
+            const done = batch.map((r) => `${r.id}:${r.ok ? r.action : r.reason}`).join("，");
+            const left = issues.length - batch.length;
+            return `补了 ${batch.length} 条：${done}${left > 0 ? `；还剩 ${left} 条（再调一次继续补）` : "；已全部补完"}`;
+          }
+          if (action === "void") {
+            const row = engine.voidEntry(String(args?.id || ""), args?.reason);
+            return row ? `已标废：${row.id}（原因：${row.voided.reason}）` : "没找到这条（id 给对了吗？）";
+          }
+          if (action === "stats") {
+            const st = engine.stats();
+            const kinds = Object.entries(st.byKind).map(([k, v]) => `${k} ${v}`).join(" / ") || "（空）";
+            return [
+              `自我层：${st.total} 条（有效 ${st.live} / 标废 ${st.voided}），镜像 ${st.mirror} 条，索引 ${st.indexed} 条`,
+              `按 kind：${kinds}`,
+              `上次审计：${st.auditedAt || "从未"}`,
+              `文件：${st.files.entriesFile}`,
+              `　　　${st.files.mirrorFile}`,
+              `　　　${st.files.indexPath}`,
+            ].join("\n");
+          }
+          const res = engine.list({ kind: args?.kind, limit: args?.limit, includeVoid: args?.includeVoid === true });
+          if (!res.total) return "自我层还是空的：用 action=write 写第一条（风格 / 习惯 / 事情 各来一条最好）。";
+          return `自我层（${res.total} 条）
+` + res.rows.map((e) => `${e.id}〔${e.kind}·${e.importance}〕${e.voided ? "（已标废）" : ""}${e.text}`).join("\n");
+        } catch (err) {
+          return `自我层出错：${err?.message || err}`;
         }
       },
     });

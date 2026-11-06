@@ -94,7 +94,10 @@ function listFiles() {
 
 // 检查脚本自己不参与扫描：它的注释和规则表里必须出现「路径长什么样」「凭证文件叫什么」，
 // 否则这些规则没法写。跳过它，但其它任何文件都不跳过。
-const SELF = new Set(['脱敏检查.mjs', '脱敏检查.mjs.bak'])
+// 私有规则文件本身必须被跳过：它就是本机那份真实号码表（.gitignore 忽略、不在 files 白名单里），
+// 扫它等于「检查员抓自己手里的名单」——2026-11-06 发 0.41.0 时就是卡在这一条。
+// 注意：它只被跳过「自己这一份」，号码出现在别的任何文件里照样报。
+const SELF = new Set(['脱敏检查.mjs', '脱敏检查.mjs.bak', '脱敏私有规则.json'])
 const files = listFiles().filter((f) => TEXT_EXT.test(f) && !SELF.has(f))
 const hits = []
 const unreadable = []
