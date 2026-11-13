@@ -66,6 +66,9 @@ const MEM_DIR = process.env.DSH_MEMORY_DIR || path.join(DSH_DIR, "memory");
 const SESSION_DIR = path.join(DSH_DIR, "sessions");
 const CONFIG_PATH = path.join(MEM_DIR, "config.json");
 const STATE_PATH = path.join(MEM_DIR, "state", "runtime.json");
+const PLUGIN_REPOSITORY = "xingyueDanYang/dsh-puppet-memory";
+const LATEST_RELEASE_API = `https://api.github.com/repos/${PLUGIN_REPOSITORY}/releases/latest`;
+const DEFAULT_UPDATE_INTERVAL_DAYS = 7;
 
 // v0.25：默认备份到家目录（多数机器没有 F 盘）；配置里显式写的目录仍以配置为准。
 // 目录不可写时自动回退到 <记忆目录>/backups，并在返回信息里说明。
@@ -85,6 +88,7 @@ const PATHS = {
   coreRules: path.join(MEM_DIR, "behavior", "core-rules.md"),
   // v0.23 三线状态：工作/陪伴/学习的连续权重与轨迹（只写 state/）
   stateDir: path.join(MEM_DIR, "state"),
+  updateState: path.join(MEM_DIR, "state", "update-check.json"),
   relations: path.join(MEM_DIR, "behavior", "relations.jsonl"),
   user: path.join(MEM_DIR, "behavior", "user.jsonl"),
   memo: path.join(MEM_DIR, "behavior", "memo.jsonl"),
@@ -783,6 +787,12 @@ function defaultConfig() {
       inject: { enabled: true, maxChars: 400 },
       audit: { enabled: true, everyN: 4, fixPerTurn: 2 },
     },
+    // v0.43：插件更新检查。默认每周一次；只查询公开 GitHub Release，
+    // 不自动下载或替换安装，手动检查始终可以绕过缓存。
+    updates: {
+      enabled: true,
+      intervalDays: DEFAULT_UPDATE_INTERVAL_DAYS,
+    },
     social: socialConfigDefaults(),
     // 三线状态（v0.23）：词表+衰减+锚点，纯本地计算、不调模型；关掉不影响其它功能
     lines: linesConfigDefaults(),
@@ -802,6 +812,7 @@ function loadConfig() {
   merged.self = { ...defaultConfig().self, ...(cfg.self || {}) };
   merged.self.inject = { ...defaultConfig().self.inject, ...((cfg.self && cfg.self.inject) || {}) };
   merged.self.audit = { ...defaultConfig().self.audit, ...((cfg.self && cfg.self.audit) || {}) };
+  merged.updates = { ...defaultConfig().updates, ...(cfg.updates || {}) };
   merged.backup = { ...defaultConfig().backup, ...(cfg.backup || {}) };
   merged.backup.cloud = { ...defaultConfig().backup.cloud, ...((cfg.backup && cfg.backup.cloud) || {}) };
   merged.sessions = { ...defaultConfig().sessions, ...(cfg.sessions || {}) };
@@ -2202,11 +2213,25 @@ function cloudBackupNow(options = {}) {
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 
+function loopbackAddress(value) {
+  const address = String(value || "").toLowerCase().split("%")[0];
+  return address === "::1" || address.startsWith("127.") || address.startsWith("::ffff:127.");
+}
+
 function hostIsLoopback(req) {
+  const remote = req && req.socket && req.socket.remoteAddress;
+  if (remote && !loopbackAddress(remote)) return false;
   const raw = String((req && req.headers && req.headers.host) || "");
-  if (!raw) return true;
+  if (!raw) return false;
   const name = raw.startsWith("[") ? raw.slice(0, raw.indexOf("]") + 1) : raw.split(":")[0];
-  return LOOPBACK_HOSTS.has(name.toLowerCase());
+  if (!LOOPBACK_HOSTS.has(name.toLowerCase())) return false;
+  const origin = String((req && req.headers && req.headers.origin) || "");
+  if (!origin) return true;
+  try {
+    return LOOPBACK_HOSTS.has(new URL(origin).hostname.toLowerCase());
+  } catch {
+    return false;
+  }
 }
 
 // 数一数备份目录里有多少快照、最新的是哪份（备份盘不在线时返回 0）
@@ -2440,6 +2465,223 @@ function readRequestBody(req, limit = 64 * 1024) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// v0.43：插件更新检查（默认每周）
+// 只查询本项目的公开 GitHub Release；检查结果落在 state/update-check.json。
+// 自动检查按 intervalDays 节流，手动检查 force=true 会跳过缓存。
+// ---------------------------------------------------------------------------
+function versionPartsOf(value) {
+  const match = /^v?(0|[1-9]\d{0,7})\.(0|[1-9]\d{0,7})\.(0|[1-9]\d{0,7})(?:-([0-9A-Za-z.-]+))?$/u.exec(String(value || "").trim());
+  if (!match) return null;
+  return {
+    numbers: [Number(match[1]), Number(match[2]), Number(match[3])],
+    prerelease: match[4] ? match[4].split(".") : [],
+  };
+}
+
+function stableVersionParts(value) {
+  const parsed = versionPartsOf(value);
+  return parsed && !parsed.prerelease.length ? parsed.numbers : null;
+}
+
+function compareVersions(left, right) {
+  const a = versionPartsOf(left);
+  const b = versionPartsOf(right);
+  if (!a || !b) return null;
+  for (let i = 0; i < 3; i += 1) {
+    if (a.numbers[i] !== b.numbers[i]) return a.numbers[i] > b.numbers[i] ? 1 : -1;
+  }
+  if (!a.prerelease.length || !b.prerelease.length) {
+    if (!a.prerelease.length && !b.prerelease.length) return 0;
+    return a.prerelease.length ? -1 : 1;
+  }
+  const length = Math.max(a.prerelease.length, b.prerelease.length);
+  for (let i = 0; i < length; i += 1) {
+    if (a.prerelease[i] === undefined) return -1;
+    if (b.prerelease[i] === undefined) return 1;
+    const x = a.prerelease[i];
+    const y = b.prerelease[i];
+    if (x === y) continue;
+    const xn = /^\d+$/u.test(x);
+    const yn = /^\d+$/u.test(y);
+    if (xn && yn) return Number(x) > Number(y) ? 1 : -1;
+    if (xn !== yn) return xn ? -1 : 1;
+    return x > y ? 1 : -1;
+  }
+  return 0;
+}
+
+function normalizeUpdateSettings(raw) {
+  const input = raw && typeof raw === "object" ? raw : {};
+  const days = Number(input.intervalDays);
+  return {
+    enabled: input.enabled !== false,
+    intervalDays: Number.isInteger(days) && days >= 1 && days <= 30 ? days : DEFAULT_UPDATE_INTERVAL_DAYS,
+  };
+}
+
+function readUpdateState() {
+  const state = readJson(PATHS.updateState, {});
+  return state && typeof state === "object" && !Array.isArray(state) ? state : {};
+}
+
+function writeUpdateState(state) {
+  writeJson(PATHS.updateState, state);
+}
+
+function updateStatusView(now = Date.now()) {
+  const cfg = loadConfig();
+  const config = normalizeUpdateSettings(cfg.updates);
+  const state = readUpdateState();
+  const currentVersion = pluginVersionOf();
+  const latest = state.latest && stableVersionParts(state.latest.version)
+    ? {
+        version: String(state.latest.version),
+        url: String(state.latest.url || ""),
+        packageUrl: String(state.latest.packageUrl || ""),
+        publishedAt: String(state.latest.publishedAt || ""),
+      }
+    : null;
+  const lastAttemptAt = Number.isFinite(Date.parse(String(state.lastAttemptAt || "")))
+    ? new Date(Date.parse(String(state.lastAttemptAt))).toISOString()
+    : "";
+  const intervalMs = config.intervalDays * 24 * 60 * 60 * 1000;
+  const retryMs = state.error ? Math.min(intervalMs, 5 * 60 * 1000) : intervalMs;
+  const due = config.enabled && (!lastAttemptAt || now - Date.parse(lastAttemptAt) >= retryMs);
+  return {
+    ok: true,
+    config,
+    currentVersion,
+    latestVersion: latest?.version || "",
+    latestUrl: latest?.url || "",
+    packageUrl: latest?.packageUrl || "",
+    publishedAt: latest?.publishedAt || "",
+    updateAvailable: Boolean(currentVersion && latest && compareVersions(latest.version, currentVersion) === 1),
+    lastCheckedAt: typeof state.lastCheckedAt === "string" ? state.lastCheckedAt : "",
+    lastAttemptAt,
+    nextCheckAt: config.enabled && lastAttemptAt ? new Date(Date.parse(lastAttemptAt) + retryMs).toISOString() : "",
+    due,
+    error: typeof state.error === "string" ? state.error : "",
+  };
+}
+
+async function boundedResponseText(response, limit = 256 * 1024) {
+  const length = Number(response.headers?.get?.("content-length"));
+  if (Number.isFinite(length) && length > limit) throw new Error("发布信息过大");
+  if (!response.body || typeof response.body.getReader !== "function") {
+    const text = await response.text();
+    if (Buffer.byteLength(text, "utf8") > limit) throw new Error("发布信息过大");
+    return text;
+  }
+  const reader = response.body.getReader();
+  const chunks = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > limit) throw new Error("发布信息过大");
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+async function fetchLatestMemoryRelease({ fetchImpl = fetch, timeoutMs = 12000 } = {}) {
+  const response = await fetchImpl(LATEST_RELEASE_API, {
+    headers: { Accept: "application/json" },
+    redirect: "follow",
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!response.ok) throw new Error(`检查更新失败（HTTP ${response.status}）`);
+  let raw;
+  try {
+    raw = await boundedResponseText(response);
+  } catch (err) {
+    if (err?.name === "TimeoutError" || err?.name === "AbortError") throw new Error("检查更新超时");
+    throw new Error(`读取 GitHub 发布信息失败：${clip(err?.message || err, 160)}`);
+  }
+  let release;
+  try {
+    release = JSON.parse(raw);
+  } catch {
+    throw new Error("GitHub 返回的发布信息不是有效 JSON");
+  }
+  const version = String(release?.tag_name || "").replace(/^v/u, "");
+  const expectedUrl = `https://github.com/${PLUGIN_REPOSITORY}/releases/tag/v${version}`;
+  const packageUrl = `https://github.com/${PLUGIN_REPOSITORY}/releases/download/v${version}/dsh-puppet-memory.tgz`;
+  if (!stableVersionParts(version) || release?.draft !== false || release?.prerelease !== false) {
+    throw new Error("GitHub 没有返回可用的稳定版");
+  }
+  if (release?.html_url !== expectedUrl) throw new Error("GitHub 发布来源不匹配");
+  if (!Number.isFinite(Date.parse(String(release?.published_at || "")))) throw new Error("GitHub 发布时间无效");
+  const archives = (Array.isArray(release?.assets) ? release.assets : [])
+    .filter((asset) => asset && asset.name === "dsh-puppet-memory.tgz");
+  if (archives.length !== 1 || archives[0].state !== "uploaded" || archives[0].browser_download_url !== packageUrl) {
+    throw new Error("GitHub Release 缺少有效的安装包");
+  }
+  const digest = String(archives[0].digest || "");
+  if (digest && !/^sha256:[a-f0-9]{64}$/u.test(digest)) throw new Error("GitHub Release 安装包校验值无效");
+  return {
+    version,
+    url: expectedUrl,
+    packageUrl,
+    publishedAt: new Date(Date.parse(release.published_at)).toISOString(),
+  };
+}
+
+let updateCheckInFlight = null;
+
+async function checkMemoryUpdate({ force = false, fetchImpl = fetch, now = Date.now(), timeoutMs = 12000 } = {}) {
+  const before = updateStatusView(now);
+  if (!force && (!before.config.enabled || !before.due)) {
+    return { ...before, checked: false, cached: true };
+  }
+  if (updateCheckInFlight) return updateCheckInFlight;
+  const task = (async () => {
+    const checkedAt = new Date(now).toISOString();
+    try {
+      const latest = await fetchLatestMemoryRelease({ fetchImpl, timeoutMs });
+      writeUpdateState({ lastAttemptAt: checkedAt, lastCheckedAt: checkedAt, latest, error: "" });
+      diag(`更新检查成功：当前 ${pluginVersionOf() || "未知"}，最新稳定版 ${latest.version}`);
+      return { ...updateStatusView(now), checked: true, cached: false };
+    } catch (err) {
+      const error = `无法确认最新版本：${clip(err?.message || err, 240)}`;
+      writeUpdateState({ ...readUpdateState(), lastAttemptAt: checkedAt, error, latest: null });
+      diag(`更新检查失败：${error}`);
+      return { ...updateStatusView(now), checked: false, cached: false, error };
+    }
+  })().finally(() => {
+    if (updateCheckInFlight === task) updateCheckInFlight = null;
+  });
+  updateCheckInFlight = task;
+  return task;
+}
+
+function updateUpdateSettings(patch) {
+  const input = patch && typeof patch === "object" ? patch : {};
+  const next = {};
+  if (input.enabled !== undefined) {
+    if (typeof input.enabled !== "boolean") return { ok: false, error: "enabled 必须是布尔值" };
+    next.enabled = input.enabled;
+  }
+  if (input.intervalDays !== undefined) {
+    const days = Number(input.intervalDays);
+    if (!Number.isInteger(days) || days < 1 || days > 30) return { ok: false, error: "检查间隔必须是 1–30 的整数天" };
+    next.intervalDays = days;
+  }
+  if (!Object.keys(next).length) return { ok: false, error: "没有要改的字段（enabled / intervalDays）" };
+  const cfg = loadConfig();
+  cfg.updates = normalizeUpdateSettings({ ...normalizeUpdateSettings(cfg.updates), ...next });
+  saveConfig(cfg);
+  diag(`更新设置已保存：${JSON.stringify(cfg.updates)}`);
+  return updateStatusView();
+}
+
 // 把 API 挂到宿主 webServer 上；返回 disposer，方便插件被关开关/热重载时摘掉路由
 // ---------------------------------------------------------------------------
 // v0.35（B-53 / B-54）观察器设置：~/.dsh/qq-watch/settings.json
@@ -2549,6 +2791,7 @@ function registerBackupApi(service) {
         if (action === "autosummary") {
           return sendJson(res, autoSummaryConfigView());
         }
+        if (action === "update-status") return sendJson(res, updateStatusView());
         if (action === "duty-board") return sendJson(res, dutyBoardData());
         if (action === "qq-watch") return sendJson(res, qqWatchView());
         if (action === "session-memory") {
@@ -2606,6 +2849,13 @@ function registerBackupApi(service) {
       if (action === "save-autosummary") {
         const result = updateAutoSummaryPolicy(body);
         return sendJson(res, result, result.ok ? 200 : 400);
+      }
+      if (action === "update-settings") {
+        const result = updateUpdateSettings(body);
+        return sendJson(res, result, result.ok ? 200 : 400);
+      }
+      if (action === "check-update") {
+        return sendJson(res, await checkMemoryUpdate({ force: body.force === true }));
       }
       if (action === "backup") {
         const message = backupNow("manual", { force: true });
@@ -8945,6 +9195,6 @@ const plugin = {
   apply,
 };
 
-export { apply, loadState, saveState, STATE_PATH, filterMsgsBySeq, searchEngineOf, searchIndexStatus, closeSearchIndex, buildInjectionText, buildStateInjection, buildHandoffInjection, buildRecallInjection, buildDueInjection, buildOpeningInjection, ensureOpeningLunarRows, addOpeningRow, removeOpeningRow, readOpeningRows, pruneOpeningRows, formatNowLine, ageLabelOf, modelRouteOf, sessionMemory, createSessionMemory, sessionMemoryPaths, normalizeSessionId, isSpecialKey, doctorReport, renderDoctor, resolveBackupDir, probeWritable, coreInjection, coreOptions, createLines, lexicalScore, linesConfigDefaults, linesPaths, qualitativeOf, topicTokens, behaviorHint, createSocial, detectScene, normalizeName, personIdOf, registerSocialTools, sceneLabel, socialConfigDefaults, socialPaths, searchSocialContext, backupPolicySummary, compactionStats, compactionStatusLine, noteCompaction, noteAutoSummary, compressCallsIn, nativeCompactionsIn, compressToolCallsIn, compressionKindOf, readCompactionLog, appendCompactionRecord, ingestCompactionEvent, compactionRecords, compactionSelfCheck, dutyBoardData, sendHandoff, pullHandoff, listHandoffs, compactionSuiteDetected, listAutoSummaries, deleteAutoSummary, setFactCaller, factOptions, readFactCandidates, writeFactCandidates, pendingFactCandidates, factCandidateStats, factStatusLine, parseFactCandidates, buildFactPrompt, factInventory, isDuplicateFact, extractFactCandidates, acceptFactCandidate, rejectFactCandidate, updateBackupPolicy, updateAutoSummaryPolicy, cuepromptView, updateCuePrompt, autoSummaryConfigView, registerBackupApi, hostIsLoopback, readRequestBody, searchMemory, searchMemoryKeyword, searchTokensOf, ensureSearchIndex, bm25ScoreOf, searchTargets, writeMemory, voidMemory, exportArchive, readQqWatchSettings, writeQqWatchSettings, qqWatchView, briefOf, aliasesOf, mergeAliases, writeGuardOf, writeGuardCheck, similarityOf, backupNow, pruneOldSnapshots, shouldSkipBackup, backupStampOf, writeTurnDiary, isCompressionEvent, renameAssetImage, listAssetImages, assetDetail, arrayIndexFiles, arrayIndexFileForMonth, migrateArrayIndexIfNeeded, AUDIO_SOURCE, AUDIO_KIND, AUDIO_USE, audioClassTag, buildStats, tagsOf, validateTags, checkedTags, TAG_VOCAB, clearMemos, tagCard, isVocabTag, normalizeTag, CUSTOM_TAG_MAX, CUSTOM_TAG_LEN, RARE_TAG_MAX_COUNT, recallSession, decodeSessionFile, findSessionFile, archiveSessions, scanSessionOriginals, sessionHeaderOf, findArchivedSession, rawArchiveRows, rawSessionFileName, cwdOfSlug, sha256OfFile, roundsOfSessionFile, relationInjectionLines, archiveRelationOverflow, locateMemory, jsonlHasHash, rebuildGuide, guideStats, guideLinks, guideNodes, addSource, listSources, findSources, sourceStats, loadSources, sourceTag, entryProvenance, sourceIndex, runAutoSummary, pendingTurns, autoSummaryOptions, buildAutoSummaryEntry, buildSummaryPrompt, summaryStyleLine, parseSummaryText, summaryInputOf, callWithThinkingRetry, setAutoSummaryCaller, defaultConfig, loadConfig, AUTO_SUMMARY_PREFIX, createRules, parseRulesMarkdown, formatRuleRow, rulesForSearch, parseTimeBound };
+export { apply, loadState, saveState, STATE_PATH, stableVersionParts, compareVersions, normalizeUpdateSettings, updateStatusView, fetchLatestMemoryRelease, checkMemoryUpdate, updateUpdateSettings, filterMsgsBySeq, searchEngineOf, searchIndexStatus, closeSearchIndex, buildInjectionText, buildStateInjection, buildHandoffInjection, buildRecallInjection, buildDueInjection, buildOpeningInjection, ensureOpeningLunarRows, addOpeningRow, removeOpeningRow, readOpeningRows, pruneOpeningRows, formatNowLine, ageLabelOf, modelRouteOf, sessionMemory, createSessionMemory, sessionMemoryPaths, normalizeSessionId, isSpecialKey, doctorReport, renderDoctor, resolveBackupDir, probeWritable, coreInjection, coreOptions, createLines, lexicalScore, linesConfigDefaults, linesPaths, qualitativeOf, topicTokens, behaviorHint, createSocial, detectScene, normalizeName, personIdOf, registerSocialTools, sceneLabel, socialConfigDefaults, socialPaths, searchSocialContext, backupPolicySummary, compactionStats, compactionStatusLine, noteCompaction, noteAutoSummary, compressCallsIn, nativeCompactionsIn, compressToolCallsIn, compressionKindOf, readCompactionLog, appendCompactionRecord, ingestCompactionEvent, compactionRecords, compactionSelfCheck, dutyBoardData, sendHandoff, pullHandoff, listHandoffs, compactionSuiteDetected, listAutoSummaries, deleteAutoSummary, setFactCaller, factOptions, readFactCandidates, writeFactCandidates, pendingFactCandidates, factCandidateStats, factStatusLine, parseFactCandidates, buildFactPrompt, factInventory, isDuplicateFact, extractFactCandidates, acceptFactCandidate, rejectFactCandidate, updateBackupPolicy, updateAutoSummaryPolicy, cuepromptView, updateCuePrompt, autoSummaryConfigView, registerBackupApi, hostIsLoopback, readRequestBody, searchMemory, searchMemoryKeyword, searchTokensOf, ensureSearchIndex, bm25ScoreOf, searchTargets, writeMemory, voidMemory, exportArchive, readQqWatchSettings, writeQqWatchSettings, qqWatchView, briefOf, aliasesOf, mergeAliases, writeGuardOf, writeGuardCheck, similarityOf, backupNow, pruneOldSnapshots, shouldSkipBackup, backupStampOf, writeTurnDiary, isCompressionEvent, renameAssetImage, listAssetImages, assetDetail, arrayIndexFiles, arrayIndexFileForMonth, migrateArrayIndexIfNeeded, AUDIO_SOURCE, AUDIO_KIND, AUDIO_USE, audioClassTag, buildStats, tagsOf, validateTags, checkedTags, TAG_VOCAB, clearMemos, tagCard, isVocabTag, normalizeTag, CUSTOM_TAG_MAX, CUSTOM_TAG_LEN, RARE_TAG_MAX_COUNT, recallSession, decodeSessionFile, findSessionFile, archiveSessions, scanSessionOriginals, sessionHeaderOf, findArchivedSession, rawArchiveRows, rawSessionFileName, cwdOfSlug, sha256OfFile, roundsOfSessionFile, relationInjectionLines, archiveRelationOverflow, locateMemory, jsonlHasHash, rebuildGuide, guideStats, guideLinks, guideNodes, addSource, listSources, findSources, sourceStats, loadSources, sourceTag, entryProvenance, sourceIndex, runAutoSummary, pendingTurns, autoSummaryOptions, buildAutoSummaryEntry, buildSummaryPrompt, summaryStyleLine, parseSummaryText, summaryInputOf, callWithThinkingRetry, setAutoSummaryCaller, defaultConfig, loadConfig, AUTO_SUMMARY_PREFIX, createRules, parseRulesMarkdown, formatRuleRow, rulesForSearch, parseTimeBound };
 export default plugin;
 

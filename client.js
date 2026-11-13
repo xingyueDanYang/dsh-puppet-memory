@@ -6,6 +6,8 @@
  *     → 备份策略 / 当前状态 / 上下文压缩 / 待确认事实；按钮放页面顶部
  *   settings.section#puppet-autosummary（order 27，label「自动摘要」）
  *     → 自动摘要设置 + 摘要列表；按钮放页面顶部
+ *   settings.section#puppet-session（order 28，label「会话记忆」）
+ *   settings.section#puppet-update（order 29，label「插件更新」）
  * settings.section 是 list slot（一个条目一页），所以拆页不需要任何壳层改动。
  *
  * 数据走宿主的本机回环 HTTP API：/dsh-puppet-memory-api
@@ -646,7 +648,165 @@ window.__ModuleLoader__.load({
     }
 
     // ---------------------------------------------------------------
-    // 页 3：会话记忆（v0.28）——脏片段本会话屏蔽/删除，防止污染上下文
+    // 页 3：插件更新（v0.43）——默认每周检查公开 GitHub Release
+    // ---------------------------------------------------------------
+    function UpdatePanel() {
+      const { useState, useEffect, useCallback } = React
+      const [data, setData] = useState(null)
+      const [form, setForm] = useState(null)
+      const [busy, setBusy] = useState(false)
+      const [notice, setNotice] = useState('')
+      const [error, setError] = useState('')
+
+      const accept = (res) => {
+        if (!res || res.ok !== true) throw new Error((res && res.error) || '更新接口不可用')
+        setData(res)
+        setForm({
+          enabled: res.config?.enabled !== false,
+          intervalDays: Number(res.config?.intervalDays) || 7,
+        })
+        if (res.error) setError(res.error)
+      }
+
+      const load = useCallback(async () => {
+        setBusy(true)
+        setError('')
+        setNotice('')
+        try {
+          let res = await callApi('update-status')
+          accept(res)
+          if (res.config?.enabled && res.due) {
+            res = await callApi('check-update', { force: false })
+            accept(res)
+          }
+        } catch (err) {
+          setError(err && err.message ? err.message : String(err))
+        } finally {
+          setBusy(false)
+        }
+      }, [])
+
+      useEffect(() => {
+        load()
+      }, [load])
+
+      useEffect(() => {
+        if (busy || !data?.config?.enabled || !data.nextCheckAt) return undefined
+        const delay = Date.parse(data.nextCheckAt) - Date.now()
+        if (!Number.isFinite(delay) || delay <= 0) return undefined
+        const timer = setTimeout(() => load(), Math.min(delay, 2147483647))
+        return () => clearTimeout(timer)
+      }, [busy, data, load])
+
+      const patch = (key, value) => setForm((prev) => ({ ...(prev || {}), [key]: value }))
+
+      const save = async () => {
+        if (!form) return
+        setBusy(true)
+        setError('')
+        setNotice('')
+        try {
+          let res = await callApi('update-settings', form)
+          accept(res)
+          if (res.config?.enabled && res.due) {
+            res = await callApi('check-update', { force: false })
+            accept(res)
+          }
+          setNotice('更新设置已保存。')
+        } catch (err) {
+          setError(err && err.message ? err.message : String(err))
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      const checkNow = async () => {
+        setBusy(true)
+        setError('')
+        setNotice('')
+        try {
+          const res = await callApi('check-update', { force: true })
+          accept(res)
+          if (!res.error) setNotice(res.updateAvailable ? '发现新的稳定版。' : '当前已是最新稳定版。')
+        } catch (err) {
+          setError(err && err.message ? err.message : String(err))
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      const current = (data && data.currentVersion) || '—'
+      const latest = (data && data.latestVersion) || '尚未检查'
+      const updateAvailable = Boolean(data && data.updateAvailable)
+      const statusCard = h(
+        'div',
+        { className: 'pmb-card' },
+        h('div', { className: 'pmb-title' }, '版本状态'),
+        h(
+          'div',
+          { className: 'pmb-grid' },
+          h('div', { className: 'pmb-kv' }, h('span', { className: 'pmb-k' }, '当前版本'), h('span', { className: 'pmb-v' }, current)),
+          h('div', { className: 'pmb-kv' }, h('span', { className: 'pmb-k' }, '最新稳定版'), h('span', { className: 'pmb-v' }, latest)),
+          h('div', { className: 'pmb-kv' }, h('span', { className: 'pmb-k' }, '上次检查'), h('span', { className: 'pmb-v' }, data && data.lastCheckedAt ? fmtLocal(data.lastCheckedAt) : '尚未检查')),
+          h('div', { className: 'pmb-kv' }, h('span', { className: 'pmb-k' }, '下次自动检查'), h('span', { className: 'pmb-v' }, data && data.nextCheckAt ? fmtLocal(data.nextCheckAt) : '未安排')),
+        ),
+        !data || !data.latestVersion
+          ? null
+          : h('div', { className: updateAvailable ? 'pmb-warn' : 'pmb-ok' }, updateAvailable ? '发现可更新版本：' + latest : '当前已是最新稳定版。'),
+        data && data.latestUrl
+          ? h('div', { className: 'pmb-row' }, h('a', { href: data.latestUrl, target: '_blank', rel: 'noreferrer' }, '查看 GitHub Release'))
+          : null,
+      )
+
+      const settingsCard = form
+        ? h(
+            'div',
+            { className: 'pmb-card' },
+            h('div', { className: 'pmb-title' }, '自动检查'),
+            h(Row, { label: '自动检查' }, h(Check, {
+              checked: form.enabled,
+              disabled: busy,
+              text: form.enabled ? '开（打开本页时按间隔检查）' : '关（仍可手动检查）',
+              onChange: (v) => patch('enabled', v),
+            })),
+            h(Row, { label: '检查间隔' },
+              h('input', {
+                className: 'pmb-input',
+                type: 'number',
+                min: 1,
+                max: 30,
+                step: 1,
+                value: String(form.intervalDays),
+                disabled: busy || !form.enabled,
+                onChange: (ev) => patch('intervalDays', ev.target.value),
+              }),
+              h('span', { className: 'pmb-sub' }, '天；默认 7 天，范围 1–30 天。'),
+            ),
+            h(NOTE, null, '检查只读取本项目的公开 GitHub Release，不上传记忆、会话或配置。发现新版只提示并提供 Release 链接，不会静默下载或替换插件。'),
+          )
+        : null
+
+      return h(
+        'div',
+        { className: 'pmb' },
+        h('div', { className: 'pmb-head' },
+          h('div', { className: 'pmb-title' }, '插件更新'),
+          h('div', { className: 'pmb-sub' }, '默认每周检查一次稳定版。只有打开本页时才会触发自动检查；手动检查会跳过周期间隔，失败后 5 分钟可重试。'),
+        ),
+        error ? h('div', { className: 'pmb-err' }, error) : null,
+        notice ? h('div', { className: 'pmb-ok' }, notice) : null,
+        h(Actions, null,
+          h('button', { className: 'pmb-btn pmb-btn-primary', disabled: busy || !form, onClick: save }, busy ? '处理中…' : '保存更新设置'),
+          h('button', { className: 'pmb-btn', disabled: busy, onClick: checkNow }, busy ? '检查中…' : '立即检查'),
+          h('button', { className: 'pmb-btn', disabled: busy, onClick: load }, '刷新'),
+        ),
+        statusCard,
+        settingsCard,
+      )
+    }
+
+    // ---------------------------------------------------------------
+    // 页 4：会话记忆（v0.28）——脏片段本会话屏蔽/删除，防止污染上下文
     // ---------------------------------------------------------------
     function SessionMemoryPanel() {
       const { useState, useEffect, useCallback } = React
@@ -1302,6 +1462,10 @@ window.__ModuleLoader__.load({
         slots.register(
           { name: 'settings.section', id: 'puppet-session', order: 28, label: '会话记忆' },
           () => h(SessionMemoryPanel),
+        )
+        slots.register(
+          { name: 'settings.section', id: 'puppet-update', order: 29, label: '插件更新' },
+          () => h(UpdatePanel),
         )
 
         // 值班台：侧栏面板行（sidebar.panellist 才进侧栏列表、才有固定状态）
