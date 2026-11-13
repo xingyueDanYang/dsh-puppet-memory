@@ -1,4 +1,4 @@
-// 验证 client.js：模块能加载、apply 登记两个独立设置页（记忆备份 / 自动摘要）、
+// 验证 client.js：模块能加载、apply 登记独立设置页（记忆备份 / 自动摘要 / 会话记忆 / 插件更新）、
 // 按钮在页面顶部（先于卡片）、自动摘要设置不再挤在备份页里；无 document 时不炸。
 import fs from "node:fs";
 import vm from "node:vm";
@@ -107,26 +107,31 @@ if (module?.apply) {
 
 check("注入了 settings.section", injected.includes("settings.section"), JSON.stringify(injected));
 const regs = registered.filter((r) => r.spec && r.spec.name === "settings.section");
-check("登记了三个设置页", regs.length === 3, String(regs.length));
+check("登记了四个设置页", regs.length === 4, String(regs.length));
 
 const backupReg = regs.find((r) => r.spec.id === "puppet-backup");
 const autoReg = regs.find((r) => r.spec.id === "puppet-autosummary");
+const updateReg = regs.find((r) => r.spec.id === "puppet-update");
 check("备份页 id = puppet-backup", !!backupReg);
 check("备份页 label = 记忆备份", backupReg?.spec?.label === "记忆备份", backupReg?.spec?.label);
 check("备份页 order = 26", backupReg?.spec?.order === 26, String(backupReg?.spec?.order));
 check("自动摘要页 id = puppet-autosummary", !!autoReg);
 check("自动摘要页 label = 自动摘要", autoReg?.spec?.label === "自动摘要", autoReg?.spec?.label);
 check("自动摘要页 order = 27（紧挨备份页）", autoReg?.spec?.order === 27, String(autoReg?.spec?.order));
-check("三个页面 id 不重复", new Set(regs.map((r) => r.spec.id)).size === regs.length);
+check("四个页面 id 不重复", new Set(regs.map((r) => r.spec.id)).size === regs.length);
 const sessionReg = regs.find((r) => r.spec.id === "puppet-session");
 check("会话记忆页 id = puppet-session", !!sessionReg);
 check("会话记忆页 label = 会话记忆", sessionReg?.spec?.label === "会话记忆", sessionReg?.spec?.label);
 check("会话记忆页 order = 28", sessionReg?.spec?.order === 28, String(sessionReg?.spec?.order));
-check("三页都有渲染组件", typeof backupReg?.comp === "function" && typeof autoReg?.comp === "function" && typeof sessionReg?.comp === "function");
+check("插件更新页 id = puppet-update", !!updateReg);
+check("插件更新页 label = 插件更新", updateReg?.spec?.label === "插件更新", updateReg?.spec?.label);
+check("插件更新页 order = 29", updateReg?.spec?.order === 29, String(updateReg?.spec?.order));
+check("四页都有渲染组件", typeof backupReg?.comp === "function" && typeof autoReg?.comp === "function" && typeof sessionReg?.comp === "function" && typeof updateReg?.comp === "function");
 
 let backupText = [];
 let autoText = [];
 let sessionText = [];
+let updateText = [];
 try {
   const backupTree = backupReg.comp();
   backupText = textOf(backupTree);
@@ -147,9 +152,16 @@ try {
   failed += 1;
   console.log("  ✗ 会话记忆页渲染抛错：" + err.message);
 }
+try {
+  updateText = textOf(updateReg.comp());
+} catch (err) {
+  failed += 1;
+  console.log("  ✗ 插件更新页渲染抛错：" + err.message);
+}
 const sessionJoined = sessionText.join("|");
 const backupJoined = backupText.join("|");
 const autoJoined = autoText.join("|");
+const updateJoined = updateText.join("|");
 
 check("会话记忆页有标题", sessionJoined.includes("会话记忆"));
 check("会话记忆页有会话选择", sessionJoined.includes("当前会话"));
@@ -169,6 +181,12 @@ check("自动摘要页有标题", autoJoined.includes("自动摘要"));
 check("自动摘要页有自己的保存按钮", autoJoined.includes("保存自动摘要设置"));
 check("自动摘要页有刷新按钮", autoJoined.includes("刷新"));
 check("自动摘要页不放备份按钮", !autoJoined.includes("立即备份一次") && !autoJoined.includes("保存设置"));
+
+// ---- 插件更新页：只留版本检查 ----
+check("插件更新页有标题", updateJoined.includes("插件更新"));
+check("插件更新页默认每周说明", updateJoined.includes("默认每周检查一次稳定版"));
+check("插件更新页有手动检查", updateJoined.includes("立即检查"));
+check("插件更新页不放备份按钮", !updateJoined.includes("立即备份一次"));
 
 // ---- 按钮在顶部：先于卡片 ----
 const idxBackupBtn = backupText.findIndex((t) => t === "保存设置");

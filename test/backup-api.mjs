@@ -33,11 +33,12 @@ function ok(name, cond, extra = "") {
 
 // ---------- 假 req / res ----------
 class FakeReq extends EventEmitter {
-  constructor({ method = "GET", url = "/", headers = {} } = {}) {
+  constructor({ method = "GET", url = "/", headers = {}, remoteAddress = "" } = {}) {
     super();
     this.method = method;
     this.url = url;
     this.headers = headers;
+    this.socket = remoteAddress ? { remoteAddress } : undefined;
     this.destroyed = false;
   }
   destroy() {
@@ -100,12 +101,16 @@ const cfgRaw = fs.existsSync(CONFIG) ? fs.readFileSync(CONFIG, "utf8") : null;
 
 try {
   // ---------- 1. hostIsLoopback ----------
-  ok("无 Host 头视为本机", hostIsLoopback({ headers: {} }) === true);
+  ok("无 Host 头拒绝", hostIsLoopback({ headers: {} }) === false);
   ok("127.0.0.1:63624 是本机", hostIsLoopback({ headers: { host: "127.0.0.1:63624" } }) === true);
   ok("localhost:1 是本机", hostIsLoopback({ headers: { host: "localhost:1" } }) === true);
   ok("[::1]:587 是本机", hostIsLoopback({ headers: { host: "[::1]:587" } }) === true);
   ok("evil.example:80 不是本机", hostIsLoopback({ headers: { host: "evil.example:80" } }) === false);
   ok("203.0.113.9:80 不是本机", hostIsLoopback({ headers: { host: "203.0.113.9:80" } }) === false);
+  ok("伪造 Host 但远端不是回环时拒绝", hostIsLoopback({ headers: { host: "127.0.0.1" }, socket: { remoteAddress: "203.0.113.9" } }) === false);
+  ok("IPv4-mapped 回环地址允许", hostIsLoopback({ headers: { host: "127.0.0.1" }, socket: { remoteAddress: "::ffff:127.0.0.1" } }) === true);
+  ok("非本机 Origin 拒绝", hostIsLoopback({ headers: { host: "127.0.0.1", origin: "https://evil.example" } }) === false);
+  ok("本机 Origin 允许", hostIsLoopback({ headers: { host: "127.0.0.1", origin: "http://127.0.0.1:63624" } }) === true);
 
   // ---------- 2. GET status ----------
   const s1 = await call(handler(), { method: "GET", url: "/dsh-puppet-memory-api?action=status", headers: { host: "127.0.0.1:63624" } });

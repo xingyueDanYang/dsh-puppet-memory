@@ -285,18 +285,20 @@ node tools/cloud-backup.mjs
 
 注意：仓库/文档里**不要写真实密码**（README 会随包发到 npm/GitHub）——示例里永远是占位符。
 
-### 设置页（v0.13 起；v0.24 拆成两页）
+### 设置页（v0.13 起；v0.43 起四页）
 
-Web UI → 设置下有两个独立页面（`settings.section` 槽，排在「表情包」后面）：
+Web UI → 设置下有四个独立页面（`settings.section` 槽，排在「表情包」后面）：
 
 | 页面 | 里面有什么 |
 |---|---|
 | **记忆备份**（order 26） | 当前状态、备份策略（自动备份开关 / 最小间隔 / 保留天数 / 备份内容 / 目录）、上下文压缩、待确认事实；**保存 / 立即备份一次 / 刷新 吸在页面顶部**，不用滚到底 |
 | **自动摘要**（order 27） | 自动摘要设置（总开关 / 触发条件 / 保留上限 / 规模限制）+ 已有摘要列表；**保存自动摘要设置 / 刷新 同样在顶部** |
+| **会话记忆**（order 28） | 选最近会话，逐条屏蔽或删除本会话片段，暂停/恢复本会话注入 |
+| **插件更新**（order 29） | 默认每 7 天检查一次 GitHub 稳定版（可改 1–30 天或关闭），支持手动强制检查；失败后 5 分钟允许重试；发现新版只提示并提供 Release 链接，不静默安装 |
 
 拆页原因：原来一页塞了备份、压缩、自动摘要、事实候选，越加越长，设置按钮被挤到最下面。`settings.section` 本身就是「一个 list 条目 = 一个设置页」，所以拆页不需要改壳层、也不需要新路由。
 
-面板和 `memory_backup` / `memory_control` 改的是同一份 `config.json.backup`，没有第二套状态。数据走宿主本机回环接口 `/dsh-puppet-memory-api`（`GET ?action=status|autosummaries|compaction|fact-candidates`、`POST ?action=save|backup|delete-autosummary|accept-fact|reject-fact`，非回环请求一律 403），不经过模型、不进上下文；宿主端逐项校验，非法值整次拒绝、不写半份配置。
+面板和 `memory_backup` / `memory_control` 改的是同一份 `config.json.backup`，没有第二套状态。数据走宿主本机回环接口 `/dsh-puppet-memory-api`（`GET ?action=status|autosummaries|compaction|fact-candidates|update-status`、`POST ?action=save|backup|delete-autosummary|accept-fact|reject-fact|update-settings|check-update`，非回环请求一律 403），不经过模型、不进上下文；宿主端逐项校验，非法值整次拒绝、不写半份配置。更新检查只访问本项目的公开 GitHub Release，结果写入 `state/update-check.json`，不包含会话或记忆内容。
 
 面板里还有一张「**上下文压缩**」卡片（v0.14 起）：累计压缩次数、最近一次时间、最近一次触发来源、自动摘要次数；v0.18 起加「最近压缩记录」列表（时间、手动 `/compact` 还是自动、压掉几条、省了多少 token、摘要模型）。**记录只来自官方 `compaction/*` 会话事件，按 `compactionId` 去重**——重启、会话重放、第三方压缩插件都不影响计数，也不会重复计数（v0.17 之前靠扫描 `compress` 工具调用，重启后 `seenEvents` 清空会把历史再数一遍，已知 bug，v0.18 已移除该路径）。压缩本身由官方 `@deepseek-ai/dsh-compaction-basic` 引擎完成（2026-10-21 之前也可能是 `billion-context` 的 `compress` 工具），木偶记忆**不参与压缩、不改会话历史**。
 
@@ -839,9 +841,10 @@ v0.21 先立**数据模型 + 分区 + 注入出口**，把这三件事变成测�
 node test/smoke.mjs                    # 主冒烟：读写/检索/备份/清理等
 node test/auto-summary-integration.mjs # 自动摘要集成
 node test/auto-summary-retry.mjs       # 思考吃光 tokens 时的预算重试（10 项）
-node test/backup-api.mjs               # 设置页后端：鉴权、校验、备份、dispose（47 项）
+node test/backup-api.mjs               # 设置页后端：鉴权、校验、备份、dispose（53 项）
 node test/backup-mount.mjs             # apply() 里挂路由 / 摘路由
-node test/backup-client.mjs            # 客户端：两个设置页登记、内容拆分、按钮在顶部（vm 模拟浏览器）
+node test/backup-client.mjs            # 客户端：设置页登记、内容拆分、按钮在顶部（vm 模拟浏览器）
+node test/update-check.mjs             # 更新检查：稳定版/资产校验、每周缓存、手动强制、设置/API（24 项）
 node test/compaction-stats.mjs         # 压缩/摘要记账（20 项，测完还原运行态）
 node test/auto-summary-panel.mjs       # 自动摘要面板后端：列出/删除/API（28 项，用临时记忆目录隔离）
 node test/fact-candidates.mjs          # 三期：事实候选提炼/去重/采纳/拒绝 + 面板 API（41 项，临时目录 + 红线断言）
@@ -924,6 +927,7 @@ Copy-Item '<profile 备份目录>\*' '<你的用户名>\.dsh\profiles\<profile>\
 插件自身异常只影响它自己（工具不注册 / 注入为空），宿主启动时会记录错误但继续跑；排查看 `~/.dsh/memory/diag.log`。
 
 ## 版本历史
+- **0.43.0（未发布）**：新增「插件更新」设置页。默认每 7 天在页面打开时检查一次本项目的 GitHub 稳定版，间隔可调 1–30 天或关闭；手动检查跳过缓存，失败后 5 分钟重试。只提示版本与 Release 链接，不静默下载或替换插件，也不上传记忆、会话或配置。
 - **0.42.5（2026-11-12）**：四件跟「回忆质量」有关的改动。
   ①**按日期找记忆**：你说「昨天 / 今天 / 前天 / 前几天」时，`buildRecallInjection` 把时间词翻成日期窗口（**凌晨 5 点前算前一天**，熬夜的不算跨天），按天去 `behavior/diary` 与 relations/user/notes 里筛，事件词用 2 字滑窗并滤掉泛词（解决/问题/记得…），命中单独注一块 `puppet_day`，每天最多 1 条、共 3 行。开关 `config.recall.daySearch=false`、`dayMaxLines`。
   ②**摘要带「依据」**：自动摘要改成固定两段——第一行 `依据：` + ≤60 字（没判断写「依据：无」），第二段才是事实摘要；`依据` 放最前，截断截不到它。
