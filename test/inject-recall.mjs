@@ -38,7 +38,8 @@ try {
   // ---- 命中 relations keyword ----
   const r1 = buildRecallInjection(cfg, "你还记得守夜人的最终条例吗");
   ok("relation 关键词命中 → 出块", r1.includes("<puppet_recall>") && r1.includes("</puppet_recall>"), r1.slice(0, 80));
-  ok("块里带那条要点", r1.includes("小说设定"), r1);
+  // v1.0 标题卡：默认只给标题/标签/id，正文不进块
+  ok("块里带标题卡（不带正文）", r1.includes("守夜人") && r1.includes("#r0000001"), r1);
   ok("块里带 hash 便于回查", r1.includes("#r0000001"));
   ok("块里说明要细节去 search", r1.includes("memory_search"));
 
@@ -52,7 +53,7 @@ try {
 
   // ---- 关键词带括号说明：拆词干也要能命中 ----
   const r4 = buildRecallInjection(cfg, "青鸟那本小说的设定呢");
-  ok("带括号的关键词能命中", r4.includes("关键词带括号说明也要能命中"), r4);
+  ok("带括号的关键词能命中（标题取词干）", r4.includes("青鸟"), r4);
 
   // ---- 不命中：一个字都不加 ----
   ok("完全无关 → 空串", buildRecallInjection(cfg, "今天天气不错") === "");

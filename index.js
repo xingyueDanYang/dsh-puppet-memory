@@ -37,6 +37,9 @@ import zlib from "node:zlib";
 import { createSocial, detectScene, normalizeName, personIdOf, registerSocialTools, sceneLabel, socialConfigDefaults, socialPaths } from "./social.js";
 import { behaviorHint, createLines, lastUserText, lexicalScore, linesConfigDefaults, linesPaths, qualitativeOf, topicTokens } from "./state.js";
 import { createSessionMemory, isSpecialKey, normalizeSessionId, sessionMemoryPaths } from "./sessionmem.js";
+import { createLearn, coreLock, checkAbsurd } from "./learn.js";
+import { createConflictChecker, conflictDefaults } from "./conflict.js";
+import { createLorebook, loreDefaults } from "./lorebook.js";
 import { createSearchIndex, sqliteAvailable, sqliteUnavailableReason } from "./searchindex.js";
 import { bigramsOf, createCuePrompter, selfEchoOf, stripInjected, verdictOf, worthCueing } from "./cueprompt.js";
 import { createRules, formatRuleRow, parseRulesMarkdown, rulesDefaults } from "./rules.js";
@@ -1128,6 +1131,14 @@ function statePrefixOf(entry) {
   const st = stateOf(entry?.state);
   return st ? `〔${STATE_LABELS[st]}〕` : "";
 }
+// v1.0（2026-11-15）：来源标记——"谁说的"要能一眼看出来，不能被检索悄悄升级成"用户说的"。
+const SOURCE_KINDS = ["user_said", "assistant_said", "told", "imagined", "inferred", "tool"];
+const SOURCE_MARK = { assistant_said: "〔我说〕", told: "〔听说〕", imagined: "〔想象〕", inferred: "〔推断〕", tool: "〔工具〕" };
+function sourceMarkOf(entry) {
+  const k = String(entry?.source_kind || "").trim();
+  return SOURCE_MARK[k] || "";
+}
+
 function tagsPrefixOf(entry) {  const tags = Array.isArray(entry?.tags) ? entry.tags.filter(Boolean) : [];
   return `${statePrefixOf(entry)}${tags.length ? `〔${tags.join("·")}〕` : ""}`;
 }
@@ -1378,7 +1389,20 @@ function buildRecallInjection(cfg, userText, { nowMs = Date.now() } = {}) {
     // 收紧（2026-11-10 实跑发现）：单个"长词"（Qwen/DeepSeek 这类）也会被判强命中，属于噪声。
     // 只认"同时命中两个词"为强命中；单命中一律算弱命中。
     const strong = matched.length >= Math.max(1, Number(rec.minStrong) || 2);
-    hits.push({ layer, key: stems[0], brief, matched, strong, hash: entry?.hash ? String(entry.hash) : "" });
+    // v1.0（2026-11-15）标题卡：召回给「标题｜标签｜来源标记」，正文留在库里按需取。
+    const title = String(entry?.keyword || entry?.title || entry?.brief || brief || "").trim();
+    const tagList = Array.isArray(entry?.tags) ? entry.tags.filter(Boolean).slice(0, 3) : [];
+    hits.push({
+      layer,
+      key: stems[0],
+      brief,
+      title: title || brief,
+      tags: tagList,
+      mark: sourceMarkOf(entry),
+      matched,
+      strong,
+      hash: entry?.hash ? String(entry.hash) : "",
+    });
   };
   try {
     for (const e of tailJsonl(PATHS.relations, 200)) {
@@ -1455,14 +1479,19 @@ function buildRecallInjection(cfg, userText, { nowMs = Date.now() } = {}) {
     shown = picked.slice(0, 3);
     weak = [];
   }
+  // v1.0（2026-11-15）：标题卡模式（rec.titleCard=false 可退回旧版整句摘要）
+  const titleCard = rec.titleCard !== false;
   const lineOf = (h) => {
     const why = h.matched && h.matched.length ? `（命中：${h.matched.slice(0, 3).join("、")}）` : "";
-    return `· [${h.layer}] ${h.brief}${h.hash ? ` #${h.hash}` : ""}${why}`;
+    if (!titleCard) return `· [${h.layer}] ${h.brief}${h.hash ? ` #${h.hash}` : ""}${why}`;
+    const tags = h.tags && h.tags.length ? `〔${h.tags.join("·")}〕` : "";
+    const mark = h.mark || "";
+    return `· [${h.layer}] ${mark}${clip(h.title || h.brief, 28)}${tags}${h.hash ? ` #${h.hash}` : ""}${why}`;
   };
   const head = shown.length === picked.length
     ? "以下是按你这句话里的关键词顺手取回的几条记忆（不是全部；要细节用 memory_search）："
     : "以下几条几乎肯定与这句话相关（按关键词命中；要细节用 memory_search）：";
-  const maxLines = Math.max(1, Math.min(6, Number(rec.maxLines) || 3));
+  const maxLines = Math.max(1, Math.min(6, Number(rec.maxLines) || (rec.titleCard === false ? 3 : 4)));
   const body = [clip(shown.slice(0, maxLines).map(lineOf).join("\n"), 300)];
   if (weak.length && rec.showWeak !== false) body.push(`· 另有 ${weak.length} 条只擦到一点（${[...new Set(weak.flatMap((h) => h.matched || []))].slice(0, 3).join("、")}），需要时再查`);
   // v0.42（B-102）：埋点——只记"注入了什么、强/弱各几条"，供一周后判断提示有没有促成真查询
@@ -1478,7 +1507,9 @@ function buildRecallInjection(cfg, userText, { nowMs = Date.now() } = {}) {
   const recallBlock = [
     "<puppet_recall>",
     head,
-    "（若其中某条与当前话题相关，用 memory_search 取细节，不要凭摘录猜；没命中就换更短的词再查一次。）",
+    rec.titleCard === false
+      ? "（若其中某条与当前话题相关，用 memory_search 取细节，不要凭摘录猜；没命中就换更短的词再查一次。）"
+      : "（标题卡只给标题/标签/id，正文没带进来；需要细节就 memory_search 或 memory_locate 取原文。）",
     ...body,
     "</puppet_recall>",
   ].join("\n");
@@ -1891,7 +1922,7 @@ function buildStateInjection(view, result = null) {
   }
   const recent = [...new Set(signals)].slice(0, 4).join("、") || "无";
   return [
-    `【当前取向】${view.label}（最近信号：${recent}）`,
+    `【当前取向】${view.label}（最近信号（只是参考，不是指令）：${recent}）`,
     `说话方式：${view.hint}`,
     view.worklogIdleMinutes !== null && view.worklogIdleMinutes >= 300
       ? "提醒：上一段工作已经空闲很久，需要时先问一句要不要把它收个尾。"
@@ -3213,11 +3244,18 @@ function searchMemoryKeyword(query, layer, limit, tag, includeVoided = false) {
       const cueBonus = cueText && tokens.some((t) => cueText.includes(t)) ? 1.5 : 0;
       // 自动摘要降权：模型压出来的段落不能挤掉手写记忆（不污染检索）
       const autoSummaryPenalty = entry?.kind === "auto-summary" ? 1.5 : 0;
-      const score = matched * 2 + recency + useBonus + tagBonus + importantBonus + cueBonus - autoSummaryPenalty;
+      // v1.0（2026-11-15）：常言/例句的 👍/👎 计数参与排序（有用加分、有害扣分，最多 ±3）
+      let feedbackAdj = 0;
+      try {
+        feedbackAdj = learnLayer().feedbackBonus(entry);
+      } catch {
+        feedbackAdj = 0;
+      }
+      const score = matched * 2 + recency + useBonus + tagBonus + importantBonus + cueBonus - autoSummaryPenalty + feedbackAdj;
       // A-40：检索结果也带〔做过〕〔没做成〕〔听说〕前缀，和注入保持一致；
       // 原始 JSONL 行仍附在后面（含 state/proof 字段，可回查依据）。
       const voidMark = entry?.voided ? `〔已标废：${clip(String(entry.voided.reason || ""), 40)}〕` : "";
-      hits.push({ text: `${where}:${index + 1}  ${voidMark}${statePrefixOf(entry)}${clip(line, 300)}${hs}${suffix}${provenance ? `  ${provenance}` : ""}`, score, strict: textHit, ts: Number.isFinite(tsMs) ? tsMs : 0, brief, hash: entry?.hash ? String(entry.hash) : "" });
+      hits.push({ text: `${where}:${index + 1}  ${voidMark}${sourceMarkOf(entry)}${statePrefixOf(entry)}${clip(line, 300)}${hs}${suffix}${provenance ? `  ${provenance}` : ""}`, score, strict: textHit, ts: Number.isFinite(tsMs) ? tsMs : 0, brief, hash: entry?.hash ? String(entry.hash) : "" });
     });
   }
   if (!tagNeedle && tokens.length) {
@@ -3745,6 +3783,48 @@ let selfSingleton = null;
 function selfLayer() {
   if (!selfSingleton) selfSingleton = createSelfLayer({ memDir: MEM_DIR, log });
   return selfSingleton;
+}
+
+// 学习层（习惯 / 表达反馈 / 主人锁）—— v1.0（2026-11-15）
+let learnSingleton = null;
+function learnLayer() {
+  if (!learnSingleton) {
+    let habitsConfig = {};
+    try {
+      habitsConfig = loadConfig()?.habits || {};
+    } catch {
+      habitsConfig = {};
+    }
+    learnSingleton = createLearn({ dir: MEM_DIR, habitsConfig });
+  }
+  return learnSingleton;
+}
+
+// 冲突核对（v1.0，2026-11-15）：广取候选 + 小模型判读，只查"当前说法 vs 旧记忆"的事实矛盾。
+// 世界书 / 书签（v1.0，2026-11-15）：关键词命中才注入的背景条目
+let loreSingleton = null;
+function loreLayer() {
+  if (!loreSingleton) loreSingleton = createLorebook({ dir: MEM_DIR });
+  return loreSingleton;
+}
+
+let conflictSingleton = null;
+function conflictLayer() {
+  if (!conflictSingleton) {
+    conflictSingleton = createConflictChecker({
+      paths: { sayings: PATHS.sayings },
+      readJsonl,
+      // 总结：自动摘要（kind=auto-summary）+ 这是信息解释最密的第二处
+      listSummaries: () => {
+        try {
+          return listAutoSummaries(60).map((x) => ({ hash: x.hash, text: String(x.text || "") }));
+        } catch {
+          return [];
+        }
+      },
+    });
+  }
+  return conflictSingleton;
 }
 
 const SEARCH_LAYERS = ["behavior", "deep", "array", "user", "memo"];
@@ -5773,6 +5853,9 @@ function mergeIntoEntry(old, incoming, ts, tags) {
 function writeMemory(args) {
   const layer = String(args.layer || "");
   const ts = nowISO();
+  // v1.0（2026-11-15）：来源三档——"用户说的 / 我说的 / 我推断的"要分开，检索时能看见。
+  const sourceKindRaw = String(args.sourceKind || "").trim();
+  const sourceKind = SOURCE_KINDS.includes(sourceKindRaw) ? sourceKindRaw : "";
   // v0.35（B-56）：别名，一次解析，各层共用
   const aliases = aliasesOf(args.aliases);
   // v0.34（B-52）：写入守卫。整段被拒时返回原因，让模型改文案而不是让脏数据进库。
@@ -5815,7 +5898,7 @@ function writeMemory(args) {
     }
     const hash = sha1(`${keyword}|${meaning}`).slice(0, 16);
     const { tags, note: tagsNote } = checkedTags(args.tags);
-    const entry = { kind: "relation", ts, keyword, meaning, links: String(args.links || ""), source: String(args.source || ""), useCount: 0, hash };
+    const entry = { kind: "relation", ts, keyword, meaning, links: String(args.links || ""), source: String(args.source || ""), ...(sourceKind ? { source_kind: sourceKind } : {}), useCount: 0, hash };
     if (aliases.length) entry.aliases = aliases;
     markState(entry);
     if (quote) entry.quote = quote;
@@ -5874,7 +5957,7 @@ function writeMemory(args) {
     const keyword = String(args.keyword || "").trim();
     const hash = sha1(keyword ? `${keyword}|${text}` : text).slice(0, 16);
     const { tags, note: tagsNote } = checkedTags(args.tags);
-    const entry = { kind: "user", ts, keyword, text, hash };
+    const entry = { kind: "user", ts, keyword, text, ...(sourceKind ? { source_kind: sourceKind } : {}), hash };
     if (aliases.length) entry.aliases = aliases;
     markState(entry);
     const userSource = String(args.source || "").trim();
@@ -5917,7 +6000,7 @@ function writeMemory(args) {
       if (rejected) return rejected;
     }
     const { tags, note: tagsNote } = checkedTags(args.tags);
-    const entry = { kind: "memo", ts, text, hash: sha1(text).slice(0, 16) };
+    const entry = { kind: "memo", ts, text, ...(sourceKind ? { source_kind: sourceKind } : {}), hash: sha1(text).slice(0, 16) };
     if (aliases.length) entry.aliases = aliases;
     markState(entry);
     const memoSource = String(args.source || "").trim();
@@ -5948,7 +6031,7 @@ function writeMemory(args) {
       if (rejected) return rejected;
     }
     const { tags, note: tagsNote } = checkedTags(args.tags);
-    const entry = { kind: "note", ts, text, keywords: keywordsOf(text), hash: sha1(text).slice(0, 16) };
+    const entry = { kind: "note", ts, text, keywords: keywordsOf(text), ...(sourceKind ? { source_kind: sourceKind } : {}), hash: sha1(text).slice(0, 16) };
     if (aliases.length) entry.aliases = aliases;
     markState(entry);
     const noteSource = String(args.source || "").trim();
@@ -5986,7 +6069,7 @@ function writeMemory(args) {
     }
     const hash = sha1(`${keyword}|${meaning}`).slice(0, 16);
     const { tags, note: tagsNote } = checkedTags(args.tags);
-    const entry = { kind: "saying", ts, keyword, meaning, source: String(args.source || ""), links: String(args.links || ""), useCount: 0, hash };
+    const entry = { kind: "saying", ts, keyword, meaning, source: String(args.source || ""), links: String(args.links || ""), ...(sourceKind ? { source_kind: sourceKind } : {}), useCount: 0, hash };
     if (aliases.length) entry.aliases = aliases;
     markState(entry);
     if (quote) entry.quote = quote;
@@ -7084,6 +7167,63 @@ function apply(ctx) {
     autoSummaryInFlight.set(sid, task);
   }
 
+  // v1.0（2026-11-15）：压缩后"细节已丢"提示（丹阳：记忆该记的正是被压缩掉、缺细节的那部分）
+  const pendingLostDetail = new Map();
+
+  // v1.0（2026-11-15）：冲突核对——同一句话只查一次（缓存），查不了就静默跳过。
+  const conflictCache = new Map();
+  let conflictProbe = { url: "", at: 0, ok: false }; // 探活结果缓存 30 秒，别每句都试连
+  async function buildConflictBlock(userText, sessionId, cfgLive) {
+    const c = { ...conflictDefaults, ...((cfgLive && cfgLive.conflict) || {}) };
+    if (c.enabled === false) return "";
+    const body = String(userText || "").trim();
+    if (body.length < Math.max(2, Number(c.minUserChars) || 6)) return "";
+    const key = sha1(body);
+    const hit = conflictCache.get(sessionId);
+    if (hit && hit.key === key) return hit.text;
+    let block = "";
+    // 探活（丹阳 2026-11-15：本地小模型平时不跑，临时调来不及）——连不上就跳过，不发请求
+    if (c.baseURL) {
+      const now = Date.now();
+      if (conflictProbe.url !== c.baseURL || now - conflictProbe.at > 30000) {
+        const ok = await conflictLayer().probeReachable(c.baseURL, c.probeMs);
+        conflictProbe = { url: c.baseURL, at: now, ok };
+        diag(`冲突核对探活（${c.baseURL}）：${ok ? "通" : "不通，跳过"}`);
+      }
+      if (!conflictProbe.ok) {
+        conflictCache.set(sessionId, { key, text: "" });
+        return "";
+      }
+    }
+    try {
+      const cands = conflictLayer().pickCandidates(body, c.maxCandidates);
+      if (cands.length) {
+        const prompt = conflictLayer().buildPrompt({ userText: body, candidates: cands });
+        let out = "";
+        if (c.endpoint) {
+          // 本地 OpenAI 兼容服务（桌宠的 llama-server 等）：直接 HTTP，不走 DSH 路由
+          out = await conflictLayer().callLocalEndpoint({
+            endpoint: c.endpoint,
+            model: typeof c.model === "string" ? c.model : "local",
+            prompt,
+            timeoutMs: c.timeoutMs,
+            apiKey: c.apiKey || "",
+          });
+        } else {
+          const caller = createLlmCaller({ session: sessionRefs.get(sessionId) || null, model: typeof c.model === "object" ? c.model : null });
+          if (caller) out = await caller({ prompt, timeoutMs: c.timeoutMs });
+        }
+        const found = conflictLayer().verify(conflictLayer().parse(out), cands);
+        block = conflictLayer().render(found);
+        if (found.length) diag(`冲突核对：${found.length} 条（${found.map((x) => x.hash).join(",")}）`);
+      }
+    } catch (err) {
+      diag(`冲突核对跳过：${err?.message || err}`);
+    }
+    conflictCache.set(sessionId, { key, text: block });
+    return block;
+  }
+
   // 会话登记：不只在 session-start 里做，pre-step / turn-stopping 也兜底，
   // 因为恢复的旧会话（resume）不一定会触发 session-start。
   function ensureSessionRegistered(agent) {
@@ -7153,6 +7293,14 @@ function apply(ctx) {
         const rulesDigest = coreAllowed && core.rulesText ? sha1(core.rulesText) : "";
         const coreDigest = coreAllowed && core.coreText ? sha1(core.coreText) : "";
         const coreStateDigest = coreAllowed && core.stateText ? sha1(core.stateText) : "";
+        const habitsForInject = (() => {
+          try {
+            const rows = learnLayer().payHabits();
+            return rows.length ? rows.map((h) => `${h.text}（连对 ${h.streak || 0}）`).join("；") : "";
+          } catch {
+            return "";
+          }
+        })();
         const rulesForInject = rulesDigest && lastRulesInjected.get(sessionId) !== rulesDigest ? core.rulesText : "";
         const coreText = coreDigest && lastCoreInjected.get(sessionId) !== coreDigest ? core.coreText : "";
         const coreStateForInject = coreStateDigest && lastCoreStateInjected.get(sessionId) !== coreStateDigest ? core.stateText : "";
@@ -7163,8 +7311,8 @@ function apply(ctx) {
         let lineSignal = null;
         let stateText = "";
         try {
-          lineSignal = linesEngine.updateFromMessages(decision.messages);
-          linesView = linesEngine.view();
+          lineSignal = linesEngine.updateFromMessages(decision.messages, { sessionId });
+          linesView = linesEngine.view(undefined, { sessionId });
           if (cfg.lines?.enabled !== false) stateText = buildStateInjection(linesView, lineSignal?.result || null);
         } catch (err) {
           diag(`三线状态更新失败：${err?.message || err}`);
@@ -7180,6 +7328,9 @@ function apply(ctx) {
         let dueText = "";
         let openingText = "";
         let cueText = "";
+        let conflictText = "";
+        let loreText = "";
+        let lostDetailText = "";
         try {
           // v0.42：每轮现读 config.json（几百字节，代价可忽略）——参数改完下一轮就生效，不用重启。
           // 之前 cfg 是启动时加载的，改 recall 阈值/条数必须重启，正是这一点被吐槽"太别扭"。
@@ -7190,6 +7341,34 @@ function apply(ctx) {
             // 他发的话前面常挂着 <system-reminder>（注入块不是他说的），取词/召回前先剥掉
             const userText = stripInjected(lastUserText(decision.messages || []).text);
             recallText = buildRecallInjection(cfgLive, userText);
+            // 冲突核对：只查"当前说法 vs 旧记忆"的事实矛盾；命中才注入一张短卡
+            if (!suppressed.has("conflict")) {
+              conflictText = await buildConflictBlock(userText, sessionId, cfgLive);
+            }
+            // 世界书/书签：关键词命中才带进来（零模型成本）
+            try {
+              const lc = { ...loreDefaults, ...((cfgLive && cfgLive.lore) || {}) };
+              if (lc.enabled !== false && !suppressed.has("lore")) {
+                loreText = loreLayer().render(loreLayer().pick(userText, lc));
+              }
+            } catch (err) {
+              diag(`世界书注入跳过：${err?.message || err}`);
+            }
+            // 压缩过的上下文缺细节：提醒"现在能补就补"，只提醒一次
+            try {
+              const ld = pendingLostDetail.get(sessionId);
+              if (ld) {
+                pendingLostDetail.delete(sessionId);
+                lostDetailText = [
+                  "<puppet_lostdetail>",
+                  `上下文刚被压缩（压掉约 ${ld.items || "若干"} 条），**原文里的细节已经不在上下文里了**：数字、名字、地点、约定、谁说了什么，可能都只剩摘要。`,
+                  "处理：靠摘要答不出来的，不要凭印象补——需要就 memory_search 原文（或 memory_locate 按 hash）；确实长期要用的**事实**，现在用 memory_write 或 memory_lorebook（≤30 条）记下来。",
+                  "</puppet_lostdetail>",
+                ].join("\n");
+              }
+            } catch (err) {
+              diag(`细节提示失败：${err?.message || err}`);
+            }
           }
           // v0.38（B-86）：到期的欠着的事（默认关；一天最多推一条汇总，每条只推一次）
           if (!suppressed.has("due")) dueText = buildDueInjection(cfgLive);
@@ -7377,8 +7556,8 @@ function apply(ctx) {
         } catch (err) {
           diag(`社交档案注入失败：${err?.message || err}`);
         }
-        if (!text && !socialText && !handoffText && !recallText && !dueText && !openingText && !cueText && !rulesForInject && !coreText && !coreStateForInject && !stateForInject && !resetNote) return decision;
-        const digest = sha1(`${text}\u0000${socialText}\u0000${handoffText}\u0000${recallText}\u0000${dueText}${openingText}\u0000${cueText}\u0000${rulesForInject}\u0000${coreText}\u0000${coreStateForInject}\u0000${stateForInject}\u0000${resetNote}`);
+        if (!text && !socialText && !handoffText && !recallText && !conflictText && !loreText && !lostDetailText && !dueText && !openingText && !cueText && !rulesForInject && !habitsForInject && !coreText && !coreStateForInject && !stateForInject && !resetNote) return decision;
+        const digest = sha1(`${text}\u0000${socialText}\u0000${handoffText}\u0000${recallText}\u0000${dueText}${openingText}\u0000${cueText}\u0000${conflictText}\u0000${loreText}\u0000${lostDetailText}\u0000${rulesForInject}\u0000${habitsForInject}\u0000${coreText}\u0000${coreStateForInject}\u0000${stateForInject}\u0000${resetNote}`);
         if (lastInjected.get(sessionId) === digest) {
           if (injectMode === "first-step") injectedOnce.add(sessionId);
           return decision;
@@ -7401,7 +7580,7 @@ function apply(ctx) {
           : null;
         const rulesMessage = rulesForInject
           ? injectionMessage(
-              `<puppet_rules>\n以下是行为规则（behavior/core-rules.md：说话方式 / 红线 / 约定）。只在规则改过或上下文压缩后补一次；已经遵守的规则不必每轮重复念叨，按它做就行。\n${rulesForInject}${core.rulesClipped ? `\n（规则超 ${core.rulesBudget} 字预算，已截断；用 memory_core action=get target=rules 看全文）` : ""}\n</puppet_rules>`,
+              `<puppet_rules>\n以下是行为规则（behavior/core-rules.md：说话方式 / 红线 / 约定）。只在规则改过或上下文压缩后补一次；已经遵守的规则不必每轮重复念叨，按它做就行。\n${rulesForInject}${core.rulesClipped ? `\n（规则超 ${core.rulesBudget} 字预算，已截断；用 memory_core action=get target=rules 看全文）` : ""}${habitsForInject ? `\n【正在养的习惯】${habitsForInject}\n（做到就好，别僵硬；用 memory_learn 管）` : ""}\n</puppet_rules>`,
             )
           : null;
         const coreMessage = coreText
@@ -7424,6 +7603,9 @@ function apply(ctx) {
         const dueMessage = dueText ? injectionMessage(dueText) : null;
         const openingMessage = openingText ? injectionMessage(openingText) : null;
         const cueMessage = cueText ? injectionMessage(cueText) : null;
+        const conflictMessage = conflictText ? injectionMessage(conflictText) : null;
+        const loreMessage = loreText ? injectionMessage(loreText) : null;
+        const lostDetailMessage = lostDetailText ? injectionMessage(lostDetailText) : null;
         // v0.41（B-101）自我层：独立预算，不跟核心卡抢；审计按节奏走（有排队先补，没排队等够 N 段再查）
         let selfText = "";
         try {
@@ -7449,7 +7631,7 @@ ${selfText}
           : null;
         return {
           kind: "enter",
-          messages: [...(decision.messages || []), ...(resetMessage ? [resetMessage] : []), ...(rulesMessage ? [rulesMessage] : []), ...(coreMessage ? [coreMessage] : []), ...(coreStateMessage ? [coreStateMessage] : []), ...(selfMessage ? [selfMessage] : []), ...(stateMessage ? [stateMessage] : []), ...(handoffMessage ? [handoffMessage] : []), ...(recallMessage ? [recallMessage] : []), ...(dueMessage ? [dueMessage] : []), ...(openingMessage ? [openingMessage] : []), ...(cueMessage ? [cueMessage] : []), ...(text ? [injectionMessage(text)] : []), ...(socialMessage ? [socialMessage] : [])],
+          messages: [...(decision.messages || []), ...(resetMessage ? [resetMessage] : []), ...(rulesMessage ? [rulesMessage] : []), ...(coreMessage ? [coreMessage] : []), ...(coreStateMessage ? [coreStateMessage] : []), ...(selfMessage ? [selfMessage] : []), ...(stateMessage ? [stateMessage] : []), ...(handoffMessage ? [handoffMessage] : []), ...(recallMessage ? [recallMessage] : []), ...(dueMessage ? [dueMessage] : []), ...(openingMessage ? [openingMessage] : []), ...(cueMessage ? [cueMessage] : []), ...(conflictMessage ? [conflictMessage] : []), ...(loreMessage ? [loreMessage] : []), ...(lostDetailMessage ? [lostDetailMessage] : []), ...(text ? [injectionMessage(text)] : []), ...(socialMessage ? [socialMessage] : [])],
         };
       } catch (err) {
         log("warn", `pre-step 注入失败：${err?.message || err}`);
@@ -7497,6 +7679,19 @@ ${selfText}
       const cfg = loadConfig();
       if (!isEnabledForSession(cfg, sessionId)) return;
       writeTurnDiary(agent, slice);
+
+      // v1.0（2026-11-15）：习惯自动核对——拿本轮助手回复跑正则，零模型成本
+      try {
+        const turnForHabit = extractTurn(slice);
+        if (turnForHabit?.assistant) {
+          const changed = learnLayer().trackTurnText(turnForHabit.assistant);
+          if (changed?.changed?.length) {
+            diag(`习惯核对：${changed.changed.map((c) => `${c.id}${c.active ? "" : "（毕业）"}连对${c.streak}`).join("，")}`);
+          }
+        }
+      } catch (err) {
+        diag(`习惯核对失败（不影响其它）：${err?.message || err}`);
+      }
     });
   });
 
@@ -7535,6 +7730,10 @@ ${selfText}
           const r = res.record;
           diag(`压缩记录：${r.id} ${r.trigger === "command" ? "手动 /compact" : "自动"}，压掉 ${r.items} 条 / 省 ${r.savedTokens} tokens（${r.provider || "?"}/${r.model || "?"}）session=${sid}`);
           noteCompaction(sid, 1, r.model ? `官方 compaction 引擎（${r.provider}/${r.model}）` : "官方 compaction 引擎（dsh-compaction-basic）");
+          // 压缩会丢细节：记下这次压掉了多少条，下一轮提醒"要留下的事实现在补"
+          try {
+            pendingLostDetail.set(sid, { at: Date.now(), items: Number(r.items) || 0, saved: Number(r.savedTokens) || 0 });
+          } catch {}
           // 视频教训（BV1Anea6UEqu）：压缩会静默丢东西，压完立刻体检三样要紧的还在不在
           try {
             const chk = compactionSelfCheck(sid);
@@ -7612,6 +7811,11 @@ ${selfText}
           note: {
             type: "string",
             description: "备注：跟着条目一起落盘的人类可读说明（不参与检索主键），同时写进 deep/guide.jsonl 索引；写入返回里会给 hash，之后用 memory_locate 按 hash 定位原文",
+          },
+          sourceKind: {
+            type: "string",
+            enum: ["user_said", "assistant_said", "told", "imagined", "inferred", "tool"],
+            description: "来源三档（v1.0）：user_said=用户说的（默认，不标）/ assistant_said=我说的或我承诺的 / told=听别人转述 / imagined=想象或创作 / inferred=我推断的 / tool=工具结果。检索和召回会给非用户来源打标（〔我说〕〔听说〕〔推断〕…），防止「我说的」被当成「用户说的」。",
           },
           tags: {
             type: "array",
@@ -8206,13 +8410,16 @@ ${selfText}
     register({
       name: "memory_core",
       description:
-        "核心记忆拆三个文件（都常驻注入、压缩后自动补回，优先级高于其它记忆）：①behavior/core.md = 不会经常变的内容（称呼约定、用户、能力），600 字预算；②behavior/core-rules.md = 行为规则（说话方式、红线、约定），400 字预算，**只在规则改过或压缩后各注入一次**，状态变化不会把规则再提醒一遍；③behavior/core-state.md = 会变的状态（当前主线、进度、待办），150 字预算。三份分开截断、分开报字数。action=get 读 | set 覆盖写（text，超过硬上限 2×预算会被拒）| append 追加一行 | clear 清空（先归档到 behavior/archive/core*.md）| **reset 一句话复位**（清本会话注入指纹→下一步把三张卡重新注入一次；text 可带一句临时约束，只对本次会话生效、注入一次即弃、不写任何文件）。target=core（默认）| rules | state。不要写成日记或流水账。",
+        "核心记忆拆三个文件（都常驻注入、压缩后自动补回，优先级高于其它记忆）：①behavior/core.md = 不会经常变的内容（称呼约定、用户、能力），600 字预算；②behavior/core-rules.md = 行为规则（说话方式、红线、约定），400 字预算，**只在规则改过或压缩后各注入一次**，状态变化不会把规则再提醒一遍；③behavior/core-state.md = 会变的状态（当前主线、进度、待办），150 字预算。三份分开截断、分开报字数。action=get 读 | set 覆盖写（text，超过硬上限 2×预算会被拒）| append 追加一行 | clear 清空（先归档到 behavior/archive/core*.md）| **reset 一句话复位**（清本会话注入指纹→下一步把三张卡重新注入一次；text 可带一句临时约束，只对本次会话生效、注入一次即弃、不写任何文件）。target=core（默认）| rules | state。不要写成日记或流水账。**主人锁（v1.0）**：以「[主人]」开头的行受保护——set/clear 若删改它们会被拒绝，确需改动要显式带 ownerRelease=true；append 加 owner=true 会把这一行标成主人行。",
       parameters: {
         type: "object",
         properties: {
           action: { type: "string", enum: ["get", "set", "append", "clear", "reset"] },
           target: { type: "string", enum: ["core", "rules", "state"], description: "动哪个文件：core=稳定内容（默认），rules=行为规则（说话/红线/约定），state=当前状态（主线/进度/待办）" },
           text: { type: "string", description: "set=全文覆盖；append=追加一行（不要以 - 开头，会自动处理）；reset=可选的一次性临时约束（只对本次会话生效）" },
+          owner: { type: "boolean", description: "append 用：true = 这一行标成主人行（前面加「[主人]」），以后受保护" },
+          ownerRelease: { type: "boolean", description: "set/clear 用：true = 明确允许改动受保护的主人行（用户当场同意的才用）" },
+          force: { type: "boolean", description: "写入荒诞/危险规则（如「不许吃饭」）时用：默认会被拒，显式 force=true 才写（用户当场要求的才用）" },
         },
       },
       output,
@@ -8256,6 +8463,10 @@ ${selfText}
             return `${label}（${len}/${budget} 字${len > budget ? "，超预算，注入时会截断" : ""}${cadence}）：\n----\n${cur.trim()}\n----`;
           }
           if (action === "clear") {
+            const lockedClear = coreLock.ownerLinesOf(cur);
+            if (lockedClear.length && !args?.ownerRelease) {
+              return `拒绝清空：${label}里有 ${lockedClear.length} 行主人锁（以「[主人]」开头）。要清空请带 ownerRelease=true（用户明确同意后才可）。\n受保护的行：\n${lockedClear.map((l) => "  " + l).join("\n")}`;
+            }
             if (cur.trim()) {
               const dir = PATHS.archive;
               fs.mkdirSync(dir, { recursive: true });
@@ -8269,16 +8480,160 @@ ${selfText}
           if (!body) return action === "append" ? "append 需要 text" : "set 需要 text（要清空用 action=clear）";
           const hardLimit = budget * 2;
           if (action === "append") {
-            const next = cur.trim() ? `${cur.trim()}\n${body}` : body;
+            const absurdAppend = checkAbsurd(body);
+            if (absurdAppend && !args?.force) {
+              return `拒绝写入：这条属于${absurdAppend.reason}，默认规则里不记录这类指令（防止一条玩笑变成长期规则）。\n要真写，带 force=true 重来。\n内容：${body}`;
+            }
+            const appendBody = args?.owner ? coreLock.markOwnerLine(body) : body;
+            const next = cur.trim() ? `${cur.trim()}\n${appendBody}` : appendBody;
             if (next.length > hardLimit) return `太长：追加后 ${next.length} 字，硬上限 ${hardLimit}（预算 ${budget}）。先精简或 action=set 重写。`;
             fs.writeFileSync(file, `${next}\n`, "utf8");
             return `已追加${label}：${next.length}/${budget} 字${next.length > budget ? "（超预算，注入时会截断）" : ""}`;
           }
           if (body.length > hardLimit) return `太长：${body.length} 字，硬上限 ${hardLimit}（预算 ${budget}）。核心卡必须短，请先精简再 set。`;
+          const absurdSet = checkAbsurd(body);
+          if (absurdSet && !args?.force) {
+            return `拒绝写入：新文本里有${absurdSet.reason}。默认规则里不记录这类指令；要真写，带 force=true 重来。`;
+          }
+          const lock = coreLock.checkOwnerLock(cur, body);
+          if (!lock.ok && !args?.ownerRelease) {
+            return `拒绝覆盖：以下主人锁行在新文本里不见了或被改了（共 ${lock.missing.length} 行）。\n${lock.missing.map((l) => "  - " + l).join("\n")}\n要么把它们原样留着，要么带 ownerRelease=true 重试（用户明确同意后才可）。`;
+          }
           fs.writeFileSync(file, `${body}\n`, "utf8");
           return `已写入${label}：${body.length}/${budget} 字${body.length > budget ? "（超预算，注入时会截断）" : ""}`;
         } catch (err) {
           return `核心记忆操作失败：${err?.message || err}`;
+        }
+      },
+    });
+
+    register({
+      name: "memory_learn",
+      description:
+        "学习层（v1.0，2026-11-15）：管两样会变的东西，都不进核心卡。①**习惯**（程序性规则：标点、禁用词、交互小规矩）——action=habit-add 加一条（forbid/require 要带 pattern 正则；note 只记录不追踪）；**自动追踪**：每轮结束拿助手回复跑一遍 pattern，连对 graduateStreak（默认 8）轮自动「毕业退场」腾槽位，反弹自动复活，零模型成本；也可 action=habit-track 手动记一次。②**表达库反馈**：action=feedback kind=helpful|harmful 给某条常言/例句加减分（按 hash 或 keyword 定位），检索时有用加分、有害扣分，累计 3 次负反馈自动停用。habit-list 看清单、habit-stats 看规模、habit-remove 删一条（归档不丢）。",
+      parameters: {
+        type: "object",
+        properties: {
+          action: { type: "string", enum: ["habit-add", "habit-list", "habit-track", "habit-stats", "habit-remove", "feedback"], description: "要做什么" },
+          text: { type: "string", description: "habit-add 用：一句话说清这条习惯（如「句末不加句号」）" },
+          pattern: { type: "string", description: "habit-add 用：用来核对的正则（如 \\u3002$ 表示句末句号）" },
+          mode: { type: "string", enum: ["forbid", "require", "note"], description: "habit-add 用：forbid=命中即违例（默认）/ require=必须命中 / note=只记录不追踪" },
+          id: { type: "string", description: "habit-track / habit-remove 用：习惯 id（可只给前几位）" },
+          ok: { type: "boolean", description: "habit-track 用：这一轮做到没做到" },
+          kind: { type: "string", enum: ["helpful", "harmful"], description: "feedback 用：有用 / 有害" },
+          hash: { type: "string", description: "feedback 用：常言条目 hash（可只给前几位）" },
+          keyword: { type: "string", description: "feedback 用：按常言关键词定位（hash 找不到时用）" },
+          includeInactive: { type: "boolean", description: "habit-list 用：连已毕业/停用的一起列" },
+          force: { type: "boolean", description: "habit-add 用：荒诞/危险习惯（如「不许吃饭」）默认拒收，显式 force=true 才记" },
+          limit: { type: "number", description: "habit-list 用：最多几条，默认 50" },
+        },
+        required: ["action"],
+      },
+      output,
+      async execute(args) {
+        try {
+          const engine = learnLayer();
+          const action = String(args?.action || "");
+          if (action === "habit-add") {
+            const absurd = checkAbsurd(args?.text);
+            if (absurd && !args?.force) {
+              return `拒绝：这条属于${absurd.reason}，默认不记这类习惯（防止玩笑变成长期规则）。要真记，带 force=true 重来。`;
+            }
+            const r = engine.addHabit({ text: args?.text, pattern: args?.pattern, mode: args?.mode });
+            if (!r.ok) return `加不了：${r.error}`;
+            return `已加习惯 ${r.row.id}〔${r.row.mode}${r.row.pattern ? `｜${r.row.pattern}` : ""}〕：${r.row.text}\n（每轮自动核对；连对 ${engine.config.graduateStreak} 轮毕业，反弹复活）`;
+          }
+          if (action === "habit-list") {
+            const rows = engine.listHabits({ includeInactive: args?.includeInactive, limit: args?.limit });
+            if (!rows.length) return "还没有习惯（用 action=habit-add 加一条）。";
+            return [
+              `习惯 ${rows.filter((r) => r.active).length} 条活跃 / 共 ${rows.length}：`,
+              ...rows.map((r) => `${r.id}〔${r.active ? "活跃" : "已毕业"}·${r.mode}·连对 ${r.streak || 0}/最好 ${r.best || 0}·违例 ${r.violations || 0}〕${r.text}${r.pattern ? `  ← /${r.pattern}/` : ""}`),
+            ].join("\n");
+          }
+          if (action === "habit-track") {
+            const r = engine.trackHabit(String(args?.id || ""), args?.ok !== false);
+            if (!r.ok) return `记不了：${r.error}`;
+            return `已记：${r.row.id} 连对 ${r.row.streak}${r.row.active ? "" : "（已毕业退场）"}，违例 ${r.row.violations || 0}。`;
+          }
+          if (action === "habit-stats") {
+            const st = engine.habitStats();
+            return `习惯：活跃 ${st.active} 条、已毕业 ${st.graduated} 条、共 ${st.total} 条，最高连对 ${st.topStreak}。\n文件：${st.file}`;
+          }
+          if (action === "habit-remove") {
+            const r = engine.removeHabit(String(args?.id || ""));
+            if (!r.ok) return `删不了：${r.error}`;
+            return `已删除并归档：${r.row.id} ${r.row.text}`;
+          }
+          if (action === "feedback") {
+            const r = engine.feedback({ hash: args?.hash, keyword: args?.keyword, kind: args?.kind });
+            if (!r.ok) return `记不了：${r.error}`;
+            const row = r.row;
+            return `已记 ${args?.kind}：「${row.keyword || row.hash}」👍${row.helpful || 0} / 👎${row.harmful || 0}${row.ended ? `（已停用：${row.endedReason}）` : ""}`;
+          }
+          return "未知 action（habit-add / habit-list / habit-track / habit-stats / habit-remove / feedback）。";
+        } catch (err) {
+          return `学习层操作失败：${err?.message || err}`;
+        }
+      },
+    });
+
+    register({
+      name: "memory_lorebook",
+      description:
+        "世界书 / 书签（v1.0，2026-11-15）：专门放**额外记录的背景资料**（名词解释、设定、前情、人物关系细节），**关键词命中才进上下文**，不命中的一条都不带——像小说软件的世界书、书里的书签。**它不是规则**（注入块里写死了这句）：只用来把话说准，不改变行为准则。零模型成本。action=add（name+content，keywords 逗号分隔；或 always=true 常驻）| update（按 id 改）| remove（按 id）| list | check（给 text 试命中，看会注入哪几条）。",
+      parameters: {
+        type: "object",
+        properties: {
+          action: { type: "string", enum: ["add", "update", "remove", "list", "check"] },
+          id: { type: "string", description: "update / remove 用：条目 id（可只给前几位）" },
+          name: { type: "string", description: "add 必填：这条书签叫什么（如「静远联邦·布鲁日」）" },
+          keywords: { type: "string", description: "触发关键词，逗号/顿号分隔（如「布鲁日,联邦首城」）；always=true 时可省" },
+          content: { type: "string", description: "add 必填：要记的内容（一两句话说清；不要写规则）" },
+          priority: { type: "number", description: "0-100，默认 50；预算不够时高优先级先留" },
+          always: { type: "boolean", description: "常驻（每轮都带）；只给全书级常识用，别滥用" },
+          enabled: { type: "boolean", description: "update 用：true 恢复 / false 停用" },
+          text: { type: "string", description: "check 用：拿一段话试命中" },
+          includeDisabled: { type: "boolean", description: "list 用：连停用的也列" },
+        },
+        required: ["action"],
+      },
+      output,
+      async execute(args) {
+        try {
+          ensureDirs();
+          const lb = loreLayer();
+          const action = String(args?.action || "list");
+          if (action === "add") {
+            const r = lb.add({ name: args?.name, keywords: args?.keywords, content: args?.content, priority: args?.priority, always: args?.always });
+            if (!r.ok) return `加不了：${r.error}`;
+            return `已加书签 ${r.row.id}「${r.row.name}」${r.row.always ? "（常驻）" : `（关键词：${r.row.keywords.join("、")}）`}，优先级 ${r.row.priority}。\n文件：${lb.files.lore}`;
+          }
+          if (action === "update") {
+            const r = lb.update({ id: args?.id, name: args?.name, keywords: args?.keywords, content: args?.content, priority: args?.priority, always: args?.always, enabled: args?.enabled });
+            if (!r.ok) return `改不了：${r.error}`;
+            return `已更新「${r.row.name}」：${r.row.enabled === false ? "已停用" : "生效中"}${r.row.always ? "／常驻" : ""}。`;
+          }
+          if (action === "remove") {
+            const r = lb.remove({ id: args?.id });
+            if (!r.ok) return `删不了：${r.error}`;
+            return `已删 ${r.removed} 条（物理删除；想留痕就改用 update enabled=false）。`;
+          }
+          if (action === "check") {
+            const txt = String(args?.text || "");
+            if (!txt.trim()) return "check 需要 text。";
+            const picked = lb.pick(txt, loreDefaults);
+            if (!picked.length) return `没有条目命中「${clip(txt, 20)}」。`;
+            return [`命中 ${picked.length} 条（会注入）：`, ...picked.map((h) => `- 「${h.r.name}」${clip(h.r.content, 60)}${h.matched.length ? `（命中：${h.matched.join("、")}）` : "（常驻）"}`)].join("\n");
+          }
+          const list = lb.list({ includeDisabled: args?.includeDisabled });
+          if (!list.length) return "世界书是空的（用 action=add 加一条）。";
+          return [
+            `世界书 ${list.length} 条：`,
+            ...list.map((r) => `${r.id}「${r.name}」${r.always ? "常驻" : `关键词：${(r.keywords || []).join("、")}`}｜优先级 ${r.priority}${r.enabled === false ? "｜已停用" : ""}`),
+          ].join("\n");
+        } catch (err) {
+          return `世界书操作失败：${err?.message || err}`;
         }
       },
     });

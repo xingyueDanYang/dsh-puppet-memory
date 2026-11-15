@@ -432,6 +432,8 @@ export function createLines({ memDir, getConfig = () => null, now = () => Date.n
       save(state);
       appendJsonl(paths.history, {
         ts: new Date(atMs).toISOString(),
+        // issue #1：历史行必须带会话号，否则 <puppet_state> 会把别的会话的原话带进来
+        sessionId: options.sessionId ? String(options.sessionId) : "",
         text: clean.slice(0, 200),
         before,
         after: LINES.reduce((acc, k) => ({ ...acc, [k]: state[k] }), {}),
@@ -489,18 +491,24 @@ export function createLines({ memDir, getConfig = () => null, now = () => Date.n
     if (rows.length > max) writeJsonl(paths.history, rows.slice(-max));
   }
 
-  function view(atMs = now()) {
+  function view(atMs = now(), options = {}) {
     const cfg = cfgOf();
     decayTo(atMs);
     const state = load();
     const norm = normalizeVector(state);
     const q = qualitativeOf(norm);
+    // issue #1：只取本会话的历史；没有会话号的历史行（旧数据）不进注入
+    const sessionId = options && options.sessionId ? String(options.sessionId) : "";
+    const historyRows = readJsonl(paths.history).filter((r) => {
+      if (!sessionId) return false;
+      return String(r.sessionId || "") === sessionId;
+    });
     return {
       enabled: cfg.enabled !== false,
       primary: q.primary,
       label: q.label,
       hint: behaviorHint(q.primary),
-      recentSignals: readJsonl(paths.history)
+      recentSignals: historyRows
         .slice(-5)
         .reverse()
         .map((r) => ({ ts: r.ts, text: String(r.text || "").slice(0, 40), primary: r.primary, hits: r.hits })),
@@ -554,13 +562,13 @@ export function createLines({ memDir, getConfig = () => null, now = () => Date.n
   }
 
   // 从 pre-step 的完整消息列表里找「最后一条真实用户消息」，吃一次信号。
-  function updateFromMessages(messages = []) {
+  function updateFromMessages(messages = [], options = {}) {
     const found = lastUserText(messages);
     if (!found.text) return { text: "", skipped: found.skipped };
     const key = found.key;
     const state = load();
     if (state.lastMessageKey === key) return { text: "", skipped: "same-message" };
-    const result = update(found.text);
+    const result = update(found.text, { sessionId: options.sessionId });
     const after = load();
     after.lastMessageKey = key;
     save(after);
