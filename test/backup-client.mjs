@@ -1,5 +1,5 @@
-// 验证 client.js：模块能加载、apply 登记两个独立设置页（记忆备份 / 自动摘要）、
-// 按钮在页面顶部（先于卡片）、自动摘要设置不再挤在备份页里；无 document 时不炸。
+// 验证 client.js：模块能加载、apply 登记一个合并后的「记忆设置」页（顶部 tab：记忆/功能开关/备份/自动摘要/会话）、
+// 每个 tab 的内容与按钮顺序；无 document 时不炸。
 import fs from "node:fs";
 import vm from "node:vm";
 
@@ -24,6 +24,8 @@ function register(spec, comp) {
   return () => {};
 }
 
+// 2026-11-18：合并页靠 tab state 切内容；留一个钩子让组件第一次 useState 取到指定 tab，才能逐 tab 渲染。
+let presetState = null;
 // 假 React：函数组件直接渲染成树，方便断言「页面上有什么、顺序怎样」
 const fakeReact = {
   createElement: (type, props, ...children) => {
@@ -32,7 +34,14 @@ const fakeReact = {
     return { type, props: merged };
   },
   Fragment: "Fragment",
-  useState: (init) => [typeof init === "function" ? init() : init, () => {}],
+  useState: (init) => {
+    let v = typeof init === "function" ? init() : init;
+    if (presetState !== null) {
+      v = presetState;
+      presetState = null;
+    }
+    return [v, () => {}];
+  },
   useEffect: () => {},
   useCallback: (fn) => fn,
   useMemo: (fn) => fn(),
@@ -107,46 +116,33 @@ if (module?.apply) {
 
 check("注入了 settings.section", injected.includes("settings.section"), JSON.stringify(injected));
 const regs = registered.filter((r) => r.spec && r.spec.name === "settings.section");
-check("登记了三个设置页", regs.length === 3, String(regs.length));
+// 2026-11-18：v1.1 起四个设置页合并成一页（顶部 tab 切换），设置列表里只占一行；
+// 老断言（三个独立 settings.section + order 26/27/28）对的是合并前的结构，行为已不存在。
+check("只登记一个合并后的设置页", regs.length === 1, String(regs.length));
+const settingsReg = regs[0];
+check("设置页 id = puppet-memory", settingsReg?.spec?.id === "puppet-memory", settingsReg?.spec?.id);
+check("设置页 label = 记忆设置", settingsReg?.spec?.label === "记忆设置", settingsReg?.spec?.label);
+check("设置页 order = 25", settingsReg?.spec?.order === 25, String(settingsReg?.spec?.order));
+check("设置页有渲染组件", typeof settingsReg?.comp === "function");
 
-const backupReg = regs.find((r) => r.spec.id === "puppet-backup");
-const autoReg = regs.find((r) => r.spec.id === "puppet-autosummary");
-check("备份页 id = puppet-backup", !!backupReg);
-check("备份页 label = 记忆备份", backupReg?.spec?.label === "记忆备份", backupReg?.spec?.label);
-check("备份页 order = 26", backupReg?.spec?.order === 26, String(backupReg?.spec?.order));
-check("自动摘要页 id = puppet-autosummary", !!autoReg);
-check("自动摘要页 label = 自动摘要", autoReg?.spec?.label === "自动摘要", autoReg?.spec?.label);
-check("自动摘要页 order = 27（紧挨备份页）", autoReg?.spec?.order === 27, String(autoReg?.spec?.order));
-check("三个页面 id 不重复", new Set(regs.map((r) => r.spec.id)).size === regs.length);
-const sessionReg = regs.find((r) => r.spec.id === "puppet-session");
-check("会话记忆页 id = puppet-session", !!sessionReg);
-check("会话记忆页 label = 会话记忆", sessionReg?.spec?.label === "会话记忆", sessionReg?.spec?.label);
-check("会话记忆页 order = 28", sessionReg?.spec?.order === 28, String(sessionReg?.spec?.order));
-check("三页都有渲染组件", typeof backupReg?.comp === "function" && typeof autoReg?.comp === "function" && typeof sessionReg?.comp === "function");
+// 2026-11-18：合并页一次只渲染当前 tab；用 renderTab 指定 tab 再取扁平文本。
+const renderTab = (tab) => {
+  presetState = tab;
+  try {
+    return textOf(settingsReg.comp());
+  } catch (err) {
+    failed += 1;
+    console.log(`  ✗ ${tab} 页渲染抛错：` + err.message);
+    return [];
+  }
+};
 
-let backupText = [];
-let autoText = [];
-let sessionText = [];
-try {
-  const backupTree = backupReg.comp();
-  backupText = textOf(backupTree);
-} catch (err) {
-  failed += 1;
-  console.log("  ✗ 备份页渲染抛错：" + err.message);
-}
-try {
-  const autoTree = autoReg.comp();
-  autoText = textOf(autoTree);
-} catch (err) {
-  failed += 1;
-  console.log("  ✗ 自动摘要页渲染抛错：" + err.message);
-}
-try {
-  sessionText = textOf(sessionReg.comp());
-} catch (err) {
-  failed += 1;
-  console.log("  ✗ 会话记忆页渲染抛错：" + err.message);
-}
+const tabJoined = renderTab("features").join("|");
+check("合并页五个 tab 都在", ["记忆", "功能开关", "备份", "自动摘要", "会话记忆"].every((t) => tabJoined.includes(t)), tabJoined.slice(0, 160));
+
+const backupText = renderTab("backup");
+const autoText = renderTab("summary");
+const sessionText = renderTab("session");
 const sessionJoined = sessionText.join("|");
 const backupJoined = backupText.join("|");
 const autoJoined = autoText.join("|");

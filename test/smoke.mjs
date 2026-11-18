@@ -1,6 +1,9 @@
 // 冒烟测试：用临时记忆目录跑一遍写入 / 注入 / 检索 / 统计 / 备份。
 // 运行：node test/smoke.mjs
 import fs from "node:fs";
+
+// 测试要覆盖完整工具集：长尾默认是排队的，这里显式要全量。
+process.env.MEMORY_TOOLSET = "full";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";

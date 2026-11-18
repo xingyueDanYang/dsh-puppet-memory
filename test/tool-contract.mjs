@@ -1,6 +1,9 @@
 // v0.37.1：工具注册契约——每个工具都必须声明 output（schema + render），否则真实宿主会拒收
 // 这个测试是补 A-86 的：memory_rules 曾因漏 `output` 在 0.37.0 里注册失败，文档写了、工具却没有。
 import fs from "node:fs";
+
+// 测试要覆盖完整工具集：长尾默认是排队的，这里显式要全量。
+process.env.MEMORY_TOOLSET = "full";
 import os from "node:os";
 import path from "node:path";
 
@@ -72,7 +75,7 @@ try {
 
   ok("apply 不抛异常", applyErr === "", applyErr);
   ok("没有被宿主契约拒收的工具", rejected.length === 0, rejected.map((r) => `${r.name}: ${r.why}`).join("；"));
-  ok("注册数量 = 30（0.41 加了 memory_self）", tools.length === 30, `实际 ${tools.length}`);
+  ok("注册数量 = 36（0.45 加了 memory_people）", tools.length === 36, `实际 ${tools.length}`);
 
   const names = tools.map((t) => t.name);
   for (const want of ["memory_rules", "memory_grants", "memory_opening", "memory_search", "memory_write", "memory_handoff", "memory_archive_session"]) {

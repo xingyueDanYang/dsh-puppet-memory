@@ -1,5 +1,8 @@
 // v0.28 会话记忆管理：屏蔽表 / 本会话片段列表 / 删除归档 / 注入过滤 / pre-step 端到端
 import fs from "node:fs";
+
+// 测试要覆盖完整工具集：长尾默认是排队的，这里显式要全量。
+process.env.MEMORY_TOOLSET = "full";
 import path from "node:path";
 import os from "node:os";
 
@@ -90,17 +93,20 @@ try {
   ok("apply() 不抛异常", !applyErr, applyErr);
   ok("memory_forget 工具已注册", tools.some((t) => t.name === "memory_forget"));
 
-  const session = { header: { id: "sess-e2e", origin: "web" }, snapshotEvents: () => [], events: [] };
+  const mkSession = (id) => ({ header: { id, origin: "web" }, snapshotEvents: () => [], events: [] });
   const preStep = handlers.get("agent/pre-step")?.[0];
-  const run = async (txt) => {
+  const run = async (session, txt) => {
     const d = await preStep({ agent: { session } }, async () => ({ kind: "enter", messages: [{ id: `u-${txt}`, role: "user", content: [{ type: "text", text: txt }] }] }));
     return (d?.messages || []).map((m) => (Array.isArray(m.content) ? m.content.map((b) => b.text || "").join("") : String(m.content || ""))).join("\n");
   };
-  const before = await run("你好");
+  const before = await run(mkSession("sess-e2e"), "你好");
   ok("未屏蔽时有核心卡", before.includes("<puppet_core>"));
   const mem2 = createSessionMemory({ memDir: TMP });
   mem2.suppress("sess-e2e", ["core", "rel-bad"]);
-  const after = await run("随便说一句不一样的话");
+  // 2026-11-18：v1.6 起补充层只在 turn<=1 或距上次 ≥8 轮时检查——老写法在第二步验「屏蔽」，
+  // 测到的其实是节奏（第二步本来就不补关系）。所以换成一个新会话，在它的第一步上验屏蔽。
+  mem2.suppress("sess-e2e-2", ["core", "rel-bad"]);
+  const after = await run(mkSession("sess-e2e-2"), "随便说一句不一样的话");
   ok("屏蔽后核心卡不注入", !after.includes("<puppet_core>"), after.slice(0, 120));
   ok("屏蔽的条目也不注入", after.includes("好关系") && !after.includes("脏关系"));
 

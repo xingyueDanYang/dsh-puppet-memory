@@ -6,6 +6,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+// 2026-11-18：0.44.0 起工具集默认按需（只有 10 个常驻），memory_cue 在长尾里；测试要全套就显式声明。
+process.env.MEMORY_TOOLSET = "full";
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-cue-inject-"));
 process.env.DSH_MEMORY_DIR = TMP;
 for (const d of ["behavior", "behavior/diary", "deep", "deep/workbook", "array", "state"]) {
@@ -28,7 +30,9 @@ write("config.json", [
   }),
 ]);
 write("behavior/persona.md", ["# 人设", "- 称呼：雪风"]);
-write("behavior/relations.jsonl", [J({ kind: "relation", ts: new Date().toISOString(), keyword: "邮件", meaning: "他的邮件被批过两次", hash: "aaaa1111bbbb2222" })]);
+// 2026-11-18：v1.9 起取词器只是「兜底」——世界书/圈子/常言/回忆任一命中就不再取词。
+// 这里的关系条目只用来给 verify 阶段按 hash 回原文，关键词故意不撞测试话术，否则先命中 <puppet_recall> 就没 cue 可测了。
+write("behavior/relations.jsonl", [J({ kind: "relation", ts: new Date().toISOString(), keyword: "体检", meaning: "他上周去做了体检", hash: "aaaa1111bbbb2222" })]);
 write("deep/important.jsonl", [
   J({ id: "imp-1", topic: "邮件被批两次", refs: ["aaaa1111bbbb2222"], evidence: "10-21 他说邮件被批了两次", count: 1, fails: 0, state: "active" }),
 ]);
@@ -274,6 +278,8 @@ try {
       .map((m) => (Array.isArray(m.content) ? m.content.map((b) => b.text || "").join("") : String(m.content || "")))
       .join("\n");
   };
+  // 2026-11-18：上一段「不对」已经给同一个 hash 写了一条记错；这里按条数比，才验得到「反对本身不写记错表」。
+  const misBefore = readJsonl("deep/misrecall.jsonl").length;
   const cueTurn = await run3("邮件那件事后来怎么样了");
   ok("第三会话：先取到回忆", cueTurn.includes("<puppet_cue>"), cueTurn.slice(0, 100));
   const objectedTurn = await run3("不是这个");
@@ -288,7 +294,8 @@ try {
   const evFiles = fs.existsSync(evDir) ? fs.readdirSync(evDir).filter((f) => /^\d{4}-\d{2}\.jsonl$/.test(f)) : [];
   const evRows = evFiles.flatMap((f) => readJsonl(path.join("deep", "recall-events", f)));
   ok("反对记进了事件表", evRows.some((e) => e.verdict === "objected"), JSON.stringify(evRows.map((e) => e.verdict)));
-  ok("反对没写进记错表", !readJsonl("deep/misrecall.jsonl").some((r) => r.hash === (evRows.find((e) => e.verdict === "objected") || {}).hash));
+  // 2026-11-18：同一个 hash 上一段已被「不对」写进记错表，按 hash 存在性判会把旧账算到这次头上；改成前后条数不变。
+  ok("反对没写进记错表", readJsonl("deep/misrecall.jsonl").length === misBefore, String(readJsonl("deep/misrecall.jsonl").length) + " vs " + String(misBefore));
 
   // ---- 关掉开关 → 不注入
   fs.writeFileSync(

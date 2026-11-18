@@ -185,11 +185,24 @@ export function qualitativeOf(normalized) {
   return { primary: first, label: `${LINE_LABEL[first]}优先` };
 }
 
+// v0.43.1（2026-11-18）：「工具的触发绑定状态，不同工具用的方向不一样」——
+// 每条线除了说话方式，还带一句「这段时间哪种工具是对的方向」。它只是方向提示，
+// 不改工具集（工具集是启动时定的，热加载做不到）。
+const TOOL_DIRECTIONS = {
+  work: "工具方向：改文件、跑命令、查数据这类推进用的。",
+  companion: "工具方向：表情包、记忆检索这类陪着用的；别上重型工具。",
+  learning: "工具方向：检索、查证、梗百科这类补依据用的。",
+};
 export function behaviorHint(primary) {
-  if (primary === "companion") return "先接住情绪，别急着给方案；任务类话题可以放后面。";
-  if (primary === "work") return "先把事情推进到位，别绕；情绪类话题简短接住就行。";
-  if (primary === "learning") return "多给依据和出处，说清楚不确定的地方；别只给结论。";
-  return "按话题走，工作就推进、情绪就先接。";
+  const base = (() => {
+    if (primary === "companion") return "先接住情绪，别急着给方案；任务类话题可以放后面。";
+    if (primary === "work") return "先把事情推进到位，别绕；情绪类话题简短接住就行。";
+    if (primary === "learning") return "多给依据和出处，说清楚不确定的地方；别只给结论。";
+    return "按话题走，工作就推进、情绪就先接。";
+  })();
+  const dir = TOOL_DIRECTIONS[primary]
+    || (LINE_LABEL[primary] ? `工具方向：${LINE_LABEL[primary]}相关的；没配工具就手动 tune 或先开对应插件。` : "");
+  return dir ? `${base} ${dir}` : base;
 }
 
 /**
@@ -197,6 +210,21 @@ export function behaviorHint(primary) {
  * 没有用户消息、或全是插件自己注入的，返回 { text: "", skipped }。
  * v0.37（B-84）：抽成独立函数，给「事件触发取记忆」复用；判定逻辑与 updateFromMessages 内联版一致。
  */
+/**
+ * v0.44.1：把框架自己塞进来的噪声从「用户发言」里剥掉。
+ * 之前 <system-reminder> / <puppet_xxx> / [Plugin context …] / [梗百科…] 会被当成用户说的话，
+ * 于是三线状态每步都在变、注入指纹跟着抖，PTC 下一步一次重复注入。
+ */
+export function stripFrameworkNoise(text) {
+  let t = String(text || "");
+  t = t.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, " ");
+  t = t.replace(/<puppet_[a-z_]+>[\s\S]*?<\/puppet_[a-z_]+>/gi, " ");
+  t = t.replace(/\[Plugin context from[^\]]*\][\s\S]*?(?=\n\n|$)/gi, " ");
+  t = t.replace(/\[梗百科[^\]]*\][\s\S]*?(?=\n\n|$)/gi, " ");
+  t = t.replace(/^\s*\[[^\]]{0,40}\][\s\S]*$/m, (m) => (/^\s*\[\S/.test(m) ? m : m));
+  return t.replace(/\s+/g, " ").trim();
+}
+
 export function lastUserText(messages = []) {
   const list = Array.isArray(messages) ? messages : [];
   for (let i = list.length - 1; i >= 0; i -= 1) {
@@ -210,11 +238,36 @@ export function lastUserText(messages = []) {
       : Array.isArray(m.content)
         ? m.content.map((b) => (b && b.type === "text" ? b.text || "" : "")).join("\n")
         : "";
-    if (!String(text || "").trim()) continue;
+    const clean = stripFrameworkNoise(text);
+    if (!clean) continue; // 剥完只剩框架噪声，就不算用户发言
     const key = String(m.id || "") || crypto.createHash("sha1").update(`${text}`).digest("hex").slice(0, 12);
-    return { text, key };
+    return { text: clean, key };
   }
   return { text: "", skipped: "no-user-message" };
+}
+
+// v0.43.1（2026-11-18 丹阳：「三线是三种范围不是三种了，得能自己改」）：
+// 允许在 config 里加自定义线——不给词表就只能手动 tune，不会假装能自动识别。
+// 写法（~/.dsh/memory/config.json）：
+//   "state": { "lines": { "defs": { "novel": { "label": "小说", "terms": [["写小说",1.0],["章节",0.8]] } } } }
+let appliedLineSig = "";
+export function applyLineSet(linesCfg) {
+  const defs = (linesCfg && linesCfg.defs) || {};
+  const sig = JSON.stringify(defs);
+  if (sig === appliedLineSig) return;
+  appliedLineSig = sig;
+  for (const [id, def] of Object.entries(defs)) {
+    const key = String(id || "").trim();
+    if (!key) continue;
+    if (!LINES.includes(key)) LINES.push(key);
+    LINE_LABEL[key] = String((def && def.label) || key).slice(0, 12);
+    const terms = Array.isArray(def && def.terms) ? def.terms : [];
+    LINE_TERMS[key] = terms
+      .map((t) => (Array.isArray(t) ? [String(t[0] || ""), Number(t[1]) || 0.6] : [String(t || ""), 0.6]))
+      .filter(([term]) => term);
+    if (!(key in DEFAULT_LINES.baseline)) DEFAULT_LINES.baseline[key] = Number(def && def.baseline) || 0.2;
+    if (!(key in DEFAULT_LINES.halfLifeMinutes)) DEFAULT_LINES.halfLifeMinutes[key] = Number(def && def.halfLifeMinutes) || 60;
+  }
 }
 
 export function createLines({ memDir, getConfig = () => null, now = () => Date.now() } = {}) {
@@ -223,7 +276,9 @@ export function createLines({ memDir, getConfig = () => null, now = () => Date.n
 
   const cfgOf = () => {
     const cfg = getConfig();
-    return { ...JSON.parse(JSON.stringify(DEFAULT_LINES)), ...((cfg && cfg.lines) || {}) };
+    const lines = (cfg && cfg.lines) || {};
+    applyLineSet(lines); // 自定义线：先把线表挂上，后续 normalize / 关键词识别都按新表走
+    return { ...JSON.parse(JSON.stringify(DEFAULT_LINES)), ...lines, baseline: { ...DEFAULT_LINES.baseline, ...(lines.baseline || {}) }, halfLifeMinutes: { ...DEFAULT_LINES.halfLifeMinutes, ...(lines.halfLifeMinutes || {}) } };
   };
 
   function ensure() {
@@ -591,4 +646,25 @@ export function createLines({ memDir, getConfig = () => null, now = () => Date.n
     anchors,
     findAnchor,
   };
+}
+
+/**
+ * v0.44.1：取最后一条「有正文的助手输出」当注入门牌。
+ * PTC 下一次用户回合里会跑好几个程序，但助手正文只出一次——用它当门，
+ * 同一次输出内的后续步骤就不再重复注入。
+ */
+export function lastAssistantTextId(messages = []) {
+  const list = Array.isArray(messages) ? messages : [];
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    const m = list[i];
+    if (!m || m.role !== "assistant") continue;
+    const text = typeof m.content === "string"
+      ? m.content
+      : Array.isArray(m.content)
+        ? m.content.map((b) => (b && b.type === "text" ? b.text || "" : "")).join("")
+        : "";
+    if (!String(text || "").trim()) continue;
+    return String(m.id || "") || crypto.createHash("sha1").update(String(text)).digest("hex").slice(0, 12);
+  }
+  return "";
 }

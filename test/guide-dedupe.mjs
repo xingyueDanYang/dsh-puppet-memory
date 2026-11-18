@@ -46,7 +46,8 @@ const mod = await import(new URL("../index.js", import.meta.url).href);
 let pass = 0;
 const fails = [];
 const ok = (name, cond, extra = "") => (cond ? (pass += 1) : fails.push(name + (extra ? `（${extra}）` : "")));
-const countHash = (out, h) => (String(out).match(new RegExp('"hash":"' + h, "g")) || []).length;
+// 2026-11-18：v0.43.1 起命中行只渲染正文 + `#hash`，不再贴整行 JSONL；改为数 `#hash`（`\b` 防止前缀误配）。
+const countHash = (out, h) => (String(out).match(new RegExp("#" + h + "\\b", "g")) || []).length;
 
 try {
   // ① 同一条目多条 guide 行 → 只出现一次
@@ -68,7 +69,8 @@ try {
   const out5 = String(mod.searchMemory("越界指针 别读", { layers: ["all"], limit: 5 }));
   ok("越界指针不读外部文件", !out5.includes("evil.jsonl:") && out5.length > 0, out5.slice(0, 80));
 
-  ok("命中数不超过 limit", String(mod.searchMemory("木偶记忆", { layers: ["all"], limit: 1 })).split(NL).filter((l) => l.includes('"hash":"' + H1)).length <= 1);
+  ok("命中数不超过 limit", String(mod.searchMemory("木偶记忆", { layers: ["all"], limit: 1 })).split(NL).filter((l) => l.includes("#" + H1)).length <= 1);
+  // 2026-11-18：同上——输出里没有原始 JSONL 了，按 #hash 认条目。
 } catch (err) {
   fails.push(`异常：${err?.stack || err}`);
 }

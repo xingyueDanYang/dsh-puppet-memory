@@ -52,6 +52,7 @@ window.__ModuleLoader__.load({
       '.pmb-input-wide{width:min(100%,380px)}',
       '.pmb-btn{padding:6px 14px;border-radius:8px;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);cursor:pointer;font-size:13px}',
       '.pmb-btn:disabled{opacity:.5;cursor:default}',
+      '.pmb-btn-on{border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-brand-primary)}',
       '.pmb-btn-primary{background:var(--dsw-alias-button-primary-fill);border-color:var(--dsw-alias-button-primary-fill);color:var(--dsw-alias-label-primary-foreground)}',
       '.pmb-btn-primary:hover:not(:disabled){background:var(--dsw-alias-button-primary-hover)}',
       '.pmb-note{font-size:12px;padding:8px 10px;border-radius:8px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary)}',
@@ -172,6 +173,10 @@ window.__ModuleLoader__.load({
         configFile: c.configFile !== false,
         sessions: c.sessions !== false,
         dir: typeof c.dir === 'string' ? c.dir : '',
+        workEnabled: c.workEnabled === true,
+        workDir: typeof c.workDir === 'string' ? c.workDir : '',
+        workKeepArchives: Number(c.workKeepArchives) || 10,
+        workMaxGB: Math.round((Number(c.workMaxBytes) || 20 * 1024 ** 3) / 1024 ** 3),
       }
     }
 
@@ -205,6 +210,272 @@ window.__ModuleLoader__.load({
     // ---------------------------------------------------------------
     // 页 1：自动摘要（独立设置页）
     // ---------------------------------------------------------------
+    // v1.1（2026-11-16）：一页四面——功能 / 备份 / 摘要 / 会话。以前是四个独立设置页，太多。
+    // 记忆设置（总览）：从值班台搬过来，并把三张卡的账列全
+    function OverviewPanel() {
+      const { useState, useEffect, useCallback } = React
+      const [data, setData] = useState(null)
+      const [error, setError] = useState('')
+      // 注意：hooks 必须在任何 early return 之前——放下面会让首次渲染和后续渲染的 hook 数量不一致，整页白屏
+      const [editing, setEditing] = useState(null)
+      const [editDraft, setEditDraft] = useState({ label: '', date: '', lunar: '', note: '' })
+      const [showAllOpening, setShowAllOpening] = useState(false)
+
+      const load = useCallback(async () => {
+        setError('')
+        try {
+          const res = await callApi('overview')
+          if (!res || res.ok !== true) throw new Error((res && res.error) || '读取失败')
+          setData(res)
+        } catch (err) {
+          setError(err && err.message ? err.message : String(err))
+        }
+      }, [])
+
+      useEffect(() => {
+        load()
+      }, [load])
+
+      if (error) return h('div', { className: 'pmb' }, h('div', { className: 'pmb-error' }, error))
+      if (!data) return h('div', { className: 'pmb' }, h('div', { className: 'pmb-hint' }, '读取中…'))
+
+      const startEdit = (i, r) => {
+        setEditing(i)
+        setEditDraft({ label: r.label || '', date: r.date || '', lunar: r.lunar || '', note: r.note || '' })
+      }
+      const saveOpening = async (i) => {
+        const res = await callApi('opening-update', { index: i, ...editDraft })
+        if (res && res.ok === true) { setEditing(null); setData(res) } else { setError((res && res.error) || '保存失败') }
+      }
+      const removeOpening = async (i) => {
+        if (typeof window !== 'undefined' && !window.confirm('删除这条？删了就没了。')) return
+        const res = await callApi('opening-delete', { index: i })
+        if (res && res.ok === true) setData(res); else setError((res && res.error) || '删除失败')
+      }
+      const cards = data.cards || []
+      const counts = data.counts || {}
+      const backup = data.backup || {}
+      return h('div', { className: 'pmb' },
+        h('div', { className: 'pmb-title' }, '记忆'),
+        h('div', { className: 'pmb-hint' }, '这台机器上的记忆现在长什么样。三张常驻卡的额度、各层条目数、压缩与备份的状态都在这儿。'),
+        h('div', { className: 'pmb-card' },
+          h('div', { className: 'pmb-title' }, '常驻卡'),
+          h('div', { className: 'pmb-grid' },
+            cards.map((c) => h('div', { key: c.id, className: 'pmb-kv' },
+              h('div', { className: 'pmb-k' }, c.label),
+              h('div', { className: 'pmb-v' }, c.chars + ' / ' + c.budget + ' 字'),
+            )),
+          ),
+        ),
+        h('div', { className: 'pmb-card' },
+          h('div', { className: 'pmb-title' }, '条目'),
+          h('div', { className: 'pmb-grid' },
+            h('div', { className: 'pmb-kv' }, h('div', { className: 'pmb-k' }, '关系'), h('div', { className: 'pmb-v' }, String(counts.relations || 0))),
+            h('div', { className: 'pmb-kv' }, h('div', { className: 'pmb-k' }, '用户档案'), h('div', { className: 'pmb-v' }, String(counts.user || 0))),
+            h('div', { className: 'pmb-kv' }, h('div', { className: 'pmb-k' }, '便签'), h('div', { className: 'pmb-v' }, String(counts.memo || 0))),
+            h('div', { className: 'pmb-kv' }, h('div', { className: 'pmb-k' }, '笔记'), h('div', { className: 'pmb-v' }, String(counts.notes || 0))),
+            h('div', { className: 'pmb-kv' }, h('div', { className: 'pmb-k' }, '常言'), h('div', { className: 'pmb-v' }, String(counts.sayings || 0))),
+          ),
+        ),
+        h('div', { className: 'pmb-card' },
+          h('div', { className: 'pmb-title' }, '开幕表'),
+          (data.opening && data.opening.length)
+            ? (() => {
+                // 近的排前面：有日期的按日期升序，农历放最后；最多显示 10 条，其余折叠
+                const raw = data.opening.map((r, i) => ({ ...r, _i: i }))
+                const sorted = raw.slice().sort((a, b) => {
+                  const da = a.date || '9999-12-31'
+                  const db = b.date || '9999-12-31'
+                  return da < db ? -1 : da > db ? 1 : a._i - b._i
+                })
+                const visible = showAllOpening ? sorted : sorted.slice(0, 10)
+                // 一条占一整行（不用 pmb-grid 的两列，否则窄屏下日期和按钮会被挤到第二行）
+                return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 8 } },
+                  visible.map((r) => (editing === r._i
+                  ? h('div', { key: r._i, className: 'pmb-kv', style: { flexDirection: 'column', alignItems: 'stretch', gap: 6 } },
+                      h('input', { className: 'pmb-in', value: editDraft.label, placeholder: '名字', onChange: (e) => setEditDraft({ ...editDraft, label: e.target.value }) }),
+                      h('input', { className: 'pmb-in', value: editDraft.date, placeholder: '日期 YYYY-MM-DD', onChange: (e) => setEditDraft({ ...editDraft, date: e.target.value }) }),
+                      h('input', { className: 'pmb-in', value: editDraft.lunar, placeholder: '农历 MM-DD（可空）', onChange: (e) => setEditDraft({ ...editDraft, lunar: e.target.value }) }),
+                      h('input', { className: 'pmb-in', value: editDraft.note, placeholder: '备注（可空）', onChange: (e) => setEditDraft({ ...editDraft, note: e.target.value }) }),
+                      h('div', { style: { display: 'flex', gap: 8 } },
+                        h('button', { className: 'pmb-btn pmb-btn-on', onClick: () => saveOpening(r._i) }, '保存'),
+                        h('button', { className: 'pmb-btn', onClick: () => setEditing(null) }, '取消'),
+                      ),
+                    )
+                  : h('div', { key: r._i, className: 'pmb-kv', style: { flexDirection: 'row', flexWrap: 'nowrap', alignItems: 'center' } },
+                      h('div', { className: 'pmb-k', style: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, r.label + (r.repeat === 'yearly' ? '（每年）' : '')),
+                      h('div', { className: 'pmb-v', style: { flex: '0 0 auto' } }, r.date || (r.lunar ? '农历 ' + r.lunar : '')),
+                      h('div', { style: { display: 'flex', gap: 6, flex: '0 0 auto' } },
+                        h('button', { className: 'pmb-btn', onClick: () => startEdit(r._i, r) }, '编辑'),
+                        h('button', { className: 'pmb-btn', onClick: () => removeOpening(r._i) }, '删除'),
+                      ),
+                    ))),
+                  sorted.length > 10
+                    ? h('button', { className: 'pmb-btn', onClick: () => setShowAllOpening(!showAllOpening) },
+                        showAllOpening ? '收起' : `展开全部（${sorted.length} 条）`)
+                    : null,
+                )
+              })()
+            : h('div', { className: 'pmb-hint' }, '表是空的（用 memory_opening add 加一条特殊日子）。'),
+          h('div', { className: 'pmb-sub' }, '每天第一次打开时读一次；到点提醒一次。'),
+        ),
+        h('div', { className: 'pmb-card' },
+          h('div', { className: 'pmb-title' }, '压缩与备份'),
+          h('div', { className: 'pmb-grid' },
+            h('div', { className: 'pmb-kv' }, h('div', { className: 'pmb-k' }, '累计压缩'), h('div', { className: 'pmb-v' }, String(data.compactions || 0) + ' 次')),
+            h('div', { className: 'pmb-kv' }, h('div', { className: 'pmb-k' }, '上次压缩'), h('div', { className: 'pmb-v' }, data.lastCompactionAt ? fmtLocal(data.lastCompactionAt) : '（还没触发过）')),
+            h('div', { className: 'pmb-kv' }, h('div', { className: 'pmb-k' }, '最近备份'), h('div', { className: 'pmb-v' }, backup.lastAt ? fmtLocal(backup.lastAt) : '（还没备份）')),
+            h('div', { className: 'pmb-kv' }, h('div', { className: 'pmb-k' }, '保留'), h('div', { className: 'pmb-v' }, (backup.keepDays || '-') + ' 天')),
+          ),
+          h('div', { className: 'pmb-sub' }, '数据目录：' + (data.dir || '') + (backup.dir ? '　｜　备份：' + backup.dir : '')),
+        ),
+      )
+    }
+
+    function MemorySettingsPanel() {
+      const { useState } = React
+      const [tab, setTab] = useState('features')
+      const tabs = [
+        ['overview', '记忆'],
+        ['features', '功能开关'],
+        ['backup', '备份'],
+        ['summary', '自动摘要'],
+        ['session', '会话记忆'],
+      ]
+      const body = tab === 'overview' ? h(OverviewPanel)
+        : tab === 'features' ? h(FeaturesPanel)
+        : tab === 'backup' ? h(BackupPanel)
+        : tab === 'summary' ? h(AutoSummaryPanel)
+        : h(SessionMemoryPanel)
+      return h('div', { className: 'pmb' },
+        h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', borderBottom: '1px solid var(--dsw-alias-border-l1)', paddingBottom: 8 } },
+          tabs.map(([id, label]) => h('button', {
+            key: id,
+            className: tab === id ? 'pmb-btn pmb-btn-on' : 'pmb-btn',
+            onClick: () => setTab(id),
+          }, label)),
+        ),
+        body,
+      )
+    }
+
+    // 时间提示的开关（v1.3）：插件自己的钩子，零模型；放在「功能开关」页底部
+    function NowHintCard() {
+      const { useState, useEffect, useCallback } = React
+      const [cfg, setCfg] = useState(null)
+      const [error, setError] = useState('')
+
+      const load = useCallback(async () => {
+        try {
+          const res = await callApi('now')
+          if (res && res.ok === true) setCfg({ mode: res.mode, gapMinutes: res.gapMinutes })
+          else setError((res && res.error) || '读取失败')
+        } catch (err) {
+          setError(err && err.message ? err.message : String(err))
+        }
+      }, [])
+      useEffect(() => { load() }, [load])
+
+      const save = async (patch) => {
+        const next = { ...(cfg || {}), ...patch }
+        setCfg(next)
+        const res = await callApi('now', next)
+        if (res && res.ok === true) setCfg({ mode: res.mode, gapMinutes: res.gapMinutes })
+        else setError((res && res.error) || '保存失败')
+      }
+
+      return h('div', { className: 'pmb-card' },
+        h('div', { className: 'pmb-title' }, '时间提示'),
+        h('div', { className: 'pmb-hint' }, '插件自己的钩子，零模型成本。一次只触发一次；两个条件都没满足，就完全不注入时间。'),
+        error ? h('div', { className: 'pmb-error' }, error) : null,
+        h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' } },
+          h('select', {
+            className: 'pmb-in',
+            value: (cfg || {}).mode || 'gap',
+            onChange: (e) => save({ mode: e.target.value }),
+          },
+            h('option', { value: 'gap' }, '隔久了才给（默认）'),
+            h('option', { value: 'recall' }, '只有翻出旧回忆时才给'),
+            h('option', { value: 'both' }, '两种都算（隔久 或 回忆，任一满足给一次）'),
+            h('option', { value: 'off' }, '关闭（都不给，这一轮不注入时间）'),
+          ),
+          h('span', { className: 'pmb-sub' }, '间隔'),
+          h('input', {
+            className: 'pmb-in', type: 'number', min: 1, max: 1440,
+            style: { width: 72 },
+            value: (cfg || {}).gapMinutes || 10,
+            onChange: (e) => save({ gapMinutes: Number(e.target.value) || 10 }),
+          }),
+          h('span', { className: 'pmb-sub' }, '分钟'),
+        ),
+      )
+    }
+
+    function FeaturesPanel() {
+      const { useState, useEffect, useCallback } = React
+      const [items, setItems] = useState(null)
+      const [busy, setBusy] = useState(false)
+      const [error, setError] = useState('')
+      const [notice, setNotice] = useState('')
+
+      const load = useCallback(async () => {
+        setBusy(true)
+        setError('')
+        try {
+          const res = await callApi('features')
+          if (!res || res.ok !== true) throw new Error((res && res.error) || '读取失败')
+          setItems(res.items || [])
+        } catch (err) {
+          setError(err && err.message ? err.message : String(err))
+        } finally {
+          setBusy(false)
+        }
+      }, [])
+
+      useEffect(() => {
+        load()
+      }, [load])
+
+      const toggle = async (item) => {
+        setBusy(true)
+        setError('')
+        setNotice('')
+        try {
+          const res = await callApi('save-feature', { id: item.id, enabled: !item.enabled })
+          if (!res || res.ok !== true) throw new Error((res && res.error) || '保存失败')
+          setItems(res.items || [])
+          setNotice(`「${item.label}」已${item.enabled ? '关闭' : '打开'}，下一轮生效。`)
+        } catch (err) {
+          setError(err && err.message ? err.message : String(err))
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      return h('div', { className: 'pmb' },
+        h('div', { className: 'pmb-title' }, '功能开关'),
+        h('div', { className: 'pmb-hint' }, '这里是插件的全部可选功能。用不上的关着，用得上的打开——每个人的用法不一样，不用全开；默认关的也列出来，不列出来就容易一直忘着。'),
+        error ? h('div', { className: 'pmb-error' }, error) : null,
+        notice ? h('div', { className: 'pmb-hint' }, notice) : null,
+        items === null
+          ? h('div', { className: 'pmb-hint' }, '读取中…')
+          : h('div', { className: 'pmb-list' },
+              items.map((item) => h('div', { key: item.id, className: 'pmb-row' },
+                h('div', { style: { flex: 1 } },
+                  h('div', { className: 'pmb-k' }, item.label),
+                  h('div', { className: 'pmb-hint' }, item.desc),
+                ),
+                h('button', {
+                  className: item.enabled ? 'pmb-btn pmb-btn-on' : 'pmb-btn',
+                  disabled: busy,
+                  onClick: () => toggle(item),
+                }, item.enabled ? '已开启' : '已关闭'),
+              )),
+            ),
+        h(NowHintCard),
+      )
+    }
+
     function AutoSummaryPanel() {
       const { useState, useEffect, useCallback } = React
       const [summaries, setSummaries] = useState(null)
@@ -549,7 +820,24 @@ window.__ModuleLoader__.load({
               h(Check, { checked: form.sessions, disabled: busy, text: '原始会话日志', onChange: (v) => patch('sessions', v) }),
             ),
             h(Row, { label: '备份目录' }, h('input', { className: 'pmb-input pmb-input-wide', type: 'text', value: form.dir, disabled: busy, spellCheck: false, onChange: (ev) => patch('dir', ev.target.value) }), h('span', { className: 'pmb-sub' }, '必须绝对路径；留空则用默认 F:\\dsh-memory-backup。')),
-            h(NOTE, null, '深层记忆与图片/音频资产始终会备份；「行为记忆」是 relations / user / memo / notes / diary / sources / persona。'),
+            h(Row, { label: '工作文件' },
+              h(Check, { checked: form.workEnabled, disabled: busy, text: form.workEnabled ? '开（一并复制进快照的 work/）' : '关（默认，不影响任何东西）', onChange: (v) => patch('workEnabled', v) }),
+            ),
+            form.workEnabled
+              ? h(Row, { label: '工作文件目录' },
+                  h('input', { className: 'pmb-input pmb-input-wide', type: 'text', value: form.workDir, disabled: busy, spellCheck: false, placeholder: '例如 F:\\工作导出（绝对路径）', onChange: (ev) => patch('workDir', ev.target.value) }),
+                  h('span', { className: 'pmb-sub' }, '整个目录原样复制；不进记忆库、不参与检索，只在快照旁留一份原文。'),
+                )
+              : null,
+            form.workEnabled
+              ? h(Row, { label: '工作文件额度' },
+                  h('input', { className: 'pmb-input', type: 'number', min: 1, max: 100, step: 1, value: String(form.workKeepArchives), disabled: busy, onChange: (ev) => patch('workKeepArchives', ev.target.value) }),
+                  h('span', { className: 'pmb-sub' }, '份；单独存 work-<时间>/，自己轮转。'),
+                  h('input', { className: 'pmb-input', type: 'number', min: 1, max: 500, step: 1, value: String(form.workMaxGB), disabled: busy, onChange: (ev) => patch('workMaxGB', ev.target.value) }),
+                  h('span', { className: 'pmb-sub' }, 'GB 上限（默认 20）。'),
+                )
+              : null,
+            h(NOTE, null, '深层记忆与图片/音频资产始终会备份；「行为记忆」是 relations / user / memo / notes / diary / sources / persona。工作文件默认关，**只随手动备份走、不进每日快照轮转**（GB 级也扛得住，默认上限 20GB，超了整体跳过、不做半份备份）。'),
           )
         : null
 
@@ -1152,7 +1440,6 @@ window.__ModuleLoader__.load({
 
       const qq = (data && data.qq) || {}
       const bili = (data && data.bili) || {}
-      const mem = (data && data.memory) || {}
       const quota = qq.quota || {}
 
       return h('div', { className: 'pmb-page' },
@@ -1160,7 +1447,7 @@ window.__ModuleLoader__.load({
         h('div', { className: 'pmb' },
         h('div', { className: 'pmb-head' },
           h('div', { className: 'pmb-title' }, '值班台'),
-          h('div', { className: 'pmb-sub' }, '一屏看三样心跳：QQ 观察器 / B站值班 / 记忆。每 30 秒自动刷新。'),
+          h('div', { className: 'pmb-sub' }, '两样心跳：QQ 观察器 / B站值班。记忆的去设置页「记忆设置」看。每 30 秒自动刷新。'),
         ),
         error ? h('div', { className: 'pmb-err' }, error) : null,
         h('div', { className: 'pmb-actions' },
@@ -1180,13 +1467,6 @@ window.__ModuleLoader__.load({
           ['最近报告', bili.lastReport ? (bili.lastReport.file + '（' + bili.lastReport.ago + '）') : '（还没跑过）'],
           ['最近日志', bili.lastLog ? String(bili.lastLog).slice(0, 90) : '（暂无）'],
         ], '报告在 ~/.dsh/bili-duty/out/'),
-        card('记忆', [
-          ['版本', mem.version || '?'],
-          ['核心卡', (mem.coreChars || 0) + ' 字'],
-          ['关系/用户/便签/笔记', (mem.relations || 0) + ' / ' + (mem.user || 0) + ' / ' + (mem.memo || 0) + ' / ' + (mem.notes || 0)],
-          ['累计压缩', (mem.compactions || 0) + ' 次' + (mem.lastCompactionAt ? ('（最近 ' + fmtLocal(mem.lastCompactionAt) + '）') : '')],
-          ['压缩后自检', mem.compactionCheck ? (mem.compactionCheck.ok ? '通过' : '未通过') : '（还没触发过）'],
-        ], '数据在 ~/.dsh/memory，纯文本'),
         qw ? h('div', { className: 'pmb-card' },
           h('div', { className: 'pmb-title' }, '省 token（观察器设置）'),
           h('div', { className: 'pmb-grid' },
@@ -1276,6 +1556,94 @@ window.__ModuleLoader__.load({
         row(mine.pinned ? '值班台：收进「更多」' : '值班台：固定到侧栏', togglePin))
     }
 
+    // ---------------------------------------------------------------
+    // v0.46.0：插件更新（只查不装）
+    // 设置项只有两个：开关 + 间隔；其余都是展示。点「立即检查」才联网。
+    // ---------------------------------------------------------------
+    function UpdatePanel() {
+      const { useState, useEffect, useCallback } = React
+      const [data, setData] = useState(null)
+      const [busy, setBusy] = useState(false)
+      const [error, setError] = useState('')
+
+      const load = useCallback(async () => {
+        try {
+          const res = await callApi('update-state')
+          if (!res || res.ok !== true) throw new Error((res && res.error) || '读取失败')
+          setData(res)
+        } catch (err) {
+          setError(err && err.message ? err.message : String(err))
+        }
+      }, [])
+
+      useEffect(() => { load() }, [load])
+
+      const save = async (patch) => {
+        setError('')
+        const res = await callApi('update-configure', patch)
+        if (res && res.ok === true) setData(res)
+        else setError((res && res.error) || '保存失败')
+      }
+
+      const checkNow = async () => {
+        setBusy(true)
+        setError('')
+        try {
+          const res = await callApi('update-check', { force: true })
+          if (res) setData(res)
+          if (!res || res.ok !== true) setError((res && (res.error || res.message)) || '检查失败')
+        } catch (err) {
+          setError(err && err.message ? err.message : String(err))
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      if (error && !data) return h('div', { className: 'pmb' }, h('div', { className: 'pmb-error' }, error))
+      if (!data) return h('div', { className: 'pmb' }, h('div', { className: 'pmb-hint' }, '读取中…'))
+
+      const latest = data.latest
+      const status = data.hasUpdate
+        ? '有新版本 ' + latest.version
+        : (latest ? '已是最新' : '还没查过')
+      const name = 'pmb-update'
+      return h('div', { className: 'pmb', id: name },
+        h('div', { className: 'pmb-title' }, '插件更新'),
+        h('div', { className: 'pmb-hint' }, '只查 GitHub 上的稳定版，只显示版本号和链接；不会下载、也不会替换插件。'),
+        h('div', { className: 'pmb-card' },
+          h(Row, { label: '当前版本' }, h('div', null, data.currentVersion || '(未读到)')),
+          h(Row, { label: '最新版' }, h('div', null,
+            status,
+            latest && latest.url
+              ? h('a', { href: latest.url, target: '_blank', rel: 'noreferrer', style: { marginLeft: '8px' } }, '打开 Release')
+              : null,
+          )),
+          h(Row, { label: '自动检查' },
+            h('button', {
+              type: 'button', className: 'pmb-btn',
+              onClick: () => save({ enabled: data.enabled !== true }),
+            }, data.enabled === true ? '开' : '关'),
+            h('span', { className: 'pmb-hint' }, '每'),
+            h('select', {
+              className: 'pmb-input', value: String(data.intervalDays || 7),
+              onChange: (e) => save({ intervalDays: Number(e.target.value) }),
+            }, [1, 3, 7, 14, 30].map((d) => h('option', { key: d, value: String(d) }, d + ' 天'))),
+            h('span', { className: 'pmb-hint' }, '查一次'),
+          ),
+          h(Row, { label: '上次检查' },
+            h('div', null, data.lastCheckedAt ? relTime(data.lastCheckedAt) : '还没查过'),
+            data.nextCheckAt ? h('span', { className: 'pmb-hint', style: { marginLeft: '8px' } }, '（下次约 ' + fmtLocal(data.nextCheckAt) + '）') : null,
+          ),
+          data.lastError ? h(Row, { label: '上次错误' }, h('div', { className: 'pmb-error' }, data.lastError)) : null,
+          h('div', { className: 'pmb-actions' },
+            h('button', { type: 'button', className: 'pmb-btn', disabled: busy, onClick: checkNow },
+              busy ? '检查中…' : '立即检查'),
+            h('span', { className: 'pmb-hint' }, '检查完只看结果，装不装由你决定。'),
+          ),
+        ),
+        error ? h('div', { className: 'pmb-error' }, error) : null,
+      )
+    }
     function apply(ctx) {
       if (typeof document !== 'undefined') {
         const style = document.createElement('style')
@@ -1290,18 +1658,16 @@ window.__ModuleLoader__.load({
       if (slots === undefined || slots === null) return
       slots.inject('settings.section', () => {
         // 两个独立设置页：一个页面一个 list 条目，互不挤在一起
+        // v1.1：四个页面合并成一页（顶部 tab 切换），设置列表里只占一行
         slots.register(
-          { name: 'settings.section', id: 'puppet-backup', order: 26, label: '记忆备份' },
-          () => h(BackupPanel),
+          { name: 'settings.section', id: 'puppet-memory', order: 25, label: '记忆设置' },
+          () => h(MemorySettingsPanel),
         )
+
+        // v0.46.0：插件更新单独一页——它跟记忆数据无关，不该挤进「记忆设置」
         slots.register(
-          { name: 'settings.section', id: 'puppet-autosummary', order: 27, label: '自动摘要' },
-          () => h(AutoSummaryPanel),
-        )
-        // v0.28：脏记忆的会话级隔离——屏蔽只影响本会话注入，删除只动本会话片段（先归档）
-        slots.register(
-          { name: 'settings.section', id: 'puppet-session', order: 28, label: '会话记忆' },
-          () => h(SessionMemoryPanel),
+          { name: 'settings.section', id: 'puppet-update', order: 28, label: '插件更新' },
+          () => h(UpdatePanel),
         )
 
         // 值班台：侧栏面板行（sidebar.panellist 才进侧栏列表、才有固定状态）

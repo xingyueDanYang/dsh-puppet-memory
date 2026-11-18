@@ -2,6 +2,8 @@
 // 用假 ctx（on/get/tools/agentDefaultModel）+ 假 llm 服务跑 apply()，验证钩子接线、
 // 模型路由解析、流式文本解析、写盘与幂等。运行：node test/auto-summary-integration.mjs
 import fs from "node:fs";
+
+process.env.MEMORY_TOOLSET = "full";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";

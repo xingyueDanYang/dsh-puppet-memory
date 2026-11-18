@@ -37,11 +37,18 @@ const STOP_CHARS = new Set(
 );
 
 /** 从用户句子里解析日期窗口；同时返回剥掉时间词后的文本 */
-export function parseDaySpans(userText, nowMs = Date.now()) {
+// v1.9（2026-11-17 丹阳）：人会记错日子——第一次没命中就放宽，最多放宽三轮。
+//   level 1：按原词（昨天=昨天）
+//   level 2：前后各放宽一天（昨天→前天/今天）
+//   level 3：再放宽（昨天→大前天…明天）
+// 「上个月」第一轮只看上月，第二轮把本月也算进来。
+export function parseDaySpans(userText, nowMs = Date.now(), level = 1) {
   const raw = String(userText || "");
   const base = effectiveDayStart(nowMs);
   const offsets = new Set();
   let stripped = raw;
+  let wantPrevMonth = false;
+  let wantThisMonth = false;
   for (const t of TERMS) {
     t.re.lastIndex = 0;
     if (!t.re.test(stripped)) continue;
@@ -49,14 +56,38 @@ export function parseDaySpans(userText, nowMs = Date.now()) {
     stripped = stripped.replace(t.re, " ");
     t.re.lastIndex = 0;
   }
-  if (!offsets.size) return { spans: [], stripped };
-  const spans = [...offsets]
+  // 月度词（单独处理：按自然月切）
+  if (/上个月|上月/.test(stripped)) {
+    wantPrevMonth = true;
+    stripped = stripped.replace(/上个月|上月/g, " ");
+  }
+  if (/这个月|本月/.test(stripped)) {
+    wantThisMonth = true;
+    stripped = stripped.replace(/这个月|本月/g, " ");
+  }
+  if (!offsets.size && !wantPrevMonth && !wantThisMonth) return { spans: [], stripped };
+  const lv = Math.max(1, Math.min(3, Number(level) || 1));
+  const spread = lv === 1 ? 0 : lv === 2 ? 1 : 2;
+  const wide = new Set();
+  for (const o of offsets) {
+    for (let k = -spread; k <= spread; k += 1) {
+      const x = o + k;
+      if (x >= -1 && x <= 40) wide.add(x); // 允许"明天"一点余量，太远没意义
+    }
+  }
+  const spans = [...wide]
     .sort((a, b) => a - b)
     .map((off) => {
       const start = base - off * DAY_MS;
       return { off, start, end: start + DAY_MS };
     });
-  return { spans, stripped };
+  // 月度窗口
+  const now = new Date(base);
+  const thisMonthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+  const prevMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1).getTime();
+  if (wantPrevMonth) spans.push({ off: -1, start: prevMonthStart, end: thisMonthStart, label: "上个月" });
+  if (wantThisMonth || (wantPrevMonth && lv >= 2)) spans.push({ off: -1, start: thisMonthStart, end: thisMonthStart + 31 * DAY_MS, label: "这个月" });
+  return { spans, stripped, level: lv };
 }
 
 /**

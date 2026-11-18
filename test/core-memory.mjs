@@ -1,6 +1,8 @@
 // v0.22 核心记忆（behavior/core.md）：每步注入 + 预算扣减 + 压缩后自动补回 + memory_core 工具
 // 用临时 DSH_MEMORY_DIR + 假宿主跑真 apply()，不碰真实记忆。
 import fs from "node:fs";
+
+process.env.MEMORY_TOOLSET = "full";
 import path from "node:path";
 import os from "node:os";
 
@@ -34,8 +36,11 @@ const writeCore = (text) => fs.writeFileSync(CORE, text, "utf8");
 const STATE = path.join(TMP, "behavior", "core-state.md");
 const writeState = (text) => fs.writeFileSync(STATE, text, "utf8");
 const RULES = path.join(TMP, "behavior", "core-rules.md");
+// 2026-11-18：状态块标题从「【当前状态】」改成这句，用来区分事实状态和三线互动取向。
+const STATE_TITLE = "【事实状态（主线/进度/待办，不是互动取向）】";
 const writeRules = (text) => fs.writeFileSync(RULES, text, "utf8");
-const cfgOn = () => ({ inject: { maxChars: 1200, mode: "first-step", core: { enabled: true, maxChars: 600, everyStep: true } } });
+// 2026-11-18：v1.4 起状态卡默认 levels.state="weak"（只发一句字数提示）；要验它自己的预算/截断，得显式要 strong。
+const cfgOn = () => ({ inject: { maxChars: 1200, mode: "first-step", core: { enabled: true, maxChars: 600, everyStep: true, levels: { state: "strong" } } } });
 
 try {
   // ---- 1. 默认配置 ----
@@ -65,27 +70,29 @@ try {
 
   // ---- 4b. v0.33 核心卡拆两半：稳定内容 core.md + 会变的状态 core-state.md，分开预算 ----
   ok("默认带状态段", def.inject.core.state && def.inject.core.state.enabled === true);
-  ok("状态段默认 150 字", def.inject.core.state.maxChars === 150);
-  ok("coreOptions 带出状态预算", coreOptions({ inject: {} }).state.budget === 150);
+  // 2026-11-18：用户要求 core-state 封顶 300；defaultConfig 同步 300，否则 coreOptions 里的 || 300 永远取不到。
+  ok("状态段默认 300 字", def.inject.core.state.maxChars === 300);
+  ok("coreOptions 带出状态预算", coreOptions({ inject: {} }).state.budget === 300);
   writeCore("【称呼】大肥鱼\n【红线】不傲娇\n");
   writeState("【主线】值班台已发布\n");
   const cs1 = coreInjection(cfgOn());
-  ok("状态段进注入且带标题", cs1.text.includes("【当前状态】") && cs1.text.includes("值班台已发布"));
-  ok("稳定段与状态段分开返回", cs1.stateText.includes("值班台已发布") && !cs1.text.startsWith("【当前状态】"));
+  ok("状态段进注入且带标题", cs1.text.includes(STATE_TITLE) && cs1.text.includes("值班台已发布"));
+  ok("稳定段与状态段分开返回", cs1.stateText.includes("值班台已发布") && !cs1.text.startsWith(STATE_TITLE));
   ok("状态没超预算不截断", cs1.stateClipped === false && cs1.stateLength === cs1.stateText.length);
-  ok("稳定段不含状态内容", !cs1.text.split("【当前状态】")[0].includes("值班台已发布"));
+  ok("稳定段不含状态内容", !cs1.text.split(STATE_TITLE)[0].includes("值班台已发布")); // 2026-11-18：标题变了，切分点跟着改。
 
   // 状态变长不会吃掉核心卡的 600 字预算
   writeCore("核".repeat(800));
-  writeState("状".repeat(300));
+  writeState("状".repeat(400)); // 2026-11-18：预算 300，写 400 才验得到截断（正好 300 不算超）。
   const cs2 = coreInjection(cfgOn());
   ok("核心卡仍按自己的预算截断到 600", cs2.text.startsWith("核".repeat(600)) && cs2.clipped === true, String(cs2.text.length));
-  ok("状态段按自己的预算截断到 150", cs2.stateText.length === 150 && cs2.stateClipped === true, String(cs2.stateText.length));
-  ok("总长度 = 600 + 标题 + 150", cs2.text.length === 600 + "\n【当前状态】\n".length + 150, String(cs2.text.length));
+  ok("状态段按自己的预算截断到 300", cs2.stateText.length === 300 && cs2.stateClipped === true, String(cs2.stateText.length));
+  ok("总长度 = 600 + 标题 + 300", cs2.text.length === 600 + ("\n" + STATE_TITLE + "\n").length + 300, String(cs2.text.length));
 
   // 状态段可以单独关掉，也可以单独配预算
   ok("状态段能关", coreInjection({ inject: { core: { state: { enabled: false } } } }).stateText === "");
-  ok("状态预算可配", coreInjection({ inject: { core: { state: { maxChars: 60 } } } }).stateText.length === 60);
+  // 2026-11-18：默认弱提示时不截正文，所以这里同时把状态卡要成 strong，才验得到「按配置裁到 60」。
+  ok("状态预算可配", coreInjection({ inject: { core: { levels: { state: "strong" }, state: { maxChars: 60 } } } }).stateText.length === 60);
   writeState("");
 
   // ---- 4c. v0.33.1 规则单独一份：跟状态分开算，状态变化不会把规则再提醒一遍 ----
@@ -98,7 +105,7 @@ try {
   const cr1 = coreInjection(cfgOn());
   ok("规则段能读到", cr1.rulesText.includes("不傲娇") && cr1.rulesLength === cr1.rulesText.length);
   ok("规则排在稳定内容前面", cr1.text.startsWith("【红线】"));
-  ok("三段都在 text 里", cr1.text.includes("【红线】") && cr1.text.includes("【称呼】") && cr1.text.includes("【当前状态】"));
+  ok("三段都在 text 里", cr1.text.includes("【红线】") && cr1.text.includes("【称呼】") && cr1.text.includes(STATE_TITLE));
   writeRules("规".repeat(500));
   const cr2 = coreInjection(cfgOn());
   ok("规则段按自己的预算截断到 400", cr2.rulesText.length === 400 && cr2.rulesClipped === true, String(cr2.rulesText.length));
@@ -173,12 +180,17 @@ try {
   ok("核心卡带优先级说明", first.joined.includes("以它为准"));
 
   const second = await run(mkAgent("core-s1"));
-  ok("第二次：核心卡没变就不重复注入", second.texts.length === 0, String(second.texts.length));
+  // 2026-11-18：v1.4 起第二次轮到弱班次——只补一句字数提示，全文要等第 5 轮/压缩后才重发，所以断「不重灌全文」。
+  ok("第二次：只给弱提示，不重复全文", second.joined.includes("<puppet_core>") && !second.joined.includes("不装雌小鬼"), second.joined.slice(0, 80));
 
   writeCore("【称呼】大肥鱼\n【红线】不傲娇、不装雌小鬼\n【新增】刚改过一行\n", "utf8");
   const changed = await run(mkAgent("core-s1"));
   ok("核心卡改了就补：只补核心卡，不重复完整摘要", changed.joined.includes("<puppet_core>") && !changed.joined.includes("<puppet_memory>"));
-  ok("补进来的是新内容", changed.joined.includes("刚改过一行"));
+  // 2026-11-18：没到强补充轮次时，补的是「核心卡 N 字」的新提示，正文按设计走 memory_core get，不再整段塞进注入。
+  const changedChars = fs.readFileSync(CORE, "utf8").replace(/\s+/g, "").length;
+  ok("补进来的是新的字数提示（正文走 memory_core get）", changed.joined.includes(`核心卡 ${changedChars} 字`) && !changed.joined.includes("刚改过一行"), changed.joined.slice(0, 120));
+  const stableAfterChange = await run(mkAgent("core-s1"));
+  ok("改完再跑：没有新变化就一条都不重复", stableAfterChange.texts.length === 0, String(stableAfterChange.texts.length));
 
   // 压缩（消息量骤降）→ 核心卡和完整摘要都要能被补回来
   const big = [{ content: "x".repeat(40000) }];
@@ -198,18 +210,24 @@ try {
   ok("首步：状态块出现", fresh.joined.includes("<puppet_core_state>"));
   ok("规则块排在核心块前面", fresh.joined.indexOf("<puppet_rules>") < fresh.joined.indexOf("<puppet_core>"));
   const noop = await run(mkAgent("core-r1"));
-  ok("什么都没变：一条都不重复", noop.texts.length === 0, String(noop.texts.length));
+  // 2026-11-18：第二次是弱班次，三张卡各发一句提示（第三次起才完全不发）；这里断「不重灌正文」。
+  ok("什么都没变：第二次只补弱提示", noop.texts.length > 0 && noop.joined.includes("这轮只给提示") && !noop.joined.includes("【称呼】"), String(noop.texts.length));
 
-  writeState("【主线】第二步\n");
+  // 2026-11-18：弱提示只带字数，正文同长度就完全看不出变化——故意加长，验证「状态变了会补提示」。
+  writeState("【主线】第二步，进度往前推了一行\n");
   const stateOnly = await run(mkAgent("core-r1"));
   ok("只改状态：补状态块", stateOnly.joined.includes("<puppet_core_state>"));
-  ok("只改状态：规则不跟着重复", !stateOnly.joined.includes("<puppet_rules>"));
-  ok("只改状态：核心块也不重复", !stateOnly.joined.includes("<puppet_core>"));
+  // 2026-11-18：注入按整块指纹去重，任一提示变化都会把三句弱提示一起带上；要保的是「不重灌全文」。
+  ok("只改状态：不重复规则全文", !stateOnly.joined.includes("【红线】"));
+  ok("只改状态：不重复核心全文", !stateOnly.joined.includes("【称呼】"));
 
   writeRules("【红线】不傲娇、不装雌小鬼\n");
   const rulesOnly = await run(mkAgent("core-r1"));
-  ok("改规则：补规则块", rulesOnly.joined.includes("<puppet_rules>") && rulesOnly.joined.includes("不装雌小鬼"));
-  ok("改规则：状态块不重复", !rulesOnly.joined.includes("<puppet_core_state>"));
+  // 2026-11-18：规则块也是弱提示（正文不进来），只带新的字数。
+  const rulesChars = "【红线】不傲娇、不装雌小鬼".replace(/\s+/g, "").length;
+  ok("改规则：补规则块（新字数提示）", rulesOnly.joined.includes("<puppet_rules>") && rulesOnly.joined.includes(`规则卡 ${rulesChars} 字`), rulesOnly.joined.slice(0, 100));
+  // 2026-11-18：整块指纹变了会把状态提示一起带上，但不会重发核心正文；原断言（状态块完全不出现）已不成立。
+  ok("改规则：不重复核心全文", !rulesOnly.joined.includes("【称呼】"));
 
   // 压缩后：规则和状态都要补回来
   await run(mkAgent("core-r2"), big);
@@ -244,7 +262,8 @@ try {
   await call({ action: "set", text: "【称呼】大肥鱼\n【约定】不可逆先问\n" });
   await run(mkAgent("core-reset"));
   const stable = await run(mkAgent("core-reset"));
-  ok("复位前：没变化就不重复注入", stable.texts.length === 0, String(stable.texts.length));
+  // 2026-11-18：第二次是弱班次，只补一句提示（全文留到复位/压缩后），所以这里断的是「不重灌全文」。
+  ok("复位前：第二步只给弱提示，不重复全文", stable.texts.length > 0 && !stable.joined.includes("不可逆先问"), String(stable.texts.length));
   const r1 = await call({ action: "reset" }, execOf("core-reset"));
   ok("复位返回已复位", r1.includes("已复位"), r1.slice(0, 50));
   const afterReset = await run(mkAgent("core-reset"));

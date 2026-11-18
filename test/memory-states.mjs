@@ -62,7 +62,8 @@ ok("注入含〔听说〕", injText.includes("〔听说〕"));
 
 // ---- 6. 检索结果里也能看出区别 ----
 const found = String(searchMemory("npm", "all", 10));
-ok("检索结果原文里能看到 state", found.includes('"state":"failed"'), found.slice(0, 120));
+// 2026-11-18：v0.43.1 起命中行只渲染正文（keyword＝释义）+ #hash，不再贴整行 JSONL；三态靠行首〔没做成〕和 hash 认。
+ok("检索结果给正文和 #hash、不贴原始 JSONL", found.includes("发 npm 包＝0.32.0 发到 npm（补一条细节）") && /#[0-9a-f]{16}/.test(found) && !found.includes('"state"'), found.slice(0, 160));
 // A-40：检索命中行也带前缀，和注入保持一致（不用先 parse JSON 才看得出是听说还是做过）
 ok("检索结果带〔没做成〕前缀", found.includes("〔没做成〕"), found.slice(0, 120));
 const foundDone = String(searchMemory("值班台面板", "all", 10));

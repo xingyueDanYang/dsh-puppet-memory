@@ -29,7 +29,8 @@ ok('handoff 要求写更正史', handoff.includes('更正史'))
 ok('event 不硬塞交接要素', !event.includes('生效规则'))
 ok('custom 用了自定义提示词', custom.includes('只写决策和待办'))
 ok('custom 没配置时给兜底说明', buildSummaryPrompt(lines, 400, { style: 'custom' }).includes('没有配置 stylePrompt'))
-ok('保留字数上限', event.includes('不超过 400 字'))
+// 2026-11-18：摘要预算拆成「依据 ≤60 字 + 事实摘要 ≤ limit-80 字」，400 上限时事实段是 320 字；总数仍受 400 约束。
+ok('保留字数上限', event.includes('不超过 320 字') && event.includes('不超过 60 字'))
 ok('styleLine 函数本身可单独用', summaryStyleLine('handoff').includes('交接'))
 
 if (fails.length) {

@@ -35,7 +35,9 @@ import os from "node:os";
 import path from "node:path";
 import zlib from "node:zlib";
 import { createSocial, detectScene, normalizeName, personIdOf, registerSocialTools, sceneLabel, socialConfigDefaults, socialPaths } from "./social.js";
-import { behaviorHint, createLines, lastUserText, lexicalScore, linesConfigDefaults, linesPaths, qualitativeOf, topicTokens } from "./state.js";
+import { behaviorHint, createLines, lastAssistantTextId, lastUserText, lexicalScore, linesConfigDefaults, linesPaths, qualitativeOf, topicTokens } from "./state.js";
+import { createPeopleStore } from "./people.js";
+import { createUpdateChecker, UPDATE_REPO } from "./update-check.js";
 import { createSessionMemory, isSpecialKey, normalizeSessionId, sessionMemoryPaths } from "./sessionmem.js";
 import { createLearn, coreLock, checkAbsurd } from "./learn.js";
 import { createConflictChecker, conflictDefaults } from "./conflict.js";
@@ -693,7 +695,7 @@ function defaultConfig() {
       mode: "every-step",
       // v0.22 核心记忆：behavior/core.md 小文件，默认「缺就补」地每步注入，600 字预算。
       // 它先从 maxChars 总预算里扣，开核心卡不会让注入总量变长；关掉不影响旧行为。
-      core: { enabled: true, maxChars: 600, everyStep: true, state: { enabled: true, maxChars: 150 }, rules: { enabled: true, maxChars: 400 }, levels: { core: "strong", rules: "strong", state: "weak", self: "weak" } },
+      core: { enabled: true, maxChars: 600, everyStep: true, state: { enabled: true, maxChars: 300 }, rules: { enabled: true, maxChars: 400 }, levels: { core: "strong", rules: "strong", state: "weak", self: "weak" } },
   // 时间提示（v1.3，2026-11-17）：插件自己的钩子，零模型成本。mode=gap（隔久才给）/ recall（跟着回忆走）/ both / off
   now: { mode: "gap", gapMinutes: 10 },
   // 四张卡的注入强度（v1.4，2026-11-17 丹阳）：strong=全文 弱=pocket 只留一句提示；
@@ -709,6 +711,18 @@ function defaultConfig() {
       config: true,
       minIntervalHours: 24,
       keepDays: 30,
+      // v0.43.0（2026-11-17 丹阳）：主动备份带「工作文件」。
+      // 默认关——不用的人一行不受影响；开了以后把 work.dir 整个复制进快照的 work/。
+      // 为什么要它：网页那边导出的工作内容不属于记忆库（进去只会拖累检索），
+      // 但也不该只活在网页里（导出只带文字、会话会被清理）。放这儿等于给它一个冷库存放点。
+      work: {
+        enabled: false,
+        dir: "",
+        // 只随「手动备份」走，绝不进每日快照轮转——工作文件是 GB 级的，
+        // 跟 30 天保留一起滚会把 F 盘吃光；所以单独存 work-<时间>/，自己留 keepArchives 份。
+        keepArchives: 10,
+        maxBytes: 20 * 1024 ** 3,
+      },
       // 云盘加密包（v0.39.0，2026-10-30 丹阳：备份到指定文件夹，开百度网盘就自动同步）
       // 与上面的本地快照互补：本地快照防手滑，云包防整机/整盘丢失。
       // 密码**不落盘**：只从调用参数或环境变量 DSH_MEMORY_BACKUP_PASS 读。
@@ -813,6 +827,7 @@ function loadConfig() {
   merged.self.audit = { ...defaultConfig().self.audit, ...((cfg.self && cfg.self.audit) || {}) };
   merged.backup = { ...defaultConfig().backup, ...(cfg.backup || {}) };
   merged.backup.cloud = { ...defaultConfig().backup.cloud, ...((cfg.backup && cfg.backup.cloud) || {}) };
+  merged.backup.work = { ...defaultConfig().backup.work, ...((cfg.backup && cfg.backup.work) || {}) };
   merged.sessions = { ...defaultConfig().sessions, ...(cfg.sessions || {}) };
   merged.autoSummary = { ...defaultConfig().autoSummary, ...(cfg.autoSummary || {}) };
   merged.facts = { ...defaultConfig().facts, ...(cfg.facts || {}) };
@@ -1324,7 +1339,7 @@ function coreOptions(cfg) {
   const opt = { ...defaultConfig().inject.core, ...((cfg && cfg.inject && cfg.inject.core) || {}) };
   const budget = Math.max(100, Number(opt.maxChars) || 600);
   const stateOpt = { ...(defaultConfig().inject.core.state || {}), ...((opt && opt.state) || {}) };
-  const state = { enabled: stateOpt.enabled !== false, budget: Math.max(60, Number(stateOpt.maxChars) || 150) };
+  const state = { enabled: stateOpt.enabled !== false, budget: Math.max(60, Number(stateOpt.maxChars) || 300) }; // 2026-11-18：状态卡实际从没上过 300，按 300 封顶即可
   const rulesOpt = { ...(defaultConfig().inject.core.rules || {}), ...((opt && opt.rules) || {}) };
   const rules = { enabled: rulesOpt.enabled !== false, budget: Math.max(100, Number(rulesOpt.maxChars) || 400) };
   const levelsRaw = { ...(defaultConfig().inject.core.levels || {}), ...((opt && opt.levels) || {}) };
@@ -2046,6 +2061,18 @@ function buildInjectionText(cfg, coreUsed = 0, lines = null, opts = {}) {
     parts.push(`【最近日记】${clip(line, 420)}`);
   }
 
+  // v0.43.1：「没启用的工具只发简要说明」——一句话清单，省掉整套 schema 的钱，
+  // 模型知道有什么可开，需要时说一句再去开（开完要重启，这点如实说）。
+  try {
+    const mp = path.join(os.homedir(), ".dsh", "tools-manifest.json");
+    const man = JSON.parse(fs.readFileSync(mp, "utf8"));
+    if (Array.isArray(man.off) && man.off.length) {
+      parts.push(`【未启用工具】${man.off.join("；")}（要用先开插件并重启，别假装能用）`);
+    }
+  } catch {
+    /* 没有清单就不提 */
+  }
+
   if (!parts.length) return "";
 
   const body = trimToBudget(parts.join("\n"), maxChars);
@@ -2098,6 +2125,25 @@ function modelRouteOf(value) {
 function trimToBudget(text, maxChars) {
   if (text.length <= maxChars) return text;
   return `${text.slice(0, maxChars)}…（已截断，用 memory_search 查细节）`;
+}
+
+// v0.44.1（丹阳：「上次对话是正常的」+ 截图里一条消息下 4-5 条注入）：
+// 以前一次注入会返回 4-5 条独立消息（规则/核心/状态/自我/现在…），界面上一条一条列出来，
+// 看着就像刷屏。这里合并成一条，一次注入只留一个「上下文注入」条目。
+function mergeInjectionMessages(list) {
+  const arr = (list || []).filter(Boolean);
+  if (arr.length <= 1) return arr;
+  const texts = arr
+    .map((m) => {
+      const c = m.content;
+      if (typeof c === "string") return c;
+      if (Array.isArray(c)) return c.map((x) => (x && typeof x.text === "string" ? x.text : "")).join("");
+      return "";
+    })
+    .map((t) => String(t || "").trim())
+    .filter(Boolean);
+  if (!texts.length) return [];
+  return [injectionMessage(texts.join("\n\n"))];
 }
 
 function injectionMessage(text) {
@@ -2222,6 +2268,92 @@ function resolveBackupDir(backup = {}) {
   return { dir: "", note: `备份目录不可写：${wanted}；回退目录 ${fallback} 也不可写` };
 }
 
+// v0.43.0：工作文件备份的三个小工具。
+function humanBytes(n) {
+  const v = Number(n) || 0;
+  if (v >= 1024 ** 3) return `${(v / 1024 ** 3).toFixed(1)}GB`;
+  if (v >= 1024 ** 2) return `${(v / 1024 ** 2).toFixed(1)}MB`;
+  if (v >= 1024) return `${(v / 1024).toFixed(0)}KB`;
+  return `${v}B`;
+}
+
+// 走一遍目录只算体积与文件数；超过 cap 立刻停（误指 C:\ 时不会把整盘遍历一遍）。
+function measureDir(dir, cap) {
+  let bytes = 0;
+  let files = 0;
+  const stack = [dir];
+  while (stack.length) {
+    const cur = stack.pop();
+    let entries = [];
+    try {
+      entries = fs.readdirSync(cur, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const ent of entries) {
+      const full = path.join(cur, ent.name);
+      if (ent.isSymbolicLink()) continue; // 符号链接不跟：防环、防跳出目录
+      if (ent.isDirectory()) {
+        stack.push(full);
+        continue;
+      }
+      if (!ent.isFile()) continue;
+      try {
+        bytes += fs.statSync(full).size;
+      } catch {
+        continue;
+      }
+      files += 1;
+      if (cap > 0 && bytes > cap) return { bytes, files, hitCap: true };
+    }
+  }
+  return { bytes, files, hitCap: false };
+}
+
+// 把工作目录复制进快照。超过上限就整体跳过——半份备份比没有更误导人。
+function copyWorkDir(srcDir, destDir, maxBytes) {
+  const cap = Number(maxBytes) > 0 ? Number(maxBytes) : 2 * 1024 ** 3;
+  const src = path.resolve(String(srcDir || ""));
+  if (!src || !fs.existsSync(src)) return { ok: false, reason: `目录不存在：${src}`, files: 0, bytes: 0 };
+  if (path.resolve(destDir).startsWith(src + path.sep)) {
+    return { ok: false, reason: "目标在源目录里面，跳过（会自己复制自己）", files: 0, bytes: 0 };
+  }
+  const size = measureDir(src, cap);
+  if (size.hitCap) {
+    return { ok: false, reason: `超过上限 ${humanBytes(cap)}，本次不带工作文件`, files: size.files, bytes: size.bytes };
+  }
+  if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true });
+  fs.cpSync(src, destDir, { recursive: true });
+  return { ok: true, reason: "", files: size.files, bytes: size.bytes };
+}
+
+// v0.43.0：工作文件备份单独成 work-<stamp> 目录，自己按份数轮转——
+// 不跟记忆快照的保留天数走（GB 级的东西按 30 天滚会把盘吃光）。
+function pruneOldWorkArchives(dir, keep, justWritten = "") {
+  let names = [];
+  try {
+    names = fs.readdirSync(dir).filter((n) => n.startsWith("work-"));
+  } catch {
+    return 0;
+  }
+  names.sort();
+  const keepN = Math.max(1, Math.round(Number(keep) || 10));
+  const drop = names.length > keepN ? names.slice(0, names.length - keepN) : [];
+  let removed = 0;
+  for (const n of drop) {
+    const full = path.join(dir, n);
+    if (justWritten && path.resolve(full) === path.resolve(justWritten)) continue;
+    try {
+      fs.rmSync(full, { recursive: true, force: true });
+      removed += 1;
+    } catch (err) {
+      diag(`清理旧工作备份失败 ${n}：${err?.message || err}`);
+    }
+  }
+  if (removed) log("info", `清理旧工作备份 ${removed} 份（保留 ${keepN} 份）`);
+  return removed;
+}
+
 function backupNow(reason, options = {}) {
   const cfg = loadConfig();
   const backup = cfg.backup || {};
@@ -2269,6 +2401,36 @@ function backupNow(reason, options = {}) {
     if (backup.sessions !== false && fs.existsSync(SESSION_DIR)) {
       fs.cpSync(SESSION_DIR, path.join(dest, "sessions"), { recursive: true });
     }
+    // v0.43.0：工作文件（默认关；manual=只在手动备份时带，all=自动也带）
+    let workTail = "";
+    const workCfg = backup.work || {};
+    if (workCfg.enabled) {
+      const workSrc = String(workCfg.dir || "").trim();
+      // 「手动」看调用方语义：memory_backup 走 reason=manual；面板「立即备份一次」也是 manual。
+      // 自动触发永不带走工作文件：那是 GB 级的东西，不能跟着 30 天轮转一起滚。
+      const isManual = String(reason || "") === "manual" || options.work === true;
+      if (!workSrc) {
+        workTail = "；工作文件：开了但没设目录，跳过";
+      } else if (!isManual) {
+        workTail = "；工作文件：只随手动备份带走";
+      } else {
+        // 同一秒内连点两次「立即备份」时不能被覆盖（快照那边有同样的处理）
+        let workDest = path.join(dir, `work-${stamp}`);
+        let wseq = 1;
+        while (fs.existsSync(workDest)) {
+          workDest = path.join(dir, `work-${stamp}-${wseq}`);
+          wseq += 1;
+        }
+        const w = copyWorkDir(workSrc, workDest, workCfg.maxBytes);
+        if (w.ok) {
+          const dropped = pruneOldWorkArchives(dir, Number(workCfg.keepArchives) || 10, workDest);
+          workTail = `；工作文件 ${w.files} 个 / ${humanBytes(w.bytes)} → ${workDest}` + (dropped ? `（清掉 ${dropped} 份旧工作备份）` : "");
+        } else {
+          workTail = `；工作文件跳过：${w.reason}`;
+          log("warn", `工作文件未备份：${w.reason}`);
+        }
+      }
+    }
 
     // 落盘自检：目录必须真的写出来了，否则不更新状态（避免「说备份了其实没有」）
     const written = fs.existsSync(dest) ? fs.readdirSync(dest).length : 0;
@@ -2290,8 +2452,8 @@ function backupNow(reason, options = {}) {
     const keepDays = Number(backup.keepDays) || 30;
     const removed = pruneOldSnapshots(dir, keepDays);
     const tail = removed ? `，清理 ${removed} 个过期快照（保留 ${keepDays} 天）` : "";
-    log("info", `备份完成（${reason || "manual"}）→ ${dest}${tail}`);
-    return `备份完成：${dest}${tail}${resolved.note ? `（${resolved.note}）` : ""}`;
+    log("info", `备份完成（${reason || "manual"}）→ ${dest}${tail}${workTail}`);
+    return `备份完成：${dest}${tail}${workTail}${resolved.note ? `（${resolved.note}）` : ""}`;
   } catch (err) {
     log("warn", `备份失败：${err?.message || err}`);
     return `备份失败：${err?.message || err}`;
@@ -2446,6 +2608,10 @@ function backupPolicySummary() {
       behavior: backup.behavior !== false,
       configFile: backup.config !== false,
       sessions: backup.sessions !== false,
+      workEnabled: (backup.work && backup.work.enabled) === true,
+      workDir: String((backup.work && backup.work.dir) || ""),
+      workKeepArchives: Number((backup.work && backup.work.keepArchives) || 0) || 10,
+      workMaxBytes: Number((backup.work && backup.work.maxBytes) || 0) || 20 * 1024 ** 3,
     },
     runtime: {
       lastBackupAt: state.lastBackupAt || "",
@@ -2677,6 +2843,25 @@ function updateBackupPolicy(patch) {
   for (const [from, to] of [["enabled", "enabled"], ["behavior", "behavior"], ["configFile", "config"], ["sessions", "sessions"]]) {
     if (body[from] !== undefined) backup[to] = Boolean(body[from]);
   }
+  const work = { ...defaultConfig().backup.work, ...(backup.work || {}) };
+  if (body.workEnabled !== undefined) work.enabled = Boolean(body.workEnabled);
+  if (body.workDir !== undefined) {
+    const wdir = String(body.workDir || "").trim();
+    if (wdir && !path.isAbsolute(wdir)) return { ok: false, error: "工作文件目录必须是绝对路径" };
+    work.dir = wdir;
+  }
+  if (body.workMaxBytes !== undefined) {
+    const mb = Number(body.workMaxBytes);
+    if (!Number.isFinite(mb) || mb < 1 || mb > 500) return { ok: false, error: "工作文件上限必须是 1–500（GB）" };
+    work.maxBytes = Math.round(mb * 1024 ** 3);
+  }
+  if (body.workKeepArchives !== undefined) {
+    const n = Number(body.workKeepArchives);
+    if (!Number.isFinite(n) || n < 1 || n > 100) return { ok: false, error: "工作文件保留份数必须是 1–100" };
+    work.keepArchives = Math.round(n);
+  }
+  if (work.enabled && !work.dir) return { ok: false, error: "开了工作文件备份，就得给一个目录" };
+  backup.work = work;
   cfg.backup = backup;
   saveConfig(cfg);
   log("info", `备份策略已更新：${JSON.stringify(backup)}`);
@@ -2846,6 +3031,29 @@ function qqWatchView() {
   };
 }
 
+// v0.46.0：插件更新检查——**只查版本号与 Release 链接，不下载、不替换**。
+// 状态存在 config.json 的 update 段；没有定时器，只在面板请求时判断是否到期。
+const PLUGIN_VERSION = (() => {
+  try {
+    return JSON.parse(fs.readFileSync(new URL("./package.json", import.meta.url), "utf8")).version || "";
+  } catch {
+    return "";
+  }
+})();
+
+const updateChecker = createUpdateChecker({
+  repo: UPDATE_REPO,
+  version: PLUGIN_VERSION,
+  store: {
+    get: () => loadConfig().update || null,
+    set: (next) => {
+      const cfg = loadConfig();
+      cfg.update = next;
+      saveConfig(cfg);
+    },
+  },
+});
+
 function registerBackupApi(service) {
   const sendJson = (res, obj, status = 200) => {
     res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
@@ -2876,6 +3084,7 @@ function registerBackupApi(service) {
         if (action === "features") return sendJson(res, featuresView());
         if (action === "overview") return sendJson(res, memoryOverview());
         if (action === "now") return sendJson(res, nowView());
+        if (action === "update-state") return sendJson(res, { ok: true, repo: UPDATE_REPO, ...updateChecker.state() });
         if (action === "qq-watch") return sendJson(res, qqWatchView());
         if (action === "session-memory") {
           const mem = sessionMemory();
@@ -2920,6 +3129,19 @@ function registerBackupApi(service) {
       if (action === "now") {
         const r = updateNowMode(body || {});
         return sendJson(res, r, r.ok ? 200 : 400);
+      }
+      if (action === "update-check") {
+        // 只查不装：返回最新版本与 Release 链接；force=true 时忽略间隔与冷却
+        const r = await updateChecker.check({ force: Boolean(body && body.force) });
+        return sendJson(res, { ...r, message: r.ok ? "已检查" : r.skipped || "检查失败" }, r.ok || r.skipped ? 200 : 502);
+      }
+      if (action === "update-configure") {
+        const patch = {};
+        if (body && body.enabled !== undefined) patch.enabled = body.enabled === true;
+        if (body && body.intervalDays !== undefined) patch.intervalDays = body.intervalDays;
+        if (!Object.keys(patch).length) return sendJson(res, { ok: false, error: "没有要改的字段（enabled / intervalDays）" }, 400);
+        const s = updateChecker.configure(patch);
+        return sendJson(res, { ok: true, ...s, message: "已保存（下次打开面板生效）" });
       }
       if (action === "save-feature") {
         const result = setFeature(body.id, body.enabled);
@@ -3361,6 +3583,21 @@ function searchSocialContext(social, args = {}) {
 // v0.34（B-52）：要点层——从一条记忆里压出一句能扫读的话（抽取式，不调模型、零成本）。
 // 只取第一句、去掉标记和层前缀、超长截断；原文仍在，要点只是索引。
 const BRIEF_MAX_CHARS = 60;
+// v0.43.1（2026-11-17 评测发现）：命中渲染只给正文，绝不把整行 JSONL 贴进上下文。
+// 背景：renderHit / 按层列举以前直接用 doc.line（整行 JSON），88 道评测题里 85 道
+// 都带着 {"kind":"note","ts":...} 这种噪声进上下文——白占预算，还不带信息。
+function displayTextOf(entry) {
+  const e = entry && typeof entry === "object" ? entry : {};
+  // v0.43.2：keyword 是 relation/saying 条目的主键兼标题（用户和评测都靠它认条目）。
+  // 以前整行 JSONL 里带着它，只取正文时不能丢——丢了就变成「只看见释义、不知道在说哪个词」，
+  // 按标签/多词/排序类的检索结果也没法核对是命中了哪一条。正文里已经含 keyword 时不重复。
+  const body = e.text || e.meaning || e.card || e.brief || e.user || e.assistant || e.title || "";
+  const keyword = e.keyword ? String(e.keyword) : "";
+  const pick = keyword && body ? (String(body).includes(keyword) ? body : `${keyword}＝${body}`) : keyword || body;
+  const s = String(pick).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  return s;
+}
+
 function briefOf(entry, max = BRIEF_MAX_CHARS) {
   const raw = String(
     (entry && (entry.brief || entry.text || entry.meaning || entry.user || entry.assistant || entry.keyword)) || "",
@@ -3486,7 +3723,9 @@ function searchMemoryKeyword(query, layer, limit, tag, includeVoided = false) {
         readText(file)
           .split(/\r?\n/)
           .forEach((line, index) => {
-            if (line.trim()) listed.push(`${rel(file)}:${index + 1}  ${clip(line, 300)}`);
+            if (!line.trim()) return;
+            const shown = displayTextOf(parseJsonlLine(line));
+            if (shown) listed.push(`${rel(file)}:${index + 1}  ${clip(shown, 300)}`);
           });
       }
       if (!listed.length) return layer === "memo" ? "便签是空的。" : "用户档案还是空的。";
@@ -4072,7 +4311,7 @@ function formatSearchHit(doc, srcIdx) {
   const voidMark = entry?.voided ? `〔已标废：${clip(String(entry.voided.reason || ""), 40)}〕` : "";
   // v0.37（B-74）：已结束的条目照样能查回，但必须标出来——「真但过期」不是「假的」
   const endedMark = doc.ended ? `〔已结束：${clip(String(doc.ended.reason || ""), 30)}${doc.ended.at ? ` · ${String(doc.ended.at).slice(0, 10)}` : ""}〕` : "";
-  return `${where}:${doc.lineNo}  ${endedMark}${voidMark}${statePrefixOf(entry)}${clip(doc.line, 300)}${hs}${suffix}${provenance ? `  ${provenance}` : ""}`;
+  return `${where}:${doc.lineNo}  ${endedMark}${voidMark}${statePrefixOf(entry)}${clip(displayTextOf(entry), 300)}${hs}${suffix}${provenance ? `  ${provenance}` : ""}`;
 }
 
 // v0.37（B-77）：规则册实例。模块级单例，apply 里复用同一份，检索/工具都走它。
@@ -4229,7 +4468,9 @@ function searchMemory(query, layer, limit, tag, includeVoided = false, minScore 
           readText(file)
             .split(/\r?\n/)
             .forEach((line, index) => {
-              if (line.trim()) listed.push(`${rel(file)}:${index + 1}  ${clip(line, 300)}`);
+              if (!line.trim()) return;
+              const shown = displayTextOf(parseJsonlLine(line));
+              if (shown) listed.push(`${rel(file)}:${index + 1}  ${clip(shown, 300)}`);
             });
         }
       }
@@ -5936,6 +6177,45 @@ function buildStats() {
     /* 已结束统计失败不影响其它统计 */
   }
 
+  // v0.43.1（2026-11-17 丹阳：要数字，不要花里胡哨的图）：记忆水位。
+  // 一句能看懂、且能直接照着动手的句子：多少条、多少天没动、多少已过期、多少标废。
+  // 诚实边界：useCount 一直是死字段（全插件没有地方 +1），所以「多久没动」按**最后写入时间**算，
+  // 不是「最后被检索时间」——措辞里写清楚，不假装有使用数据。
+  try {
+    const idx = ensureSearchIndex();
+    const docs = idx.docs || [];
+    const nowMs = Date.now();
+    const monthStart = (() => {
+      const d = new Date();
+      return new Date(d.getFullYear(), d.getMonth(), 1).getTime();
+    })();
+    let entries = 0, turns = 0, fresh = 0, stale = 0, expired = 0, voidedN = 0;
+    for (const doc of docs) {
+      const relPath = rel(doc.file || "");
+      // 索引/指针行不是记忆条目：guide 是检索索引，array 是会话索引——都不该算进水位
+      if (relPath.startsWith("deep/guide") || relPath.startsWith("array/")) continue;
+      const isDiary = relPath.startsWith("behavior/diary/");
+      if (isDiary) {
+        turns += 1;
+        continue;
+      }
+      entries += 1;
+      const ts = Number(doc.ts) || 0;
+      if (ts && ts >= monthStart) fresh += 1;
+      if (!ts || ts < nowMs - 30 * 86400000) stale += 1;
+      const untilMs = Date.parse(String(doc.entry?.until || ""));
+      if (Number.isFinite(untilMs) && untilMs < nowMs) expired += 1;
+      if (doc.entry?.voided) voidedN += 1;
+    }
+    const pct = entries ? Math.round((stale / entries) * 100) : 0;
+    fileStats.push(
+      `记忆水位：条目 ${entries}｜本月新增 ${fresh}｜30 天没动过 ${stale}（${pct}%）｜已到期 ${expired}｜标废 ${voidedN}（"没动过"按最后写入时间算；目前没有"最后被检索"的记录）`,
+    );
+    if (turns) fileStats.push(`日记回合 ${turns} 条（原文另存 sessions/，备份会一起带走）`);
+  } catch {
+    /* 水位统计失败不影响其它统计 */
+  }
+
   const cfg = loadConfig();
   const state = loadState();
   return [
@@ -7351,6 +7631,7 @@ function apply(ctx) {
   }
 
   const lastInjected = new Map();
+  const lastUserInjected = new Map(); // v0.44.1：sessionId -> 用户消息门牌（一条用户消息只注入一次）
   // v1.2（2026-11-16）：时间不再每轮塞——同一会话 10 分钟内只注一次（他发得勤时不必知道时间）
   const lastNowInjected = new Map();
   const NOW_THROTTLE_MS = 10 * 60 * 1000;
@@ -7616,6 +7897,19 @@ function apply(ctx) {
     });
   });
 
+  // v0.45.0「重要的人」：一人一张名片，提及时才注入；90 天不提自动冷宫。
+  let peopleStoreRef = null;
+  const peopleInjected = new Map(); // sessionId -> Map(name -> turn)
+  function getPeopleStore() {
+    if (!peopleStoreRef) {
+      peopleStoreRef = createPeopleStore({
+        file: path.join(MEM_DIR, "social", "people.jsonl"),
+        clip,
+        diag,
+      });
+    }
+    return peopleStoreRef;
+  }
   // ---- pre-step：注入行为记忆摘要 ----
   ctx.on(
     "agent/pre-step",
@@ -7703,9 +7997,9 @@ function apply(ctx) {
         const modeState = decide("state", core.rawState);
         cardPlan.set(sessionId, plan);
         diag(`卡片节奏 turn=${plan.turn} core=${modeCore} rules=${modeRules} state=${modeState}${justCompressed ? "（压缩后强补充）" : ""}`);
-        const rulesForInject = !coreAllowed ? "" : modeRules === "strong"
+        const rulesForInject = filterBoundRules(!coreAllowed ? "" : modeRules === "strong"
           ? fullOf(core.rawRules, core.rulesBudget)
-          : modeRules === "weak" ? weakHintOf("规则卡", core.rawRules, "rules") : "";
+          : modeRules === "weak" ? weakHintOf("规则卡", core.rawRules, "rules") : "", activeBinder());
         const coreText = !coreAllowed ? "" : modeCore === "strong"
           ? fullOf(core.rawCore, core.budget)
           : modeCore === "weak" ? weakHintOf("核心卡", core.rawCore, "core") : "";
@@ -8088,16 +8382,66 @@ function apply(ctx) {
         } catch (err) {
           diag(`社交档案注入失败：${err?.message || err}`);
         }
+        // v0.45.0：他提到某个「重要的人」时，先把大致印象递上来（最多 2 人 / 300 字 / 同一人 5 轮内不重复）
+        let peopleText = "";
+        try {
+          const people = getPeopleStore();
+          if (justStarted) {
+            const swept = people.sweepIdle();
+            if (swept.length) diag("重要的人打入冷宫（久未提及）：" + swept.join("、"));
+          }
+          const hits = people.match(userTextNow || "");
+          if (hits.length) people.touch(hits.map(({ person }) => person.name)); // 提到过就算见过，避免老友被冷宫
+          if (hits.length) {
+            const seen = peopleInjected.get(sessionId) || new Map();
+            const due = hits.filter(({ person }) => {
+              const last = seen.get(person.name);
+              return last === undefined || plan.turn - last >= 5;
+            });
+            if (due.length) {
+              peopleText = people.render(due);
+              for (const { person } of due.slice(0, 2)) seen.set(person.name, plan.turn);
+              peopleInjected.set(sessionId, seen);
+              diag("熟人名片注入：" + due.slice(0, 2).map((x) => x.person.name).join("、"));
+            }
+          }
+        } catch (err) {
+          diag("熟人名片注入失败：" + (err && err.message || err));
+        }
         if (!text && !socialText && !handoffText && !recallText && !conflictText && !loreText && !circleText && !lostDetailText && !dueText && !openingText && !cueText && !nowText && !rulesForInject && !habitsForInject && !coreText && !coreStateForInject && !stateForInject && !resetNote) return decision;
         const digest = sha1(`${text}\u0000${socialText}\u0000${handoffText}\u0000${recallText}\u0000${dueText}${openingText}\u0000${cueText}\u0000${nowText}\u0000${conflictText}\u0000${loreText}\u0000${circleText}\u0000${lostDetailText}\u0000${rulesForInject}\u0000${habitsForInject}\u0000${coreText}\u0000${coreStateForInject}\u0000${stateForInject}\u0000${resetNote}`);
+        // v0.44.1：注入只跟着「用户说话」走——一条新用户消息只注入一次。
+        // 触发源在外部（用户消息），注入本身不会再触发注入，也就不会自激循环。
+        const userKey = lastUserText(decision.messages || []).key || "";
+        // 注入只跟「用户说话」这一个外部事件走：
+        //  - 有用户消息且和上次不同 → 注入
+        //  - 有用户消息但和上次相同 → 跳过
+        //  - 没有用户消息、且本会话已经注入过一次 → 当成 PTC 同一回合的后续步骤，跳过
+        //  - 没有用户消息、也还没注入过 → 保持旧行为（合成调用/测试场景不堵死）
+        const prevUserKey = lastUserInjected.get(sessionId);
+        if (!userKey) {
+          if (prevUserKey) {
+            diag("跳过注入：本轮没有新用户发言（PTC 后续步骤）");
+            return decision;
+          }
+        } else if (prevUserKey === userKey) {
+          diag(`跳过注入：用户消息未变（${userKey.slice(0, 8)}）`);
+          return decision;
+        }
+        // 注入门探针（v0.44.1 排查用）：把两个门钥匙和判定结果写进 diag，一次就能看清缺哪半边
+        try {
+          diag(`注入门探针 userKey=${userKey ? userKey.slice(0, 8) : "(空)"} lastUser=${lastUserInjected.get(sessionId) ? String(lastUserInjected.get(sessionId)).slice(0, 8) : "(无)"} 内容变了=${lastInjected.get(sessionId) !== digest}`);
+        } catch {}
         if (lastInjected.get(sessionId) === digest) {
           if (injectMode === "first-step") injectedOnce.add(sessionId);
+          diag("跳过注入：内容未变（指纹相同）");
           return decision;
         }
         lastInjected.set(sessionId, digest);
-        if (rulesForInject) lastRulesInjected.set(sessionId, rulesDigest);
-        if (coreText) lastCoreInjected.set(sessionId, coreDigest);
-        if (coreStateForInject) lastCoreStateInjected.set(sessionId, coreStateDigest);
+        if (userKey) lastUserInjected.set(sessionId, userKey);
+        if (rulesForInject) lastRulesInjected.set(sessionId, sha1(rulesForInject));
+        if (coreText) lastCoreInjected.set(sessionId, sha1(coreText));
+        if (coreStateForInject) lastCoreStateInjected.set(sessionId, sha1(coreStateForInject));
         if (stateForInject) lastStateInjected.set(sessionId, stateDigest);
         if (injectMode === "first-step") injectedOnce.add(sessionId);
         // B-47：复位带的临时约束注入一次就删——不能每轮念，也不许写进任何文件
@@ -8206,7 +8550,7 @@ ${selfText}
           : null;
         return {
           kind: "enter",
-          messages: [...(decision.messages || []), ...(resetMessage ? [resetMessage] : []), ...(rulesMessage ? [rulesMessage] : []), ...(coreMessage ? [coreMessage] : []), ...(coreStateMessage ? [coreStateMessage] : []), ...(selfMessage ? [selfMessage] : []), ...(stateMessage ? [stateMessage] : []), ...(handoffMessage ? [handoffMessage] : []), ...(recallMessage ? [recallMessage] : []), ...(dueMessage ? [dueMessage] : []), ...(openingMessage ? [openingMessage] : []), ...(cueMessage ? [cueMessage] : []), ...(nowMessage ? [nowMessage] : []), ...(conflictMessage ? [conflictMessage] : []), ...(loreMessage ? [loreMessage] : []), ...(sayingMessage ? [sayingMessage] : []), ...(circleMessage ? [circleMessage] : []), ...(lostDetailMessage ? [lostDetailMessage] : []), ...(text ? [injectionMessage(text)] : []), ...(socialMessage ? [socialMessage] : [])],
+          messages: [...(decision.messages || []), ...mergeInjectionMessages([...(resetMessage ? [resetMessage] : []), ...(rulesMessage ? [rulesMessage] : []), ...(coreMessage ? [coreMessage] : []), ...(coreStateMessage ? [coreStateMessage] : []), ...(selfMessage ? [selfMessage] : []), ...(stateMessage ? [stateMessage] : []), ...(handoffMessage ? [handoffMessage] : []), ...(recallMessage ? [recallMessage] : []), ...(dueMessage ? [dueMessage] : []), ...(openingMessage ? [openingMessage] : []), ...(cueMessage ? [cueMessage] : []), ...(nowMessage ? [nowMessage] : []), ...(conflictMessage ? [conflictMessage] : []), ...(loreMessage ? [loreMessage] : []), ...(sayingMessage ? [sayingMessage] : []), ...(circleMessage ? [circleMessage] : []), ...(lostDetailMessage ? [lostDetailMessage] : []), ...(text ? [injectionMessage(text)] : []), ...(peopleText ? [injectionMessage(peopleText)] : []), ...(socialMessage ? [socialMessage] : [])])],
         };
       } catch (err) {
         log("warn", `pre-step 注入失败：${err?.message || err}`);
@@ -8359,7 +8703,47 @@ ${selfText}
       render: (_args, value) => [{ type: "text", text: String(value) }],
     };
 
+    // v0.45.0 按需拆开：常用工具启动即注册，长尾先排队，等 tools_switch action=on pkg=memory-tail 再展开。
+    // 逃生门：环境变量 MEMORY_TOOLSET=full 时全部启动即注册（老行为）。
+    const HOT_TOOLS = new Set([
+      "memory_people",
+      "memory_write",
+      "memory_search",
+      "memory_core",
+      "memory_pickup",
+      "memory_stats",
+      "memory_doctor",
+      "memory_state",
+      "memory_locate",
+      "memory_void",
+      "tools_switch",
+    ]);
+    const fullToolset = String(process.env.MEMORY_TOOLSET || "").toLowerCase() === "full";
+    const queuedTools = [];
+    const flushQueuedTools = () => {
+      const n = queuedTools.length;
+      for (const def of queuedTools.splice(0)) {
+        try {
+          toolCtx.tools.register(def);
+          diag(`工具注册成功：${def.name}（长尾展开）`);
+        } catch (err) {
+          diag(`工具注册失败：${def.name} → ${err?.stack || err}`);
+        }
+      }
+      return n;
+    };
+    // 给「绑定规则」用的工具名通道（每次现取，热载进来的工具也能算数）
+    schemaProvider = () => {
+      const list = toolCtx.tools?.schemas?.() || [];
+      return list.map((x) => String(x?.name || "").toLowerCase()).filter(Boolean);
+    };
+
     const register = (definition) => {
+      const name = definition?.name;
+      if (!fullToolset && name && !HOT_TOOLS.has(name)) {
+        queuedTools.push(definition);
+        return;
+      }
       try {
         toolCtx.tools.register(definition);
         diag(`工具注册成功：${definition.name}`);
@@ -8992,7 +9376,7 @@ ${selfText}
     register({
       name: "memory_core",
       description:
-        "核心记忆拆三个文件（都常驻注入、压缩后自动补回，优先级高于其它记忆）：①behavior/core.md = 不会经常变的内容（称呼约定、用户、能力），600 字预算；②behavior/core-rules.md = 行为规则（说话方式、红线、约定），400 字预算，**只在规则改过或压缩后各注入一次**，状态变化不会把规则再提醒一遍；③behavior/core-state.md = 会变的状态（当前主线、进度、待办），150 字预算。三份分开截断、分开报字数。action=get 读 | set 覆盖写（text，超过硬上限 2×预算会被拒）| append 追加一行 | clear 清空（先归档到 behavior/archive/core*.md）| **reset 一句话复位**（清本会话注入指纹→下一步把三张卡重新注入一次；text 可带一句临时约束，只对本次会话生效、注入一次即弃、不写任何文件）。target=core（默认）| rules | state。不要写成日记或流水账。**主人锁（v1.0）**：以「[主人]」开头的行受保护——set/clear 若删改它们会被拒绝，确需改动要显式带 ownerRelease=true；append 加 owner=true 会把这一行标成主人行。",
+        "核心记忆拆三个文件（都常驻注入、压缩后自动补回，优先级高于其它记忆）：①behavior/core.md = 不会经常变的内容（称呼约定、用户、能力），600 字预算；②behavior/core-rules.md = 行为规则（说话方式、红线、约定），400 字预算，**只在规则改过或压缩后各注入一次**，状态变化不会把规则再提醒一遍；③behavior/core-state.md = 会变的状态（当前主线、进度、待办），300 字预算（封顶，实际用不满）。三份分开截断、分开报字数。action=get 读 | set 覆盖写（text，超过硬上限 2×预算会被拒）| append 追加一行 | clear 清空（先归档到 behavior/archive/core*.md）| **reset 一句话复位**（清本会话注入指纹→下一步把三张卡重新注入一次；text 可带一句临时约束，只对本次会话生效、注入一次即弃、不写任何文件）。target=core（默认）| rules | state。不要写成日记或流水账。**主人锁（v1.0）**：以「[主人]」开头的行受保护——set/clear 若删改它们会被拒绝，确需改动要显式带 ownerRelease=true；append 加 owner=true 会把这一行标成主人行。",
       parameters: {
         type: "object",
         properties: {
@@ -9416,6 +9800,274 @@ ${selfText}
       },
     });
 
+
+    // v0.45.0：重要的人（20 个名额、名片 + 更宽事实预算、冷宫机制）
+    register({
+      name: "memory_people",
+      description: "重要的人：最多 20 个活跃名额，每人一张名片（≤120 字）和更宽的事实预算（800 字）。他提及时注入名片；90 天没提自动打入冷宫（关系还在，只是不再注入）。action=list 列人 | add 建/改名片 | fact 追加事实 | shelve 手动冷宫 | restore 恢复",
+      parameters: {
+        type: "object",
+        properties: {
+          action: { type: "string", description: "list / add / fact / shelve / restore" },
+          name: { type: "string", description: "人名" },
+          card: { type: "string", description: "名片，≤120 字：称呼 · 关系 · 干什么的 · 一句性格 · 忌口/雷区" },
+          relation: { type: "string", description: "关系，≤20 字，如 大学室友" },
+          aliases: { type: "string", description: "别名，逗号分隔" },
+          text: { type: "string", description: "action=fact 用：一条属于他的事实" },
+        },
+      },
+      output,
+      async execute(args) {
+        const p = getPeopleStore();
+        const action = String(args && args.action || "list").trim();
+        const name = String(args && args.name || "").trim();
+        if (action === "list") {
+          const rows = p.all();
+          if (!rows.length) return "还没有重要的人。用 memory_people action=add name=… card=… 建一个。";
+          const act = rows.filter((r) => r.status !== "shelved");
+          const cold = rows.filter((r) => r.status === "shelved");
+          const line = (r) => "· " + r.name + (r.relation ? "（" + r.relation + "）" : "") + (r.card ? " — " + r.card : "") + "｜事实 " + ((r.facts || []).length) + " 条";
+          const head = "活跃 " + act.length + "/20";
+          const tail = cold.length ? ["冷宫 " + cold.length].concat(cold.map(line)) : [];
+          return [head].concat(act.map(line), tail).join("\n");
+        }
+        if (action === "add") {
+          if (!name) return "缺 name。";
+          const aliases = String(args && args.aliases || "").split(/[,，、]/).map((x) => x.trim()).filter(Boolean);
+          const res = p.upsert({ name, card: args && args.card, relation: args && args.relation, aliases });
+          return res.ok ? (res.created ? "已建立" : "已更新") + "重要的人：" + res.person.name + "（活跃名额 " + p.active().length + "/20）" : "没建成：" + res.error;
+        }
+        if (action === "fact") {
+          const res = p.addFact(name, args && args.text);
+          return res.ok ? "已记到「" + name + "」名下（事实 " + ((res.person.facts || []).length) + " 条）" : "没记成：" + res.error;
+        }
+        if (action === "shelve" || action === "restore") {
+          const res = action === "shelve" ? p.shelve(name) : p.restore(name);
+          return res.ok ? "已" + (action === "shelve" ? "打入冷宫" : "恢复") + "：" + name : "没成：" + res.error;
+        }
+        return "不认识的 action：" + action + "（list / add / fact / shelve / restore）";
+      },
+    });
+    // v0.44.0 工具开关：list / on / off 一个入口管到底（技能开关交给 dsh-skillswitch，不重复造）。
+    register({
+
+      name: "tools_switch",
+      description: "工具开关。action=list 列出「已装载 / 可按需热装载 / 要关得改配置重启」三类；action=on pkg=… 当场把某个已装但启动时关掉的插件工具集展开（白名单）；action=off pkg=… 会如实说明运行中关不掉并给出改 bundles 的命令（不假装能关）。",
+      parameters: {
+        type: "object",
+        properties: {
+          action: { type: "string", description: "list（默认）/ on / off" },
+          pkg: { type: "string", description: "包名，如 dsh-novel-forge" },
+        },
+      },
+      output,
+      async execute(args) {
+        const CONFIGS = {
+          "dsh-novel-forge": { minChapterChars: 2000, maxChapterChars: 4000, contextBudgetChars: 6000, scanTopK: 8, repetitionWindow: 10, skipPresetDeploy: true },
+        };
+        const ALLOW = ["dsh-novel-forge", "dsh-video-storyboard", "dsh-bili-scroll", "dsh-mindmap", "dsh-image-gen", "dsh-skill-hub"];
+        const action = String(args?.action || "list").trim().toLowerCase();
+        const profile = path.join(os.homedir(), ".dsh", "profiles", "desktop");
+        const readBundles = () => {
+          try {
+            const p = JSON.parse(fs.readFileSync(path.join(profile, "package.json"), "utf8"));
+            return (p.dsh && p.dsh.profile && p.dsh.profile.bundles) || [];
+          } catch { return []; }
+        };
+        const installed = () => {
+          try {
+            return fs.readdirSync(path.join(profile, "node_modules")).filter((n) => n.startsWith("dsh-") || n.startsWith("@"));
+          } catch { return []; }
+        };
+
+        if (action === "list") {
+          const bundles = readBundles();
+          let man = {};
+          try { man = JSON.parse(fs.readFileSync(path.join(os.homedir(), ".dsh", "tools-manifest.json"), "utf8")); } catch {}
+          const inst = installed();
+          const off = Array.isArray(man.off) ? man.off : [];
+          const hot = ALLOW.filter((p) => inst.includes(p) && !bundles.includes(p));
+          const out = [];
+          out.push(`【工具开关】bundles ${bundles.length} 项` + (man.primary ? `｜三线取向：${man.primary}` : ""));
+          out.push("");
+          out.push(`已装载（启动即生效，${bundles.length}）：`);
+          out.push("  " + bundles.join(", "));
+          if (off.length) {
+            out.push("");
+            out.push(`未启用（${off.length}，各一句话）：`);
+            for (const o of off) out.push("  · " + o);
+          }
+          out.push("");
+          out.push(`可按需热装载（${hot.length}）：`);
+          if (hot.length) for (const p of hot) out.push("  → tools_switch action=on pkg=" + p);
+          else out.push("  (无；白名单外的包要先加进 ALLOW)");
+          out.push("");
+          out.push("要真关掉 → 从当前 profile 的 package.json（dsh.profile.bundles）里删掉那个包名，然后重启（运行中没有 unregister API）");
+          return out.join("\n");
+        }
+
+        if (action === "off") {
+          const pkg = String(args?.pkg || "").trim();
+          if (!pkg) return "给个包名：tools_switch action=off pkg=…";
+          return [
+            `运行中关不掉「${pkg}」——宿主没有 unregister API，工具一旦注册就活到进程结束。`,
+            "要关请改 bundles 再重启：",
+            `  从 dsh.profile.bundles 数组里删掉「${pkg}」，存盘后重启`,
+            "（反方向 on 同理；改完必须重启才生效）",
+          ].join("\n");
+        }
+
+        if (action === "on") {
+          const pkg = String(args?.pkg || "").trim();
+          if (pkg === "memory-tail") {
+            const n = flushQueuedTools();
+            return n ? `已展开记忆长尾工具 ${n} 个（下一轮可调用）` : "长尾工具已经全部展开过了";
+          }
+          if (!ALLOW.includes(pkg)) return `不在白名单：${pkg || "(空)"}；可热装的：${ALLOW.join(" / ")} / memory-tail`;
+          try {
+            const base = path.join(os.homedir(), ".dsh", "profiles", "desktop", "node_modules", pkg);
+            const man = JSON.parse(fs.readFileSync(path.join(base, "package.json"), "utf8"));
+            const ex = man.exports && man.exports["."];
+            const rel = (typeof ex === "string" && ex) || (ex && (ex.import || ex.default)) || man.main || "index.js";
+            const file = path.join(base, String(rel).replace(/^\.\//, ""));
+            const { pathToFileURL } = await import("node:url");
+            const mod = await import(pathToFileURL(file).href);
+            const loaded = [];
+            const real = toolCtx;
+            const proxied = new Proxy(real, {
+              get(target, prop) {
+                if (prop === "tools") {
+                  const t = target.tools || {};
+                  return { ...t, register: (def) => { if (def && def.name) loaded.push(def.name); return t.register(def); } };
+                }
+                const v = target[prop];
+                return typeof v === "function" ? v.bind(target) : v;
+              },
+            });
+            const applyFn = mod.apply || (mod.default && (mod.default.apply || mod.default));
+            if (typeof applyFn !== "function") return `装载失败：${pkg} 没有可调用的 apply()`;
+            const cfg = CONFIGS[pkg] || {};
+            const attempts = [];
+            const paths = [];
+            if (typeof toolCtx.plugin === "function") {
+              paths.push(["ctx.plugin(mod)", () => toolCtx.plugin(mod, cfg)]);
+              paths.push(["ctx.plugin(apply)", () => toolCtx.plugin(applyFn, cfg)]);
+            } else {
+              attempts.push("ctx.plugin 不存在");
+            }
+            paths.push(["apply(proxy)", () => applyFn(proxied, cfg)]);
+            let via = "";
+            for (const [label, run] of paths) {
+              loaded.length = 0;
+              try { await run(); attempts.push(label + " ✓ " + loaded.length + " 工具"); via = label; break; }
+              catch (err) { attempts.push(label + " ✗ " + (err?.message || err)); }
+            }
+            if (!via) return "装载失败：" + attempts.join(" ｜ ");
+            return `已装载 ${pkg}（via ${via}）：${loaded.length || "?"} 个工具可用`;
+          } catch (err) {
+            return `装载失败：${err?.message || err}`;
+          }
+        }
+
+        return `不认识的 action：${action}（只认 list / on / off）`;
+      },
+    });
+
+
+    register({
+
+      name: "memory_pickup",
+      description:
+        "确定性读回自己的记忆：三张常驻卡（核心/规则/状态）+ 自我层最近几条 + 最近几天日记片段，原样返回。**上下文被压缩之后、换了新会话、或用户问「你还记得吗/之前那个」时用它**——它不检索、不猜，只把已经在盘上的东西读回来（和「让模型自己想起来」是两件事）。比记忆注入更可靠的地方是：它是被明确调用的，不依赖模型自觉。",
+      parameters: {
+        type: "object",
+        properties: {
+          days: { type: "number", description: "读最近几天的日记（默认 3，最多 14）" },
+          maxChars: { type: "number", description: "总字数上限（默认 5000，最少 1000）" },
+        },
+      },
+      output,
+      async execute(args) {
+        try {
+          ensureDirs();
+          const days = Math.max(1, Math.min(14, Number(args?.days) || 3));
+          const cap = Math.max(1000, Math.min(16000, Number(args?.maxChars) || 5000));
+          const readIf = (p) => {
+            try {
+              return fs.readFileSync(p, "utf8").trim();
+            } catch {
+              return "";
+            }
+          };
+          const core = readIf(path.join(PATHS.behavior, "core.md"));
+          const rules = readIf(path.join(PATHS.behavior, "core-rules.md"));
+          const state = readIf(path.join(PATHS.behavior, "core-state.md"));
+          // 自我层：取最近 6 条正文
+          let selfLines = [];
+          try {
+            const rows = readJsonl(path.join(PATHS.behavior, "self.jsonl")).filter((e) => e && !e.voided);
+            selfLines = rows.slice(-6).map((e) => `· ${clip(String(e.text || ""), 120)}`);
+          } catch {
+            /* 没有自我层就跳过 */
+          }
+          // 最近 N 天日记（turn 条目，按 ts 升序，最多 40 条）
+          const cutoff = Date.now() - days * 86400000;
+          const turns = [];
+          try {
+            for (const file of dirJsonl(PATHS.diaryDir)) {
+              for (const e of readJsonl(file)) {
+                if (!e || e.kind !== "turn") continue;
+                const ts = Date.parse(String(e.ts || ""));
+                if (!Number.isFinite(ts) || ts < cutoff) continue;
+                turns.push({ ts, text: `${String(e.user || "")} / ${String(e.assistant || "")}` });
+              }
+            }
+          } catch {
+            /* 日记读不到就只给三卡 */
+          }
+          turns.sort((a, b) => a.ts - b.ts);
+          const picked = turns.slice(-40);
+          const parts = [
+            `【读回记忆】${new Date().toLocaleString("zh-CN", { hour12: false })}｜最近 ${days} 天`,
+            "这是把盘上已有的东西原样读回来（不是新检索，也不是新注入）。",
+            "",
+            `一、核心卡（${core.length} 字）`,
+            core || "（空）",
+            "",
+            `二、规则卡（${rules.length} 字）`,
+            rules || "（空）",
+            "",
+            `三、状态卡（${state.length} 字）`,
+            state || "（空）",
+          ];
+          if (selfLines.length) parts.push("", "四、自我层（最近 6 条）", ...selfLines);
+          if (picked.length) {
+            // 预算感知：先算前面四块用掉多少，剩下的才给日记——宁可少给几条，也不要在句子中间截断
+            const used = parts.join("\n").length;
+            const room = Math.max(600, cap - used - 120);
+            const lines = [];
+            let spent = 0;
+            for (const t of picked) {
+              const d = new Date(t.ts);
+              const hm = `${String(d.getMonth() + 1)}-${String(d.getDate())} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+              const line = `· ${hm} ${clip(t.text.replace(/\s+/g, " "), 110)}`;
+              if (spent + line.length > room && lines.length >= 5) break;
+              lines.push(line);
+              spent += line.length + 1;
+            }
+            parts.push("", `五、最近 ${days} 天日记（共 ${picked.length} 条，这里给最近 ${lines.length} 条；要更多就把 days 调小或 maxChars 调大）`, ...lines);
+          } else {
+            parts.push("", `五、最近 ${days} 天没有日记回合（可能真没聊，也可能日记没写）`);
+          }
+          let out = parts.join("\n");
+          if (out.length > cap) out = `${out.slice(0, cap)}\n\n…（超过 ${cap} 字被截断；要更多就调 maxChars，或单独读某一层）`;
+          return out;
+        } catch (err) {
+          return `读回失败：${err?.message || err}`;
+        }
+      },
+    });
+
     register({
 
       name: "memory_control",
@@ -9584,7 +10236,7 @@ ${selfText}
 
       name: "memory_backup",
       description:
-        "立刻把记忆备份到 F 盘（深层、阵列、行为记忆、图片/音频资产、配置与运行态、原始会话）。自动备份一天最多一次、只保留 30 天；手动调用不受频率限制，也不会被清理策略拦。自动备份的频率/保留天数/是否含行为记忆，可在 Web UI「设置 → 记忆备份」面板里点选，等价于改 config.json 的 backup 段。mode=cloud 时改为生成**加密云包**（AES-256-GCM）写进指定文件夹（默认百度网盘同步目录 F:\\BaiduSyncdisk\\dsh-memory-cloud），网盘客户端一开就自动上传；云备份的密码不落盘，只读参数 password 或环境变量 DSH_MEMORY_BACKUP_PASS。【使用规则】密码绝不写进配置、脚本、文档或记忆；恢复时先解到独立目录、核对 sha256，确认后再人工覆盖记忆库（不要直接解到原位）。",
+        "立刻把记忆备份到 F 盘（深层、阵列、行为记忆、图片/音频资产、配置与运行态、原始会话）。若开着 config.backup.work（默认关，设置面板「工作文件」），会把手动备份那个目录整个复制成备份目录下的 work-<时间>/——那是给网页导出的工作内容准备的冷库位，不进记忆库、不参与检索、**不进每日快照轮转**（自己保留 keepArchives 份，默认 10；上限默认 20GB，GB 级也放得下）；传 work:true 表示这一次强制带上。自动备份永远不带它。自动备份一天最多一次、只保留 30 天；手动调用不受频率限制，也不会被清理策略拦。自动备份的频率/保留天数/是否含行为记忆，可在 Web UI「设置 → 记忆备份」面板里点选，等价于改 config.json 的 backup 段。mode=cloud 时改为生成**加密云包**（AES-256-GCM）写进指定文件夹（默认百度网盘同步目录 F:\\BaiduSyncdisk\\dsh-memory-cloud），网盘客户端一开就自动上传；云备份的密码不落盘，只读参数 password 或环境变量 DSH_MEMORY_BACKUP_PASS。【使用规则】密码绝不写进配置、脚本、文档或记忆；恢复时先解到独立目录、核对 sha256，确认后再人工覆盖记忆库（不要直接解到原位）。",
       parameters: {
         type: "object",
         properties: {
@@ -9594,6 +10246,7 @@ ${selfText}
           sessions: { type: "boolean", description: "cloud 用：是否含会话原文（默认不含，含了包大很多且涉隐私）" },
           assets: { type: "boolean", description: "cloud 用：是否含图片/音频资产（默认含）" },
           keepPacks: { type: "number", description: "cloud 用：目录里保留几个包（默认 6，旧的自动删）" },
+          work: { type: "boolean", description: "local 用：这一次把工作文件也带上（config.backup.work 开着才有目录可取；不用改配置）" },
         },
       },
       output,
@@ -9601,7 +10254,7 @@ ${selfText}
         try {
           ensureDirs();
           if (String(args?.mode || "local") === "cloud") return cloudBackupNow(args || {});
-          return backupNow("manual", { force: true });
+          return backupNow("manual", { force: true, work: args?.work === true });
         } catch (err) {
           return `备份失败：${err?.message || err}`;
         }
@@ -9935,6 +10588,31 @@ const plugin = {
   apply,
 };
 
-export { apply, loadState, saveState, STATE_PATH, filterMsgsBySeq, searchEngineOf, searchIndexStatus, closeSearchIndex, buildInjectionText, buildStateInjection, buildHandoffInjection, buildRecallInjection, buildDueInjection, buildOpeningInjection, ensureOpeningLunarRows, addOpeningRow, removeOpeningRow, readOpeningRows, pruneOpeningRows, formatNowLine, ageLabelOf, modelRouteOf, sessionMemory, createSessionMemory, sessionMemoryPaths, normalizeSessionId, isSpecialKey, doctorReport, renderDoctor, resolveBackupDir, probeWritable, coreInjection, coreOptions, createLines, lexicalScore, linesConfigDefaults, linesPaths, qualitativeOf, topicTokens, behaviorHint, createSocial, detectScene, normalizeName, personIdOf, registerSocialTools, sceneLabel, socialConfigDefaults, socialPaths, searchSocialContext, backupPolicySummary, compactionStats, compactionStatusLine, noteCompaction, noteAutoSummary, compressCallsIn, nativeCompactionsIn, compressToolCallsIn, compressionKindOf, readCompactionLog, appendCompactionRecord, ingestCompactionEvent, compactionRecords, compactionSelfCheck, dutyBoardData, sendHandoff, pullHandoff, listHandoffs, compactionSuiteDetected, listAutoSummaries, deleteAutoSummary, setFactCaller, factOptions, readFactCandidates, writeFactCandidates, pendingFactCandidates, factCandidateStats, factStatusLine, parseFactCandidates, buildFactPrompt, factInventory, isDuplicateFact, extractFactCandidates, acceptFactCandidate, rejectFactCandidate, updateBackupPolicy, updateAutoSummaryPolicy, featuresView, setFeature, memoryOverview, openingUpdate, openingDelete, nowView, updateNowMode, cuepromptView, updateCuePrompt, autoSummaryConfigView, registerBackupApi, hostIsLoopback, readRequestBody, searchMemory, searchMemoryKeyword, searchTokensOf, ensureSearchIndex, bm25ScoreOf, searchTargets, writeMemory, voidMemory, exportArchive, readQqWatchSettings, writeQqWatchSettings, qqWatchView, briefOf, aliasesOf, mergeAliases, writeGuardOf, writeGuardCheck, similarityOf, backupNow, pruneOldSnapshots, shouldSkipBackup, backupStampOf, writeTurnDiary, isCompressionEvent, renameAssetImage, listAssetImages, assetDetail, arrayIndexFiles, arrayIndexFileForMonth, migrateArrayIndexIfNeeded, AUDIO_SOURCE, AUDIO_KIND, AUDIO_USE, audioClassTag, buildStats, tagsOf, validateTags, checkedTags, TAG_VOCAB, clearMemos, tagCard, isVocabTag, normalizeTag, CUSTOM_TAG_MAX, CUSTOM_TAG_LEN, RARE_TAG_MAX_COUNT, recallSession, decodeSessionFile, findSessionFile, archiveSessions, scanSessionOriginals, sessionHeaderOf, findArchivedSession, rawArchiveRows, rawSessionFileName, cwdOfSlug, sha256OfFile, roundsOfSessionFile, relationInjectionLines, archiveRelationOverflow, locateMemory, jsonlHasHash, rebuildGuide, guideStats, guideLinks, guideNodes, addSource, listSources, findSources, sourceStats, loadSources, sourceTag, entryProvenance, sourceIndex, runAutoSummary, pendingTurns, autoSummaryOptions, buildAutoSummaryEntry, buildSummaryPrompt, summaryStyleLine, parseSummaryText, summaryInputOf, callWithThinkingRetry, setAutoSummaryCaller, defaultConfig, loadConfig, AUTO_SUMMARY_PREFIX, createRules, parseRulesMarkdown, formatRuleRow, rulesForSearch, parseTimeBound };
+export { copyWorkDir, measureDir, humanBytes, apply, loadState, saveState, STATE_PATH, filterMsgsBySeq, searchEngineOf, searchIndexStatus, closeSearchIndex, buildInjectionText, buildStateInjection, buildHandoffInjection, buildRecallInjection, buildDueInjection, buildOpeningInjection, ensureOpeningLunarRows, addOpeningRow, removeOpeningRow, readOpeningRows, pruneOpeningRows, formatNowLine, ageLabelOf, modelRouteOf, sessionMemory, createSessionMemory, sessionMemoryPaths, normalizeSessionId, isSpecialKey, doctorReport, renderDoctor, resolveBackupDir, probeWritable, coreInjection, coreOptions, createLines, lexicalScore, linesConfigDefaults, linesPaths, qualitativeOf, topicTokens, behaviorHint, createSocial, detectScene, normalizeName, personIdOf, registerSocialTools, sceneLabel, socialConfigDefaults, socialPaths, searchSocialContext, backupPolicySummary, compactionStats, compactionStatusLine, noteCompaction, noteAutoSummary, compressCallsIn, nativeCompactionsIn, compressToolCallsIn, compressionKindOf, readCompactionLog, appendCompactionRecord, ingestCompactionEvent, compactionRecords, compactionSelfCheck, dutyBoardData, sendHandoff, pullHandoff, listHandoffs, compactionSuiteDetected, listAutoSummaries, deleteAutoSummary, setFactCaller, factOptions, readFactCandidates, writeFactCandidates, pendingFactCandidates, factCandidateStats, factStatusLine, parseFactCandidates, buildFactPrompt, factInventory, isDuplicateFact, extractFactCandidates, acceptFactCandidate, rejectFactCandidate, updateBackupPolicy, updateAutoSummaryPolicy, featuresView, setFeature, memoryOverview, openingUpdate, openingDelete, nowView, updateNowMode, cuepromptView, updateCuePrompt, autoSummaryConfigView, registerBackupApi, hostIsLoopback, readRequestBody, searchMemory, searchMemoryKeyword, searchTokensOf, ensureSearchIndex, bm25ScoreOf, searchTargets, writeMemory, voidMemory, exportArchive, readQqWatchSettings, writeQqWatchSettings, qqWatchView, briefOf, aliasesOf, mergeAliases, writeGuardOf, writeGuardCheck, similarityOf, backupNow, pruneOldSnapshots, shouldSkipBackup, backupStampOf, writeTurnDiary, isCompressionEvent, renameAssetImage, listAssetImages, assetDetail, arrayIndexFiles, arrayIndexFileForMonth, migrateArrayIndexIfNeeded, AUDIO_SOURCE, AUDIO_KIND, AUDIO_USE, audioClassTag, buildStats, tagsOf, validateTags, checkedTags, TAG_VOCAB, clearMemos, tagCard, isVocabTag, normalizeTag, CUSTOM_TAG_MAX, CUSTOM_TAG_LEN, RARE_TAG_MAX_COUNT, recallSession, decodeSessionFile, findSessionFile, archiveSessions, scanSessionOriginals, sessionHeaderOf, findArchivedSession, rawArchiveRows, rawSessionFileName, cwdOfSlug, sha256OfFile, roundsOfSessionFile, relationInjectionLines, archiveRelationOverflow, locateMemory, jsonlHasHash, rebuildGuide, guideStats, guideLinks, guideNodes, addSource, listSources, findSources, sourceStats, loadSources, sourceTag, entryProvenance, sourceIndex, runAutoSummary, pendingTurns, autoSummaryOptions, buildAutoSummaryEntry, buildSummaryPrompt, summaryStyleLine, parseSummaryText, summaryInputOf, callWithThinkingRetry, setAutoSummaryCaller, defaultConfig, loadConfig, AUTO_SUMMARY_PREFIX, createRules, parseRulesMarkdown, formatRuleRow, rulesForSearch, parseTimeBound };
 export default plugin;
 
+
+// v0.44.1（丹阳：「和工具绑定的规则，跟工具一起触发，平时看不见」）：
+// 规则行里写 〔绑定：bili〕 的，只有当 bili_* 这类工具真的在场时才注入；不在场就整行隐藏。
+let schemaProvider = null;
+function activeBinder() {
+  let names = null;
+  try {
+    names = schemaProvider ? schemaProvider() : null;
+  } catch {
+    names = null;
+  }
+  if (!names || !names.length) return null; // 拿不到工具表就不过滤，宁可多给也别漏规矩
+  return (bind) => names.some((n) => n.startsWith(String(bind || "").toLowerCase()));
+}
+function filterBoundRules(text, isActive) {
+  if (!text || !isActive) return text || "";
+  return String(text)
+    .split("\n")
+    .filter((line) => {
+      const m = line.match(/〔绑定[：:]\s*([^〕]+)〕/);
+      if (!m) return true;
+      return m[1].split(/[、,，/\s]+/).filter(Boolean).some((b) => isActive(b));
+    })
+    .join("\n");
+}
