@@ -36,6 +36,7 @@
     "knowledge.js",
     "sessionmem.js",
     "cordis.patch.yml",
+    "locale/zh.json",
     "README.md",
     "抢修卡.md",
     "icon.png",
