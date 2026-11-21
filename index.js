@@ -1648,7 +1648,9 @@ function buildRecallInjection(cfg, userText, { nowMs = Date.now(), collect } = {
   // A-145：记录册命中——主词/副词/别名任一命中就给一行；冲突条目自带「两种说法未确认」
   const recordLines = (() => {
     try {
-      return searchRecords(String(userText || ""), 3).map((r) => `· [记录] ${formatRecordRow(r)}`);
+      return searchRecordsGrouped(String(userText || ""), { hitLimit: 3, groupLimit: 8 }).map(
+        (r) => `· [记录] ${formatRecordRow(r)}`,
+      );
     } catch {
       return [];
     }
@@ -1657,7 +1659,7 @@ function buildRecallInjection(cfg, userText, { nowMs = Date.now(), collect } = {
     if (dayBlock || recordLines.length) {
       logRecall({ n: 0, strong: 0, weak: 0, matched: [], day: dayBlock ? 1 : 0, dayN: dayStats.n, days: dayStats.days, records: recordLines.length });
     }
-    const recBlock = recordLines.length ? ["以下是记录册里对得上的条目（主词/副词命中）：", ...recordLines] : [];
+    const recBlock = recordLines.length ? ["以下是记录册里能对上的条目（主词命中时整组带出）：", ...recordLines] : [];
     return [dayBlock, ...recBlock].filter(Boolean).join("\n");
   }
   const seen = new Set();
@@ -7097,6 +7099,52 @@ function searchRecords(query, limit = 8) {
     .map((x) => x.r);
 }
 
+// A-145 取：主词一命中，就把该主词下的**整组**记录带出来。
+// 理由（2026-11-21 bench 复盘）：问题里有「我爸」就说明查谁，属性词（芹菜/腰枕）没出现是常态；
+// 只按字面等属性词命中，等于要求提问者也记得那个词——不叫记忆，叫索引。
+function searchRecordsGrouped(query, { hitLimit = 3, groupLimit = 8, charBudget = 700 } = {}) {
+  const rows = recordRows();
+  if (!rows.length) return [];
+  const q = String(query || "").trim();
+  if (!q) return [];
+  const tokens = q.split(/[\s,，、;；|/／]+/).filter(Boolean);
+  const subOf = (r) => String(r.sub || "").trim();
+  const hitSub = (r) => tokens.some((t) => {
+    if (!t) return false;
+    const sub = subOf(r);
+    if (sub && (sub.includes(t) || t.includes(sub))) return true;
+    return (r.aliases || []).some((a) => String(a).includes(t) || t.includes(String(a)));
+  });
+  const hits = searchRecords(q, hitLimit);
+  const subs = new Set(hits.filter(hitSub).map((r) => subOf(r)));
+  const out = [];
+  const seen = new Set();
+  const push = (r) => {
+    const k = recordKey(r.sub, r.attr);
+    if (seen.has(k)) return false;
+    seen.add(k);
+    out.push(r);
+    return true;
+  };
+  for (const r of hits) push(r);
+  // 命中的主词：整组补齐（组内顺序按写入先后，后来的在前）
+  for (const r of [...rows].reverse()) {
+    if (!subs.has(subOf(r))) continue;
+    if (out.length >= groupLimit + hitLimit) break;
+    push(r);
+  }
+  // 预算：逐条累加，超了就停（宁可少带，不挤掉正文）
+  const kept = [];
+  let used = 0;
+  for (const r of out) {
+    const line = formatRecordRow(r);
+    if (kept.length && used + line.length > charBudget) break;
+    used += line.length;
+    kept.push(r);
+  }
+  return kept;
+}
+
 function removeRecord(target) {
   const want = String(target || "").trim();
   if (!want) return "要给 hash（前 8 位即可）或「主词｜副词」。";
@@ -11401,7 +11449,7 @@ const plugin = {
   apply,
 };
 
-export { copyWorkDir, measureDir, humanBytes, apply, loadState, saveState, STATE_PATH, filterMsgsBySeq, searchEngineOf, searchIndexStatus, closeSearchIndex, buildInjectionText, buildStateInjection, buildHandoffInjection, buildRecallInjection, buildDueInjection, buildOpeningInjection, ensureOpeningLunarRows, addOpeningRow, removeOpeningRow, readOpeningRows, pruneOpeningRows, formatNowLine, ageLabelOf, modelRouteOf, sessionMemory, createSessionMemory, sessionMemoryPaths, normalizeSessionId, isSpecialKey, doctorReport, renderDoctor, resolveBackupDir, probeWritable, coreInjection, coreOptions, createLines, lexicalScore, linesConfigDefaults, linesPaths, qualitativeOf, topicTokens, behaviorHint, createSocial, detectScene, normalizeName, personIdOf, registerSocialTools, sceneLabel, socialConfigDefaults, socialPaths, searchSocialContext, backupPolicySummary, compactionStats, compactionStatusLine, noteCompaction, noteAutoSummary, compressCallsIn, nativeCompactionsIn, compressToolCallsIn, compressionKindOf, readCompactionLog, appendCompactionRecord, ingestCompactionEvent, compactionRecords, compactionSelfCheck, dutyBoardData, sendHandoff, pullHandoff, listHandoffs, compactionSuiteDetected, listAutoSummaries, deleteAutoSummary, setFactCaller, factOptions, readFactCandidates, writeFactCandidates, pendingFactCandidates, factCandidateStats, factStatusLine, parseFactCandidates, buildFactPrompt, factInventory, isDuplicateFact, extractFactCandidates, acceptFactCandidate, rejectFactCandidate, updateBackupPolicy, updateAutoSummaryPolicy, featuresView, setFeature, memoryOverview, openingUpdate, openingDelete, nowView, updateNowMode, cuepromptView, updateCuePrompt, autoSummaryConfigView, registerBackupApi, hostIsLoopback, readRequestBody, searchMemory, searchMemoryKeyword, searchTokensOf, ensureSearchIndex, bm25ScoreOf, searchTargets, writeMemory, voidMemory, exportArchive, readQqWatchSettings, writeQqWatchSettings, qqWatchView, briefOf, aliasesOf, mergeAliases, writeGuardOf, writeGuardCheck, similarityOf, backupNow, pruneOldSnapshots, shouldSkipBackup, backupStampOf, writeTurnDiary, isCompressionEvent, renameAssetImage, listAssetImages, assetDetail, arrayIndexFiles, arrayIndexFileForMonth, migrateArrayIndexIfNeeded, AUDIO_SOURCE, AUDIO_KIND, AUDIO_USE, audioClassTag, buildStats, tagsOf, validateTags, checkedTags, TAG_VOCAB, clearMemos, tagCard, isVocabTag, normalizeTag, CUSTOM_TAG_MAX, CUSTOM_TAG_LEN, RARE_TAG_MAX_COUNT, recallSession, decodeSessionFile, findSessionFile, archiveSessions, scanSessionOriginals, sessionHeaderOf, findArchivedSession, rawArchiveRows, rawSessionFileName, cwdOfSlug, sha256OfFile, roundsOfSessionFile, relationInjectionLines, archiveRelationOverflow, locateMemory, jsonlHasHash, rebuildGuide, guideStats, guideLinks, guideNodes, addSource, listSources, findSources, sourceStats, loadSources, sourceTag, entryProvenance, sourceIndex, runAutoSummary, pendingTurns, autoSummaryOptions, buildAutoSummaryEntry, buildSummaryPrompt, summaryStyleLine, parseSummaryText, summaryInputOf, callWithThinkingRetry, setAutoSummaryCaller, defaultConfig, loadConfig, AUTO_SUMMARY_PREFIX, createRules, parseRulesMarkdown, formatRuleRow, rulesForSearch, parseTimeBound, handleRecord, searchRecords, addRecord, removeRecord, recordRows };
+export { copyWorkDir, measureDir, humanBytes, apply, loadState, saveState, STATE_PATH, filterMsgsBySeq, searchEngineOf, searchIndexStatus, closeSearchIndex, buildInjectionText, buildStateInjection, buildHandoffInjection, buildRecallInjection, buildDueInjection, buildOpeningInjection, ensureOpeningLunarRows, addOpeningRow, removeOpeningRow, readOpeningRows, pruneOpeningRows, formatNowLine, ageLabelOf, modelRouteOf, sessionMemory, createSessionMemory, sessionMemoryPaths, normalizeSessionId, isSpecialKey, doctorReport, renderDoctor, resolveBackupDir, probeWritable, coreInjection, coreOptions, createLines, lexicalScore, linesConfigDefaults, linesPaths, qualitativeOf, topicTokens, behaviorHint, createSocial, detectScene, normalizeName, personIdOf, registerSocialTools, sceneLabel, socialConfigDefaults, socialPaths, searchSocialContext, backupPolicySummary, compactionStats, compactionStatusLine, noteCompaction, noteAutoSummary, compressCallsIn, nativeCompactionsIn, compressToolCallsIn, compressionKindOf, readCompactionLog, appendCompactionRecord, ingestCompactionEvent, compactionRecords, compactionSelfCheck, dutyBoardData, sendHandoff, pullHandoff, listHandoffs, compactionSuiteDetected, listAutoSummaries, deleteAutoSummary, setFactCaller, factOptions, readFactCandidates, writeFactCandidates, pendingFactCandidates, factCandidateStats, factStatusLine, parseFactCandidates, buildFactPrompt, factInventory, isDuplicateFact, extractFactCandidates, acceptFactCandidate, rejectFactCandidate, updateBackupPolicy, updateAutoSummaryPolicy, featuresView, setFeature, memoryOverview, openingUpdate, openingDelete, nowView, updateNowMode, cuepromptView, updateCuePrompt, autoSummaryConfigView, registerBackupApi, hostIsLoopback, readRequestBody, searchMemory, searchMemoryKeyword, searchTokensOf, ensureSearchIndex, bm25ScoreOf, searchTargets, writeMemory, voidMemory, exportArchive, readQqWatchSettings, writeQqWatchSettings, qqWatchView, briefOf, aliasesOf, mergeAliases, writeGuardOf, writeGuardCheck, similarityOf, backupNow, pruneOldSnapshots, shouldSkipBackup, backupStampOf, writeTurnDiary, isCompressionEvent, renameAssetImage, listAssetImages, assetDetail, arrayIndexFiles, arrayIndexFileForMonth, migrateArrayIndexIfNeeded, AUDIO_SOURCE, AUDIO_KIND, AUDIO_USE, audioClassTag, buildStats, tagsOf, validateTags, checkedTags, TAG_VOCAB, clearMemos, tagCard, isVocabTag, normalizeTag, CUSTOM_TAG_MAX, CUSTOM_TAG_LEN, RARE_TAG_MAX_COUNT, recallSession, decodeSessionFile, findSessionFile, archiveSessions, scanSessionOriginals, sessionHeaderOf, findArchivedSession, rawArchiveRows, rawSessionFileName, cwdOfSlug, sha256OfFile, roundsOfSessionFile, relationInjectionLines, archiveRelationOverflow, locateMemory, jsonlHasHash, rebuildGuide, guideStats, guideLinks, guideNodes, addSource, listSources, findSources, sourceStats, loadSources, sourceTag, entryProvenance, sourceIndex, runAutoSummary, pendingTurns, autoSummaryOptions, buildAutoSummaryEntry, buildSummaryPrompt, summaryStyleLine, parseSummaryText, summaryInputOf, callWithThinkingRetry, setAutoSummaryCaller, defaultConfig, loadConfig, AUTO_SUMMARY_PREFIX, createRules, parseRulesMarkdown, formatRuleRow, rulesForSearch, parseTimeBound, handleRecord, searchRecords, searchRecordsGrouped, addRecord, removeRecord, recordRows };
 export default plugin;
 
 
