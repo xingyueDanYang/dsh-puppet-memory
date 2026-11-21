@@ -145,6 +145,8 @@ const PATHS = {
   // A-145（0.50）：记录册——一行一条「主词｜副词｜状态」（如 父亲｜芹菜｜不喜欢）。
   // 与 relations 分开存、分别检索，钩子判定共用（主词或副词任一命中即算）。
   records: path.join(MEM_DIR, "deep", "records.jsonl"),
+  // 主词表（一级索引）：主词带启用状态，停用后其下所有副词记录退出检索
+  recordSubjects: path.join(MEM_DIR, "deep", "record-subjects.jsonl"),
   array: path.join(MEM_DIR, "array"),
   // v0.36：老的单文件索引（只读兼容，新写入进 array/index/YYYY-MM.jsonl）
   arrayIndex: path.join(MEM_DIR, "array", "index.jsonl"),
@@ -7058,8 +7060,60 @@ function classesOfText(text) {
   return out;
 }
 
-function recordRows() {
+// 主词表（一级索引，2026-11-21 丹阳提的「主词状态启用，才会选择副词」）：
+// 停用一个主词 = 它下面所有副词记录一起退出检索，不必逐条标废。
+// 主词的别名对该主词下的每条记录都生效，省得每条重复写别名。
+function subjectRows() {
+  return readJsonl(PATHS.recordSubjects).filter((r) => r && r.kind === "subject" && r.sub);
+}
+
+function subjectMap() {
+  const m = new Map();
+  for (const s of subjectRows()) m.set(String(s.sub).trim(), s);
+  return m;
+}
+
+function isSubEnabled(sub, map) {
+  const s = (map || subjectMap()).get(String(sub || "").trim());
+  return !s || s.enabled !== false;
+}
+
+function recordAliasesOf(r, map) {
+  const s = (map || subjectMap()).get(String((r && r.sub) || "").trim());
+  return [...(((r && r.aliases) || [])), ...((s && s.aliases) || [])];
+}
+
+// addSubject：登记/更新一个主词（启用状态 + 别名 + 类别）
+function addSubject(sub, opts = {}) {
+  const name = String(sub || "").trim();
+  if (!name) return "主词不能为空。";
+  const aliases = (Array.isArray(opts.aliases) ? opts.aliases : String(opts.aliases || "").split(/[,，、\s]+/))
+    .map((x) => String(x).trim())
+    .filter(Boolean)
+    .slice(0, 8);
+  const enabled = opts.enabled === undefined ? true : Boolean(opts.enabled);
+  const row = {
+    kind: "subject",
+    sub: clip(name, 40),
+    enabled,
+    ...(aliases.length ? { aliases: aliases.map((a) => clip(a, 16)) } : {}),
+    ...(opts.cls ? { cls: clip(String(opts.cls), 8) } : {}),
+    ts: nowISO(),
+    hash: sha1(`subject|${name}|${enabled ? 1 : 0}|${nowISO()}`).slice(0, 16),
+  };
+  const keep = subjectRows().filter((r) => String(r.sub).trim() !== name);
+  writeJsonl(PATHS.recordSubjects, [...keep, row]);
+  return `${enabled ? "启用" : "停用"}主词：${name}${enabled ? "（其下记录恢复检索）" : "（其下记录全部退出检索）"}`;
+}
+
+// 原始行：冲突判定要用它，不能被"主词停用"过滤掉
+function rawRecordRows() {
   return readJsonl(PATHS.records).filter((r) => r && r.sub && r.attr && r.state);
+}
+
+function recordRows() {
+  const map = subjectMap();
+  return rawRecordRows().filter((r) => isSubEnabled(r.sub, map));
 }
 
 function recordKey(sub, attr) {
@@ -7085,7 +7139,7 @@ function addRecord(line, opts = {}) {
     .map((x) => String(x).trim())
     .filter(Boolean)
     .slice(0, 8);
-  const rows = recordRows();
+  const rows = rawRecordRows();
   const key = recordKey(sub, attr);
   const same = rows.filter((r) => recordKey(r.sub, r.attr) === key);
   const current = same[same.length - 1];
@@ -7111,7 +7165,8 @@ function addRecord(line, opts = {}) {
 
 // searchRecords：主词/副词/状态任一命中即算；主词权重最高（问「我爸」要能带出「父亲」）
 function searchRecords(query, limit = 8) {
-  const rows = recordRows();
+  const map = subjectMap();
+  const rows = rawRecordRows().filter((r) => isSubEnabled(r.sub, map));
   if (!rows.length) return [];
   const max = Math.max(1, Math.min(50, Number(limit) || 8));
   const q = String(query || "").trim();
@@ -7130,7 +7185,7 @@ function searchRecords(query, limit = 8) {
           const nf = recNorm(f);
           return !!nt && !!nf && (nf.includes(nt) || nt.includes(nf));
         };
-        const aliasHit = (r.aliases || []).some((a) => hit(a));
+        const aliasHit = recordAliasesOf(r, map).some((a) => hit(a));
         if (hit(r.sub) || aliasHit) score += 3;
         if (hit(r.attr)) score += 2;
         if (hit(r.state)) score += 1;
@@ -7164,7 +7219,7 @@ function searchRecordsGrouped(query, { hitLimit = 3, groupLimit = 8, charBudget 
       return !!nt && !!nf && (nf.includes(nt) || nt.includes(nf));
     };
     if (hit(subOf(r))) return true;
-    return (r.aliases || []).some((a) => hit(a));
+    return recordAliasesOf(r).some((a) => hit(a));
   });
   const hits = searchRecords(q, hitLimit);
   const subs = new Set(hits.filter(hitSub).map((r) => subOf(r)));
@@ -7202,7 +7257,8 @@ function removeRecord(target) {
   const want = String(target || "").trim();
   if (!want) return "要给 hash（前 8 位即可）或「主词｜副词」。";
   const keyParts = want.split(/[|｜]/).map((x) => x.trim()).filter(Boolean);
-  const rows = recordRows();
+  // 用原始行：否则「主词停用」的整组会被这次重写静默丢掉
+  const rows = rawRecordRows();
   const keep = [];
   let gone = null;
   for (const r of rows) {
@@ -7245,6 +7301,12 @@ function writeRecordsOf(args) {
   const list = Array.isArray(raw) ? raw : [raw];
   const out = [];
   for (const item of list) {
+    // 只有主词、没有副词/状态 → 这是一次「主词登记/启停」，不是一条记录
+    if (item && typeof item === "object" && item.sub && !item.attr && !item.state) {
+      const r = addSubject(item.sub, { aliases: item.aliases, enabled: item.enabled, cls: item.cls });
+      if (r) out.push(r);
+      continue;
+    }
     const line = typeof item === "string"
       ? item
       : [item && item.sub, item && item.attr, item && item.state].filter(Boolean).join("｜");
@@ -9844,6 +9906,7 @@ ${selfText}
                 state: { type: "string", description: "状态（自由文本），如 不喜欢" },
                 aliases: { type: "array", items: { type: "string" }, description: "主词的其他说法，如 我爸/爸爸" },
                 cls: { type: "string", description: "类别：食物/身体/习惯/出行/时间/物品/关系/情绪/钱/工作。取的时候按类别联想——「芹菜」是食物，问「准备吃的」才带得出来" },
+                enabled: { type: "boolean", description: "只给 sub、不给 attr/state 时：这是主词启停。false=该主词下所有记录退出检索（不必逐条标废），true=恢复" },
                 note: { type: "string", description: "备注，不参与检索主键" },
               },
             },
@@ -11503,7 +11566,7 @@ const plugin = {
   apply,
 };
 
-export { copyWorkDir, measureDir, humanBytes, apply, loadState, saveState, STATE_PATH, filterMsgsBySeq, searchEngineOf, searchIndexStatus, closeSearchIndex, buildInjectionText, buildStateInjection, buildHandoffInjection, buildRecallInjection, buildDueInjection, buildOpeningInjection, ensureOpeningLunarRows, addOpeningRow, removeOpeningRow, readOpeningRows, pruneOpeningRows, formatNowLine, ageLabelOf, modelRouteOf, sessionMemory, createSessionMemory, sessionMemoryPaths, normalizeSessionId, isSpecialKey, doctorReport, renderDoctor, resolveBackupDir, probeWritable, coreInjection, coreOptions, createLines, lexicalScore, linesConfigDefaults, linesPaths, qualitativeOf, topicTokens, behaviorHint, createSocial, detectScene, normalizeName, personIdOf, registerSocialTools, sceneLabel, socialConfigDefaults, socialPaths, searchSocialContext, backupPolicySummary, compactionStats, compactionStatusLine, noteCompaction, noteAutoSummary, compressCallsIn, nativeCompactionsIn, compressToolCallsIn, compressionKindOf, readCompactionLog, appendCompactionRecord, ingestCompactionEvent, compactionRecords, compactionSelfCheck, dutyBoardData, sendHandoff, pullHandoff, listHandoffs, compactionSuiteDetected, listAutoSummaries, deleteAutoSummary, setFactCaller, factOptions, readFactCandidates, writeFactCandidates, pendingFactCandidates, factCandidateStats, factStatusLine, parseFactCandidates, buildFactPrompt, factInventory, isDuplicateFact, extractFactCandidates, acceptFactCandidate, rejectFactCandidate, updateBackupPolicy, updateAutoSummaryPolicy, featuresView, setFeature, memoryOverview, openingUpdate, openingDelete, nowView, updateNowMode, cuepromptView, updateCuePrompt, autoSummaryConfigView, registerBackupApi, hostIsLoopback, readRequestBody, searchMemory, searchMemoryKeyword, searchTokensOf, ensureSearchIndex, bm25ScoreOf, searchTargets, writeMemory, voidMemory, exportArchive, readQqWatchSettings, writeQqWatchSettings, qqWatchView, briefOf, aliasesOf, mergeAliases, writeGuardOf, writeGuardCheck, similarityOf, backupNow, pruneOldSnapshots, shouldSkipBackup, backupStampOf, writeTurnDiary, isCompressionEvent, renameAssetImage, listAssetImages, assetDetail, arrayIndexFiles, arrayIndexFileForMonth, migrateArrayIndexIfNeeded, AUDIO_SOURCE, AUDIO_KIND, AUDIO_USE, audioClassTag, buildStats, tagsOf, validateTags, checkedTags, TAG_VOCAB, clearMemos, tagCard, isVocabTag, normalizeTag, CUSTOM_TAG_MAX, CUSTOM_TAG_LEN, RARE_TAG_MAX_COUNT, recallSession, decodeSessionFile, findSessionFile, archiveSessions, scanSessionOriginals, sessionHeaderOf, findArchivedSession, rawArchiveRows, rawSessionFileName, cwdOfSlug, sha256OfFile, roundsOfSessionFile, relationInjectionLines, archiveRelationOverflow, locateMemory, jsonlHasHash, rebuildGuide, guideStats, guideLinks, guideNodes, addSource, listSources, findSources, sourceStats, loadSources, sourceTag, entryProvenance, sourceIndex, runAutoSummary, pendingTurns, autoSummaryOptions, buildAutoSummaryEntry, buildSummaryPrompt, summaryStyleLine, parseSummaryText, summaryInputOf, callWithThinkingRetry, setAutoSummaryCaller, defaultConfig, loadConfig, AUTO_SUMMARY_PREFIX, createRules, parseRulesMarkdown, formatRuleRow, rulesForSearch, parseTimeBound, handleRecord, searchRecords, searchRecordsGrouped, addRecord, removeRecord, recordRows };
+export { copyWorkDir, measureDir, humanBytes, apply, loadState, saveState, STATE_PATH, filterMsgsBySeq, searchEngineOf, searchIndexStatus, closeSearchIndex, buildInjectionText, buildStateInjection, buildHandoffInjection, buildRecallInjection, buildDueInjection, buildOpeningInjection, ensureOpeningLunarRows, addOpeningRow, removeOpeningRow, readOpeningRows, pruneOpeningRows, formatNowLine, ageLabelOf, modelRouteOf, sessionMemory, createSessionMemory, sessionMemoryPaths, normalizeSessionId, isSpecialKey, doctorReport, renderDoctor, resolveBackupDir, probeWritable, coreInjection, coreOptions, createLines, lexicalScore, linesConfigDefaults, linesPaths, qualitativeOf, topicTokens, behaviorHint, createSocial, detectScene, normalizeName, personIdOf, registerSocialTools, sceneLabel, socialConfigDefaults, socialPaths, searchSocialContext, backupPolicySummary, compactionStats, compactionStatusLine, noteCompaction, noteAutoSummary, compressCallsIn, nativeCompactionsIn, compressToolCallsIn, compressionKindOf, readCompactionLog, appendCompactionRecord, ingestCompactionEvent, compactionRecords, compactionSelfCheck, dutyBoardData, sendHandoff, pullHandoff, listHandoffs, compactionSuiteDetected, listAutoSummaries, deleteAutoSummary, setFactCaller, factOptions, readFactCandidates, writeFactCandidates, pendingFactCandidates, factCandidateStats, factStatusLine, parseFactCandidates, buildFactPrompt, factInventory, isDuplicateFact, extractFactCandidates, acceptFactCandidate, rejectFactCandidate, updateBackupPolicy, updateAutoSummaryPolicy, featuresView, setFeature, memoryOverview, openingUpdate, openingDelete, nowView, updateNowMode, cuepromptView, updateCuePrompt, autoSummaryConfigView, registerBackupApi, hostIsLoopback, readRequestBody, searchMemory, searchMemoryKeyword, searchTokensOf, ensureSearchIndex, bm25ScoreOf, searchTargets, writeMemory, voidMemory, exportArchive, readQqWatchSettings, writeQqWatchSettings, qqWatchView, briefOf, aliasesOf, mergeAliases, writeGuardOf, writeGuardCheck, similarityOf, backupNow, pruneOldSnapshots, shouldSkipBackup, backupStampOf, writeTurnDiary, isCompressionEvent, renameAssetImage, listAssetImages, assetDetail, arrayIndexFiles, arrayIndexFileForMonth, migrateArrayIndexIfNeeded, AUDIO_SOURCE, AUDIO_KIND, AUDIO_USE, audioClassTag, buildStats, tagsOf, validateTags, checkedTags, TAG_VOCAB, clearMemos, tagCard, isVocabTag, normalizeTag, CUSTOM_TAG_MAX, CUSTOM_TAG_LEN, RARE_TAG_MAX_COUNT, recallSession, decodeSessionFile, findSessionFile, archiveSessions, scanSessionOriginals, sessionHeaderOf, findArchivedSession, rawArchiveRows, rawSessionFileName, cwdOfSlug, sha256OfFile, roundsOfSessionFile, relationInjectionLines, archiveRelationOverflow, locateMemory, jsonlHasHash, rebuildGuide, guideStats, guideLinks, guideNodes, addSource, listSources, findSources, sourceStats, loadSources, sourceTag, entryProvenance, sourceIndex, runAutoSummary, pendingTurns, autoSummaryOptions, buildAutoSummaryEntry, buildSummaryPrompt, summaryStyleLine, parseSummaryText, summaryInputOf, callWithThinkingRetry, setAutoSummaryCaller, defaultConfig, loadConfig, AUTO_SUMMARY_PREFIX, createRules, parseRulesMarkdown, formatRuleRow, rulesForSearch, parseTimeBound, handleRecord, searchRecords, searchRecordsGrouped, addSubject, subjectRows, addRecord, removeRecord, recordRows };
 export default plugin;
 
 
