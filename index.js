@@ -7113,9 +7113,23 @@ function rawRecordRows() {
 
 // 单条标废（黑名单）：与主词停用互补——主词是整组退出，标废是这一条退出。
 // 标废不删行，retrieval 过滤掉，将来能 unvoid 回来。
+// 同一 (主词,副词) 可能有多个版本（变化也是记录）。取回只要最新那条，
+// 但标废/启停是按「事物」走的，所以版本折叠要在过滤之前。
+function latestRecordRows() {
+  const seen = new Set();
+  const out = [];
+  for (const r of [...rawRecordRows()].reverse()) {
+    const k = recordKey(r.sub, r.attr);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(r);
+  }
+  return out.reverse();
+}
+
 function recordRows() {
   const map = subjectMap();
-  return rawRecordRows().filter((r) => !r.voided && isSubEnabled(r.sub, map));
+  return latestRecordRows().filter((r) => !r.voided && isSubEnabled(r.sub, map));
 }
 
 function voidRecord(target, reason = "") {
@@ -7123,20 +7137,20 @@ function voidRecord(target, reason = "") {
   if (!want) return "要标废哪条？给 hash（前 8 位）或「主词｜副词」。";
   const parts = want.split(/[|｜]/).map((x) => x.trim()).filter(Boolean);
   const rows = rawRecordRows();
+  // 标废按「事物」走：同一个 (主词,副词) 的所有版本一起标，
+  // 否则旧版本会顶上来，看起来像"标了但还在"。
+  const keyWant = parts.length === 2 ? recordKey(parts[0], parts[1]) : "";
   let hit = null;
   const next = rows.map((r) => {
-    if (hit) return r;
-    const byHash = r.hash && String(r.hash).startsWith(want);
-    const byKey = parts.length === 2 && recordKey(r.sub, r.attr) === recordKey(parts[0], parts[1]);
-    if (byHash || byKey) {
-      hit = r;
-      return { ...r, voided: true, voidReason: clip(String(reason || "未说明"), 120), voidAt: nowISO() };
-    }
-    return r;
+    const matchKey = !!keyWant && recordKey(r.sub, r.attr) === keyWant;
+    const matchHash = !keyWant && r.hash && String(r.hash).startsWith(want);
+    if (!matchKey && !matchHash) return r;
+    if (!hit) hit = r;
+    return { ...r, voided: true, voidReason: clip(String(reason || "未说明"), 120), voidAt: nowISO() };
   });
   if (!hit) return `记录册里没有「${want}」。`;
   writeJsonl(PATHS.records, next);
-  return `已标废：${hit.sub} ｜ ${hit.attr}（不再参与检索；要恢复用 unvoid）`;
+  return `已标废：${hit.sub} ｜ ${hit.attr}（含历史版本，不再参与检索；要恢复用 unvoid）`;
 }
 
 function recordKey(sub, attr) {
@@ -7144,12 +7158,12 @@ function recordKey(sub, attr) {
 }
 
 function formatRecordRow(r) {
-  const star = r.conflict ? "（两种说法未确认）" : "";
+  const star = r.prev ? `（先前：${r.prev}）` : "";
   const cls = r.cls ? `〔${r.cls}〕` : "";
   return `${r.sub} ｜ ${r.attr} ｜ ${r.state}${star}${r.note ? `（${r.note}）` : ""}${cls}  #${String(r.hash || "").slice(0, 8)}`;
 }
 
-// addRecord：一行「主词｜副词｜状态」；同 (主词,副词) 改值 → 不覆盖，返回冲突回执
+// addRecord：一行「主词｜副词｜状态」；同 (主词,副词) 改值 → 追加新版本（历史保留），不覆盖也不拒写
 function addRecord(line, opts = {}) {
   // 只认 ｜ 和 | 当分隔符：状态是自由文本，"测星步骤/会议议程/…" 这种斜杠不能当栏位切
   const parts = String(line || "").split(/[|｜]+/).map((x) => x.trim()).filter(Boolean);
@@ -7166,15 +7180,16 @@ function addRecord(line, opts = {}) {
   const key = recordKey(sub, attr);
   const same = rows.filter((r) => recordKey(r.sub, r.attr) === key);
   const current = same[same.length - 1];
-  if (current && String(current.state).trim() !== state) {
-    return `记录册冲突（未覆盖）：${sub}｜${attr} 已有「${current.state}」，新值「${state}」。两条都在，先跟用户确认再改。旧值 #${String(current.hash || "").slice(0, 8)}`;
-  }
-  if (current) return `记录册无变化：${formatRecordRow(current)}`;
+  if (current && String(current.state).trim() === state) return `记录册无变化：${formatRecordRow(current)}`;
+  // 变化也是记录（2026-11-21 丹阳定）：不覆盖、也不再当冲突拒写——旧值留在历史上，
+  // 新值追加成一行，取回显示最新一条并带出「先前：X」。唯一性提醒归书签，不归这里。
+  const prev = current ? String(current.state) : "";
   const cls = clip(String((opts && opts.cls) || "").trim(), 8);
   const row = {
     kind: "record",
     ts: nowISO(),
     ...(cls ? { cls } : {}),
+    ...(prev ? { prev: clip(prev, RECORD_STATE_MAX), prevHash: current.hash } : {}),
     sub: clip(sub, 40),
     attr: clip(attr, 40),
     state: clip(state, RECORD_STATE_MAX),
@@ -7183,13 +7198,13 @@ function addRecord(line, opts = {}) {
     hash: sha1(`${key}|${state}|${nowISO()}`).slice(0, 16),
   };
   appendJsonl(PATHS.records, row);
-  return `已记：${formatRecordRow(row)}`;
+  return prev ? `已更新：${sub}｜${attr} 「${prev}」→「${state}」（历史保留）` : `已记：${formatRecordRow(row)}`;
 }
 
 // searchRecords：主词/副词/状态任一命中即算；主词权重最高（问「我爸」要能带出「父亲」）
 function searchRecords(query, limit = 8) {
   const map = subjectMap();
-  const rows = rawRecordRows().filter((r) => !r.voided && isSubEnabled(r.sub, map));
+  const rows = latestRecordRows().filter((r) => !r.voided && isSubEnabled(r.sub, map));
   if (!rows.length) return [];
   const max = Math.max(1, Math.min(50, Number(limit) || 8));
   const q = String(query || "").trim();
@@ -7284,13 +7299,13 @@ function unvoidRecord(target) {
   const want = String(target || "").trim();
   if (!want) return "要恢复哪条？给 hash（前 8 位）或「主词｜副词」。";
   const parts = want.split(/[|｜]/).map((x) => x.trim()).filter(Boolean);
+  const keyWant = parts.length === 2 ? recordKey(parts[0], parts[1]) : "";
   let hit = null;
   const next = rawRecordRows().map((r) => {
-    if (hit) return r;
-    const byHash = r.hash && String(r.hash).startsWith(want);
-    const byKey = parts.length === 2 && recordKey(r.sub, r.attr) === recordKey(parts[0], parts[1]);
-    if (!byHash && !byKey) return r;
-    hit = r;
+    const matchKey = !!keyWant && recordKey(r.sub, r.attr) === keyWant;
+    const matchHash = !keyWant && r.hash && String(r.hash).startsWith(want);
+    if (!matchKey && !matchHash) return r;
+    if (!hit) hit = r;
     const { voided, voidReason, voidAt, ...rest } = r;
     return rest;
   });
