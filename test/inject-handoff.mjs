@@ -39,7 +39,7 @@ try {
   const block = buildHandoffInjection(cfg);
   const after = fs.readFileSync(HANDOFF);
 
-  ok("有 open 纸条 → 出块", block.includes("<puppet_handoff>") && block.includes("</puppet_handoff>"), block.slice(0, 80));
+  ok("有 open 纸条 → 出块", block.includes("【记忆·交接纸条】") && block.includes("【记忆·交接纸条】"), block.slice(0, 80));
   ok("带最新那条摘要", block.includes("市场 PR #8808"));
   ok("带第二条", block.includes("第二条活着的纸条"));
   ok("不含已取走的", !block.includes("已经取走"));

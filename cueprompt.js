@@ -99,6 +99,8 @@ export function stripInjected(text) {
   // 压缩截断时可能只剩半个块，尾巴一并去掉
   t = t.replace(/<system-reminder>[\s\S]*$/i, " ");
   t = t.replace(/<puppet_[a-z][a-z_]*>[\s\S]*$/i, " ");
+  // 2026-11-21：注入块不再带英文标记，整条就是一块中文抬头开的正文——整条不是他说的话
+  if (/^\s*(【记忆·[^】]*】|【复位】)/.test(t)) return "";
   return t.replace(/[ \t]{2,}/g, " ").trim();
 }
 

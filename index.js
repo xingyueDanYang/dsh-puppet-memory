@@ -36,7 +36,7 @@ import os from "node:os";
 import path from "node:path";
 import zlib from "node:zlib";
 import { createSocial, detectScene, normalizeName, personIdOf, registerSocialTools, sceneLabel, socialConfigDefaults, socialPaths } from "./social.js";
-import { behaviorHint, createLines, lastAssistantTextId, lastUserText, lexicalScore, linesConfigDefaults, linesPaths, qualitativeOf, topicTokens } from "./state.js";
+import { lastAssistantTextId, lastUserText } from "./state.js";
 import { createPeopleStore } from "./people.js";
 import { createUpdateChecker, UPDATE_REPO } from "./update-check.js";
 import { integrityScore, normalizePersonaHint, personaHintLine, tickScore } from "./persona-hint.js";
@@ -694,7 +694,7 @@ function ensureDirs() {
     PATHS.assets,
     path.dirname(STATE_PATH),
     socialPaths(MEM_DIR).dir,
-    linesPaths(MEM_DIR).dir,
+    path.join(MEM_DIR, "state"),
   ]) {
     fs.mkdirSync(dir, { recursive: true });
   }
@@ -846,8 +846,6 @@ function defaultConfig() {
       audit: { enabled: true, everyN: 4, fixPerTurn: 2 },
     },
     social: socialConfigDefaults(),
-    // 三线状态（v0.23）：词表+衰减+锚点，纯本地计算、不调模型；关掉不影响其它功能
-    lines: linesConfigDefaults(),
   };
 }
 
@@ -885,9 +883,9 @@ function loadConfig() {
   merged.cueprompt = { ...defaultConfig().cueprompt, ...(cfg.cueprompt || {}) };
   merged.social = { ...defaultConfig().social, ...(cfg.social || {}) };
   merged.social.sceneKeys = { ...defaultConfig().social.sceneKeys, ...((cfg.social && cfg.social.sceneKeys) || {}) };
-  merged.lines = { ...defaultConfig().lines, ...(cfg.lines || {}) };
-  merged.lines.baseline = { ...defaultConfig().lines.baseline, ...((cfg.lines && cfg.lines.baseline) || {}) };
-  merged.lines.halfLifeMinutes = { ...defaultConfig().lines.halfLifeMinutes, ...((cfg.lines && cfg.lines.halfLifeMinutes) || {}) };
+
+
+;
   if (!Array.isArray(merged.sessions.disabled)) merged.sessions.disabled = [];
   return merged;
 }
@@ -969,7 +967,7 @@ function writeGuardCheck(text, layer, guard) {
   }
   for (const re of INJECTION_SIGNS) {
     if (re.test(body)) {
-      return "内容里带着注入块的结构标记（比如 <puppet_memory>、【核心记忆】），那是系统注入的格式，不能当记忆存。改成你自己的话。";
+      return "内容里带着系统注入的痕迹（比如【记忆·跨会话摘要】【核心记忆】这类抬头，或旧版的英文标记），那是注入格式，不能当记忆存。改成你自己的话。";
     }
   }
   return null;
@@ -1520,10 +1518,9 @@ function buildHandoffInjection(cfg, { nowMs = Date.now() } = {}) {
     /* 标记失败也不影响这一轮显示 */
   }
   return [
-    "<puppet_handoff>",
-    "以下是留给这个工作台的交接纸条（上一个会话/另一张桌子留下的「下一步该做什么」，取走后不再出现，别当长期记忆用）：",
+    "【记忆·交接纸条】",
+    "上一个会话或另一张桌子留下的「下一步该做什么」，取走后不再出现，别当长期记忆用：",
     clip(lines.join("\n"), 300),
-    "</puppet_handoff>",
   ].join("\n");
 }
 
@@ -1740,11 +1737,10 @@ function buildRecallInjection(cfg, userText, { nowMs = Date.now(), collect } = {
     matched: [...new Set(picked.flatMap((h) => h.matched || []))].slice(0, 8),
   });
   const recallBlock = [
-    "<puppet_recall>",
+    "【记忆·顺手取回】",
     head,
-    "（上面是原话摘要；要完整内容用 memory_search 或 memory_locate 取原文，别凭摘要猜。）",
+    "（上面是原话摘要；要完整内容就翻原文，别凭摘要猜。）",
     ...body,
-    "</puppet_recall>",
   ].join("\n");
   try {
     if (collect && Array.isArray(collect)) {
@@ -2066,7 +2062,7 @@ function buildOpeningInjection(cfg, { nowMs = Date.now(), persist = true } = {})
       writeOpeningRows(rest);
     });
   }
-  return ["<puppet_opening>", "开幕表（特殊日子 / 一次性提醒，每天第一次打开时读一次；不是用户消息）：", ...(auditLine ? [auditLine] : []), ...hits.slice(0, Math.max(1, Number(opt.maxItems) || 5)).map((h) => h.text), "</puppet_opening>"].join("\n");
+  return ["【记忆·开幕表】", "特殊日子 / 一次性提醒，每天第一次打开时读一次；不是用户消息：", ...(auditLine ? [auditLine] : []), ...hits.slice(0, Math.max(1, Number(opt.maxItems) || 5)).map((h) => h.text)].join("\n");
 }
 
 function buildDueInjection(cfg, { nowMs = Date.now(), persist = true } = {}) {
@@ -2104,10 +2100,9 @@ function buildDueInjection(cfg, { nowMs = Date.now(), persist = true } = {}) {
     }
   }
   return [
-    "<puppet_due>",
-    "以下是你欠着的事，时间到了（插件按条目的到期时间推的一次性提醒，不是用户消息；处理完就不用再提）：",
+    "【记忆·到期提醒】",
+    "以下是你欠着的事，时间到了（一次性提醒，不是用户消息；处理完就不用再提）：",
     body,
-    "</puppet_due>",
   ].join("\n");
 }
 
@@ -2224,43 +2219,13 @@ function buildInjectionText(cfg, coreUsed = 0, lines = null, opts = {}) {
 
   const body = trimToBudget(parts.join("\n"), maxChars);
   return [
-    `<puppet_memory>`,
+    "【记忆·跨会话摘要】",
     `以下是跨会话记忆摘要（由 ${DISPLAY_NAME} 插件自动注入，不是用户消息）：`,
     body,
-    `需要细节时用 memory_search 检索；带〔标签〕的条目可用 memory_search 的 tag 参数按标签查；用户档案（layer=user）和便签（layer=memo）不常注入，需要时按层检索；值得长期记住的事用 memory_write 写入（tags 可打分类标签，cue 可记情境线索）。`,
-    `</puppet_memory>`,
+    "需要细节就去检索：带〔标签〕的条目按标签查；用户档案和便签不常注入，需要时按层取；值得长期记住的事直接写进记忆。",
   ].join("\n");
 }
 
-// v0.23：把三线状态翻译成给模型看的定性提示（永远不带百分比）
-function buildStateInjection(view, result = null) {
-  if (!view || view.enabled === false) return "";
-  const signals = [];
-  if (result && result.hits) {
-    for (const line of ["work", "companion", "learning"]) {
-      for (const hit of (result.hits[line] || []).slice(0, 2)) signals.push(hit);
-    }
-  }
-  if (result && result.anchor && result.anchor.topic) signals.push(`接着上次：${clip(result.anchor.topic, 40)}`);
-  if (!signals.length) {
-    for (const row of view.recentSignals || []) {
-      if (row.hits && Object.keys(row.hits).length) signals.push(row.text);
-      if (signals.length >= 2) break;
-    }
-  }
-  const recent = [...new Set(signals)].slice(0, 4).join("、") || "无";
-  return [
-    // 2026-11-21 丹阳：信号明细不再注入——它每轮都在变、对决策没帮助，只占字数。
-    // 数据仍照常记录，需要看走势时用 memory_state action=history。
-    `【当前取向】${view.label}`,
-    `说话方式：${view.hint}`,
-    view.worklogIdleMinutes !== null && view.worklogIdleMinutes >= 300
-      ? "提醒：上一段工作已经空闲很久，需要时先问一句要不要把它收个尾。"
-      : "",
-  ]
-    .filter(Boolean)
-    .join("\n");
-}
 
 // v0.26：把配置里的 {provider, model} 解析成路由；缺字段就当没配（不猜、不半截生效）
 function modelRouteOf(value) {
@@ -2359,9 +2324,11 @@ function textOfMessage(msg) {
 }
 
 function isStaleInjection(msg) {
-  const texts = [textOfMessage(msg)];
-  if (!texts.length) return false;
-  const joined = texts.join("\n").trim();
+  // 2026-11-21 丹阳定：注入里不再留英文标记，所以靠来源认自己的消息——
+  // source.kind 只认本插件；另外兼容旧会话里以 <puppet_ 开头的历史块。
+  const src = String((msg && msg.source && msg.source.kind) || "");
+  if (src === `plugin:${PLUGIN_NAME}`) return true;
+  const joined = [textOfMessage(msg)].join("\n").trim();
   if (!joined.startsWith("<puppet_")) return false;
   if (joined.startsWith("<puppet_reset>")) return true;
   return /^<puppet_[a-z_]+>[\s\S]*<\/puppet_[a-z_]+>$/.test(joined);
@@ -2942,7 +2909,6 @@ function updateCuePrompt(body = {}) {
 const FEATURE_TOGGLES = [
   { id: "circle", label: "圈子印象", desc: "按网站记住各地怎么说话；命中才注入", group: "circle", def: true },
   { id: "lore", label: "约定书签", desc: "跨会话说好的约定/口径：命中关键词才注入；不记设定、不当规则（≤30 条）", group: "lore", def: true },
-  { id: "lines", label: "三线状态", desc: "工作 / 陪伴 / 学习 的取向", group: "lines", def: true },
   { id: "conflict", label: "冲突核对", desc: "本地小模型核对事实矛盾；没配 endpoint 就自动跳过", group: "conflict", def: false },
   { id: "cueprompt", label: "取词器", desc: "每回合按话题取词（可能多一次模型调用）", group: "cueprompt", def: false },
   { id: "social", label: "多人多群记忆", desc: "群聊与多人身份分区：同一人跨群识别、信息按群隔离（只跟一个人聊可以关）", group: "social", def: false },
@@ -6304,7 +6270,7 @@ function sourceStats() {
 function doctorReport(options = {}) {
   const memDir = options.memDir || MEM_DIR;
   const socialPathsOf = socialPaths(memDir);
-  const linesPathsOf = linesPaths(memDir);
+  const stateDirOf = { dir: path.join(memDir, "state") };
   const checks = [];
   const add = (level, name, detail, fix = "") => checks.push({ level, name, detail, fix });
 
@@ -6353,7 +6319,7 @@ function doctorReport(options = {}) {
   }
 
   // 6. 子目录可写
-  for (const [label, dir] of [["social/", socialPathsOf.dir], ["state/", linesPathsOf.dir], ["assets/", path.join(memDir, "assets")]]) {
+  for (const [label, dir] of [["social/", socialPathsOf.dir], ["state/", stateDirOf.dir], ["assets/", path.join(memDir, "assets")]]) {
     const r = probeWritable(dir);
     add(r.ok ? "ok" : "err", label, r.ok ? "可写" : r.error);
   }
@@ -6382,12 +6348,6 @@ function doctorReport(options = {}) {
   try {
     const socialCfg = cfg.social || {};
     add("ok", "多人记忆", socialCfg.enabled ? "已开启注入" : "关闭（工具仍可用）");
-  } catch {
-    /* 忽略 */
-  }
-  try {
-    const linesCfg = cfg.lines || {};
-    add("ok", "三线状态", linesCfg.enabled === false ? "关闭" : linesCfg.inject === true ? "开启（注入）" : "开启（不注入）");
   } catch {
     /* 忽略 */
   }
@@ -6676,12 +6636,6 @@ function buildStats() {
     0,
   );
   fileStats.push(`behavior/diary/*.jsonl: ${diaryLines} 条（${diaryFiles.length} 个月）`);
-  try {
-    const lv = createLines({ memDir: MEM_DIR, getConfig: loadConfig }).view();
-    fileStats.push(`state/三线：${lv.label}（工作 / 陪伴 / 学习，惰性衰减）`);
-  } catch {
-    /* 三线统计失败不影响其它统计 */
-  }
   try {
     const core = coreInjection(loadConfig());
     // A-48：拆成三张卡之后，core.length 是「三张卡合起来」的长度，拿它跟 core 的 600 预算比会骗人
@@ -8628,13 +8582,7 @@ function apply(ctx) {
   } catch (err) {
     diag(`启动自检：social/ 目录不可用（${err?.message || err}）`);
   }
-  // v0.23：三线状态（工作/陪伴/学习）。惰性衰减，不跑定时器；所有写入只落 state/。
-  const linesEngine = createLines({ memDir: MEM_DIR, getConfig: loadConfig });
-  try {
-    linesEngine.ensure();
-  } catch (err) {
-    diag(`启动自检：state/ 目录不可用（${err?.message || err}）`);
-  }
+
   // v0.37（B-77）：规则册数据化。md 是唯一源，rules.jsonl 只是派生；解析失败不影响注入。
   rulesSingleton = createRules({ memDir: MEM_DIR });
   try {
@@ -8680,8 +8628,6 @@ function apply(ctx) {
   const recentNoteInjected = new Map(); // 同上，针对笔记（取词器已按标签命中过的不再当"最近笔记"重来）
   // v0.33（B-47）：一句话复位的一次性临时约束，按会话存、注入一次即删，不落任何文件
   const sessionResetNotes = new Map();
-  // v0.23：三线状态上次注入的指纹（取向没变就不重复）
-  const lastStateInjected = new Map();
 
   // 兜底检测：上下文消息量骤降 → 视为刚压缩过，触发备份
   function trackCompression(sessionId, messages) {
@@ -8703,8 +8649,7 @@ function apply(ctx) {
     // v0.22：压缩会把之前的注入消息一起压掉，清掉指纹让核心记忆/摘要重新补进来
     lastInjected.delete(sessionId);
     injectedOnce.delete(sessionId);
-    lastStateInjected.delete(sessionId);
-    sentBlockHashes.delete(sessionId);
+        sentBlockHashes.delete(sessionId);
     dedupeLogged.delete(sessionId);
     // 压缩后位置在上下文开头、注意力最足——下一次做一次强补充，之后回到弱补充
     pendingStrong.set(sessionId, true);
@@ -9088,25 +9033,6 @@ function apply(ctx) {
         const coreStateForInject = !coreAllowed || modeState !== "strong" ? "" : fullOf(core.rawState, core.stateBudget);
         // B-47：复位时若带了一句临时约束，这一步跟着三张卡一起注入，之后删除（只生效一次）
         const resetNote = sessionResetNotes.get(sessionId) || "";
-        // v0.23 三线状态：先吃这条用户发言的信号（衰减/锚点/工作日志都在里面），再决定取向
-        let linesView = null;
-        let lineSignal = null;
-        let stateText = "";
-        try {
-          lineSignal = linesEngine.updateFromMessages(decision.messages, { sessionId });
-          linesView = linesEngine.view(undefined, { sessionId });
-          // 2026-11-21 丹阳定：三线状态**不再注入**。它是从别的 agent 记忆产品搬来的设计，
-        // 跟状态卡说的是一件事（当前取向），属于重复内容。数据照常算，要看用 memory_state。
-        // 想要回注入：把配置 lines.inject 设成 true（默认关）。
-        if (cfg.lines?.enabled !== false && cfg.lines?.inject === true) stateText = buildStateInjection(linesView, lineSignal?.result || null);
-        } catch (err) {
-          diag(`三线状态更新失败：${err?.message || err}`);
-        }
-        const stateDigest = stateText ? sha1(stateText) : "";
-        // 取向没变就不重复塞（但压缩后会清指纹，自动补回）
-        // 注意：这一份是「三线状态」，不是状态卡（状态卡在 coreStateForInject）。
-        // 用 let 是为了首轮 cardsOnly 能把它一起清掉——否则首轮只三卡会被它破功。
-        let stateForInject = stateText && !suppressed.has("state") && lastStateInjected.get(sessionId) !== stateDigest ? stateText : "";
         // 完整摘要（人设+关系+笔记+日记）：mode=first-step 时只在第一次注入
         // v1.6（2026-11-17）：补充层也分节奏——压缩后全量补（不带日记）；平时每 8 轮查一次，
         // 哪层缺超 30% 就只补那一层；没缺就啥也不补。
@@ -9125,7 +9051,7 @@ function apply(ctx) {
           } else if (supPlan.turn - (supPlan.check || 0) >= 8) {
             supPlan.check = supPlan.turn;
             for (const layer of supLayers) {
-              const one = buildInjectionText(cfg, 0, linesView, { suppressed, only: new Set([layer]) });
+              const one = buildInjectionText(cfg, 0, null, { suppressed, only: new Set([layer]) });
               if (!one) continue;
               const miss = missingRatioOf(one, ctxForSup, 16);
               if (miss >= 0.3) chosen.push(layer);
@@ -9135,7 +9061,7 @@ function apply(ctx) {
           if (chosen.length) {
             // 压缩后那一轮给全量（位置在开头、注意力足）；平时只给几句
             const excludeRel = new Set((recentRelInjected.get(sessionId) || new Map()).keys());
-            text = buildInjectionText(cfg, coreText ? core.length : 0, linesView, {
+            text = buildInjectionText(cfg, coreText ? core.length : 0, null, {
               suppressed,
               excludeRelationHashes: excludeRel,
               excludeNoteHashes: new Set((recentNoteInjected.get(sessionId) || new Map()).keys()),
@@ -9225,10 +9151,9 @@ function apply(ctx) {
               }
               if (hits.length) {
                 sayingText = [
-                  "<puppet_saying>",
-                  "常言（本质是知识：谁说过什么、什么梗怎么来的；不是规则）：",
+                  "【记忆·常言】",
+                  "本质是知识：谁说过什么、什么梗怎么来的；不是规则。",
                   ...hits,
-                  "</puppet_saying>",
                 ].join("\n");
                 diag(`常言补充：${hits.length} 条`);
               }
@@ -9258,10 +9183,9 @@ function apply(ctx) {
               if (ld) {
                 pendingLostDetail.delete(sessionId);
                 lostDetailText = [
-                  "<puppet_lostdetail>",
-                  `上下文刚被压缩（压掉约 ${ld.items || "若干"} 条），**原文里的细节已经不在上下文里了**：数字、名字、地点、约定、谁说了什么，可能都只剩摘要。`,
-                  "处理：靠摘要答不出来的，不要凭印象补——需要就 memory_search 原文（或 memory_locate 按 hash）；确实长期要用的**事实**，现在用 memory_write 或 memory_lorebook（≤30 条）记下来。",
-                  "</puppet_lostdetail>",
+                  "【记忆·压缩提示】",
+                  `上下文刚被压缩（压掉约 ${ld.items || "若干"} 条），原文里的细节已经不在上下文里：数字、名字、地点、约定、谁说了什么，可能只剩摘要。`,
+                  "处理：靠摘要答不出来的不要凭印象补——需要就翻原文；确实长期要用的事实，现在就记下来。",
                 ].join("\n");
               }
             } catch (err) {
@@ -9363,8 +9287,8 @@ function apply(ctx) {
                   ];
                   if (ex.text) rows.push(`原文摘录：${NL}${ex.text}`);
                   else rows.push("原文取不到 → 老实说「我查不到那段原话」，不要编。");
-                  rows.push("核对完二选一：原文支持我 → 修正表述重说一遍；原文不支持 → 用 memory_cue demote 把这条降级。");
-                  cueText = ["<puppet_verify>", rows.join(NL), "</puppet_verify>"].join(NL);
+                  rows.push("核对完二选一：原文支持我 → 修正表述重说一遍；原文不支持 → 把这条记忆降级。");
+                  cueText = ["【记忆·核对原文】", rows.join(NL)].join(NL);
                   diag(`反对后回原文：${ex.text ? "取到" : "没取到"}（${ex.gate}）`);
                 }
                 cp.clearPending(sessionId);
@@ -9444,14 +9368,14 @@ function apply(ctx) {
                     const rows = ["（提示：这件事你和他之前聊过。若自然就用平常语气带出来，别罗列资料、别贴编号）", judged.hint];
                     if (judged.question) rows.push(`（拿不准可以先问一句：${judged.question}）`);
                     cueSeenSet(sessionId, { cueKey: textKey });
-                    cueText = ["<puppet_cue>", rows.join(NL), "</puppet_cue>"].join(NL);
+                    cueText = ["【记忆·取词】", rows.join(NL)].join(NL);
                   }
                 }
               }
             }
             // shadow（观察态）：该做的都做了、事件也记了，只是不往上下文里塞——借自 dsh-memory-gate
             if (cueMode === "shadow" && cueText) {
-              diag(`shadow：本应注入${cueText.includes("<puppet_verify>") ? "核对原文" : "回忆提示"}，按观察态不注入`);
+              diag(`shadow：本应注入${cueText.includes("【记忆·核对原文】") ? "核对原文" : "回忆提示"}，按观察态不注入`);
               cueText = "";
             }
           }
@@ -9499,12 +9423,12 @@ function apply(ctx) {
         if (cardsOnly) {
           text = ""; socialText = ""; recallText = ""; conflictText = ""; loreText = "";
           circleText = ""; sayingText = ""; dueText = ""; openingText = ""; cueText = "";
-          peopleText = ""; lostDetailText = ""; nowText = ""; stateText = ""; stateForInject = "";
+          peopleText = ""; lostDetailText = ""; nowText = "";
           diag("首轮只注入三张卡（其余块从第二轮起）");
         }
         // 第 2 轮只补人设全文：这时候三张卡和其它注入都没得给，早退会让这一条永远轮不到
-        if (!personaDue && !text && !socialText && !handoffText && !recallText && !conflictText && !loreText && !circleText && !lostDetailText && !dueText && !openingText && !cueText && !nowText && !stateText && !rulesForInject && !habitsForInject && !coreText && !coreStateForInject && !stateForInject && !resetNote) return decision;
-        const digest = sha1(`${text}\u0000${socialText}\u0000${handoffText}\u0000${recallText}\u0000${dueText}${openingText}\u0000${cueText}\u0000${nowText}\u0000${conflictText}\u0000${loreText}\u0000${circleText}\u0000${lostDetailText}\u0000${rulesForInject}\u0000${habitsForInject}\u0000${coreText}\u0000${coreStateForInject}\u0000${stateForInject}\u0000${resetNote}`);
+        if (!personaDue && !text && !socialText && !handoffText && !recallText && !conflictText && !loreText && !circleText && !lostDetailText && !dueText && !openingText && !cueText && !nowText && !rulesForInject && !habitsForInject && !coreText && !coreStateForInject && !resetNote) return decision;
+        const digest = sha1(`${text}\u0000${socialText}\u0000${handoffText}\u0000${recallText}\u0000${dueText}${openingText}\u0000${cueText}\u0000${nowText}\u0000${conflictText}\u0000${loreText}\u0000${circleText}\u0000${lostDetailText}\u0000${rulesForInject}\u0000${habitsForInject}\u0000${coreText}\u0000${coreStateForInject}\u0000${resetNote}`);
         // v0.44.1：注入只跟着「用户说话」走——一条新用户消息只注入一次。
         // 触发源在外部（用户消息），注入本身不会再触发注入，也就不会自激循环。
         const userKey = lastUserText(decision.messages || []).key || "";
@@ -9534,31 +9458,27 @@ function apply(ctx) {
         }
         lastInjected.set(sessionId, digest);
         if (userKey) lastUserInjected.set(sessionId, userKey);
-        if (stateForInject) lastStateInjected.set(sessionId, stateDigest);
         if (injectMode === "first-step") injectedOnce.add(sessionId);
         // B-47：复位带的临时约束注入一次就删——不能每轮念，也不许写进任何文件
         const resetMessage = resetNote
-          ? injectionMessage(`<puppet_reset>\n用户刚按了复位，这一轮起按下面这条走（一次性的临时约束，不进任何文件，之后不再重复）：\n${resetNote}\n</puppet_reset>`)
+          ? injectionMessage(["【复位】这一轮起按下面的约束走（只生效一次，不进任何文件）：", resetNote].join("\n"))
           : null;
         if (resetNote) sessionResetNotes.delete(sessionId);
         // 注入装不下的旧关系转存深层引导（带日期标注），避免记忆只靠检索才找得回
         archiveRelationOverflow(cfg);
-        const stateMessage = stateForInject
-          ? injectionMessage(`<puppet_state>\n${stateForInject}\n（这是当前互动取向，用自然语言体现，不要说出「权重/百分比/取向」这些词。）\n</puppet_state>`)
-          : null;
         const rulesMessage = (!silent && rulesForInject)
           ? injectionMessage(
-              (fullTurn ? `<puppet_rules>\n${MERGED_HEAD}\n` : `<puppet_rules>\n以下是行为规则（behavior/core-rules.md：说话方式 / 红线 / 约定）。只在规则改过或上下文压缩后补一次；已经遵守的规则不必每轮重复念叨，按它做就行。\n`) + `${rulesForInject}${core.rulesClipped ? `\n（规则超 ${core.rulesBudget} 字预算，已截断；用 memory_core action=get target=rules 看全文）` : ""}${habitsForInject ? `\n【正在养的习惯】${habitsForInject}\n（做到就好，别僵硬；用 memory_learn 管）` : ""}\n</puppet_rules>`,
+              (fullTurn ? `${MERGED_HEAD}\n` : "以下是行为规则：说话方式 / 红线 / 约定。只在规则改过或上下文压缩后补一次；已经遵守的不必每轮念叨，按它做就行。\n") + `${rulesForInject}${core.rulesClipped ? `\n（规则超预算已截断，需要全文就说一声）` : ""}${habitsForInject ? `\n【正在养的习惯】${habitsForInject}\n（做到就好，别僵硬）` : ""}`,
             )
           : null;
         const coreMessage = (!silent && coreText)
           ? injectionMessage(
-              `<puppet_core>\n${fullTurn ? "" : "以下是核心记忆（behavior/core.md：称呼约定 / 用户 / 能力这些不会经常变的内容；和其它记忆冲突时以它为准）：\n"}${coreText}${core.clipped ? `\n（核心记忆超 ${core.budget} 字预算，已截断；用 memory_core action=get 看全文，精简后 action=set 覆盖）` : ""}\n</puppet_core>`,
+              `${fullTurn ? "" : "以下是核心记忆：称呼 / 用户 / 能力这些不常变的内容；和其它记忆冲突时以它为准。\n"}${coreText}${core.clipped ? `\n（核心记忆超预算已截断，需要全文就说一声）` : ""}`,
             )
           : null;
         const coreStateMessage = (!silent && coreStateForInject)
           ? injectionMessage(
-              `<puppet_core_state>\n${fullTurn ? "" : "以下是当前状态（behavior/core-state.md：当前主线 / 进度 / 待办，会变的那部分）。变了才补，不变就不重复：\n"}${coreStateForInject}${core.stateClipped ? `\n（当前状态超 ${core.stateBudget} 字预算，已截断；用 memory_core action=get target=state 看全文）` : ""}\n</puppet_core_state>`,
+              `${fullTurn ? "" : "以下是当前状态：主线 / 进度 / 待办，会变的那部分。变了才补，不变就不重复。\n"}${coreStateForInject}${core.stateClipped ? `\n（当前状态超预算已截断，需要全文就说一声）` : ""}`,
             )
           : null;
         // v0.47.0：人设弱注入（默认 off；实验模块，通用记忆插件不依赖它）
@@ -9593,8 +9513,8 @@ function apply(ctx) {
             // 2026-11-21 丹阳定：**纯数字块不再注入**——<puppet_persona>97/100</puppet_persona>
             // 没有正文、只有数字和符号，是空白注入。缺卡/被截断时 personaHintLine 返回的是
             // 「重载＋完整人设」，那种仍然要发；只要分数不要。
-            if (personaIntact) return null;
-            return line ? injectionMessage("<puppet_persona>" + String.fromCharCode(10) + line + String.fromCharCode(10) + "</puppet_persona>") : null;
+            // 显眼点机制（丹阳 2026-11-21 明确不可改）：首轮 + 每 25 轮给一个裸数字，不带说明、不带标记。
+            return line ? injectionMessage(line) : null;
           } catch (err) {
             return null;
           }
@@ -9622,7 +9542,7 @@ function apply(ctx) {
               if (sessionId) { phaseAll[sessionId] = phPhase; writeJson(phaseFile, phaseAll); }
               diag(`人设全文注入 phaseTurn=${phaseTurn} 字数=${raw.length} 预算=${BUDGET} 截断=${raw.length > BUDGET}`);
             } catch {}
-            return injectionMessage(`<puppet_persona_full>\n（以下是完整人设，压缩后只补这一次；后面凭这次建立的印象说话，不必逐条复述）\n${text}\n</puppet_persona_full>`);
+            return injectionMessage(["【记忆·完整人设】（压缩后只补这一次；后面凭这次建立的印象说话，不必逐条复述）", text].join("\n"));
           } catch (e) {
             try { diag("人设全文·异常：" + (e && e.message || e)); } catch {}
             return null;
@@ -9630,7 +9550,7 @@ function apply(ctx) {
         })();
         const socialMessage = socialText
           ? injectionMessage(
-              `<puppet_social>\n以下是当前场景的社交档案（由 ${DISPLAY_NAME} 插件按「场景 + 对象」注入，不是用户消息）：\n${socialText}\n只按这份档案说话；档案里没有的别人的事，不要主动提起。\n</puppet_social>`,
+              ["【记忆·社交档案】以下是当前场景的社交档案（按「场景 + 对象」注入，不是用户消息）：", socialText, "只按这份档案说话；档案里没有的别人的事，不要主动提起。"].join("\n"),
             )
           : null;
         const handoffMessage = handoffText ? injectionMessage(handoffText) : null;
@@ -9701,10 +9621,7 @@ function apply(ctx) {
         }
         const selfMessage = selfText
           ? injectionMessage(
-              `<puppet_self>
-以下是${DISPLAY_NAME}自己的认知（behavior/self.jsonl：我自己挑出来要记住的风格 / 习惯 / 事情；独立预算，不占核心卡）：
-${selfText}
-</puppet_self>`,
+              ["【记忆·自我认知】以下是" + DISPLAY_NAME + "自己挑出来要记住的风格 / 习惯 / 事情（独立预算，不占核心卡）：", selfText].join("\n"),
             )
           : null;
         return {
@@ -9717,7 +9634,6 @@ ${selfText}
             ["persona", personaMsg],
             ["persona_full", personaRestMessage],
             ["self", selfMessage],
-            ["state", stateMessage],
             ["handoff", handoffMessage],
             ["recall", recallMessage],
             ["due", dueMessage],
@@ -9853,7 +9769,6 @@ ${selfText}
           // v0.22：压缩后下一轮把核心记忆重新注入（否则核心卡会随被压掉的消息一起消失）
           lastInjected.delete(sid);
           injectedOnce.delete(sid);
-          lastStateInjected.delete(sid);
           sentBlockHashes.delete(sid);
           dedupeLogged.delete(sid);
           // 2026-11-21：注入相位归零（下一轮 = 首轮全量）；人设分 −随机(1–10)
@@ -9902,8 +9817,7 @@ ${selfText}
     }
     lastInjected.delete(sessionId);
     injectedOnce.delete(sessionId);
-    lastStateInjected.delete(sessionId);
-    sentBlockHashes.delete(sessionId);
+        sentBlockHashes.delete(sessionId);
     dedupeLogged.delete(sessionId);
     seenEvents.delete(sessionId);
     lastSizes.delete(sessionId);
@@ -10614,8 +10528,7 @@ ${selfText}
           if (action === "reset") {
             const sid = String(exec?.agent?.session?.header?.id || "");
             if (!sid) return "复位需要在会话里调用（拿不到会话 id，本轮不生效）。";
-            lastStateInjected.delete(sid);
-            lastInjected.delete(sid);
+              lastInjected.delete(sid);
             sentBlockHashes.delete(sid);
             dedupeLogged.delete(sid);
             // 2026-11-21：注入决策现在看「相位 + 卡内容指纹」，这两样不清掉的话，复位后下一轮 decide() 全是 skip，
@@ -10883,56 +10796,6 @@ ${selfText}
           ].join("\n");
         } catch (err) {
           return `圈子印象操作失败：${err?.message || err}`;
-        }
-      },
-    });
-
-    register({
-      name: "memory_state",
-      description:
-        "三线状态（v0.23）：工作 / 陪伴 / 学习三条连续维度，根据最近对话自动升降、没信号就慢慢回落。action=read 看当前取向（只给定性，如「陪伴优先」+ 最近信号）| history 看最近轨迹（谁把它推上去的）| tune 手动微调某条线（line=work/companion/learning，delta 默认 +0.1，30 秒冷却）| reset 回基线。这是内部状态：不要把「权重/百分比/取向」这些词说给人听，用说话方式体现就好。",
-      parameters: {
-        type: "object",
-        properties: {
-          action: { type: "string", enum: ["read", "history", "tune", "reset"] },
-          line: { type: "string", enum: ["work", "companion", "learning"], description: "三线状态：read 看当前取向、history 看轨迹、tune 微调（work/companion/learning）、reset 回基线。" },
-          delta: { type: "number", description: "tune 用：+0.1 更偏这条线，-0.1 收回" },
-          limit: { type: "number", description: "history 用：最多几条，默认 10" },
-        },
-      },
-      output,
-      execute(args) {
-        try {
-          ensureDirs();
-          const action = String(args?.action || "read");
-          if (action === "read") {
-            const v = linesEngine.view();
-            const recent = (v.recentSignals || []).map((r) => `${(r.ts || "").slice(5, 16)} ${r.text}`).join("；") || "暂无";
-            return `当前取向：${v.label}\n说话方式：${v.hint}\n最近信号：${recent}\n${v.lastWorkAt ? `上次工作信号：${v.lastWorkAt.slice(5, 16)}（已空闲 ${v.worklogIdleMinutes} 分钟）` : "还没有工作信号"}`;
-          }
-          if (action === "history") {
-            const rows = linesEngine.history(args?.limit);
-            if (!rows.length) return "三线状态还没有轨迹（聊几句就有了）。";
-            return rows
-              .map((r) => {
-                const hits = Object.entries(r.hits || {}).map(([k, v]) => `${k}:${(v || []).join(",")}`).join(" ");
-                return `${(r.ts || "").slice(5, 16)} [${r.primary || "?"}] ${(r.text || "").slice(0, 40)}${hits ? `（${hits}）` : ""}${r.anchor ? " ↺锚点" : ""}${r.worklog ? " →工作日志" : ""}`;
-              })
-              .join("\n");
-          }
-          if (action === "tune") {
-            const res = linesEngine.tune({ line: args?.line, delta: Number(args?.delta) || 0.1 });
-            if (!res.ok) return `没调成：${res.reason}`;
-            const q = qualitativeOf(res.after);
-            return `已微调：现在 ${q.label}（${args?.line} ${Number(args?.delta) > 0 ? "+" : ""}${Number(args?.delta) || 0.1}）`;
-          }
-          if (action === "reset") {
-            const after = linesEngine.reset();
-            return `已回基线：${qualitativeOf(after).label}`;
-          }
-          return `未知 action：${action}`;
-        } catch (err) {
-          return `三线状态操作失败：${err?.message || err}`;
         }
       },
     });
@@ -11714,7 +11577,7 @@ const plugin = {
   apply,
 };
 
-export { copyWorkDir, measureDir, humanBytes, apply, loadState, saveState, STATE_PATH, filterMsgsBySeq, searchEngineOf, searchIndexStatus, closeSearchIndex, buildInjectionText, buildStateInjection, buildHandoffInjection, buildRecallInjection, buildDueInjection, buildOpeningInjection, ensureOpeningLunarRows, addOpeningRow, removeOpeningRow, readOpeningRows, pruneOpeningRows, formatNowLine, ageLabelOf, modelRouteOf, sessionMemory, createSessionMemory, sessionMemoryPaths, normalizeSessionId, isSpecialKey, doctorReport, renderDoctor, resolveBackupDir, probeWritable, coreInjection, coreOptions, createLines, lexicalScore, linesConfigDefaults, linesPaths, qualitativeOf, topicTokens, behaviorHint, createSocial, detectScene, normalizeName, personIdOf, registerSocialTools, sceneLabel, socialConfigDefaults, socialPaths, searchSocialContext, backupPolicySummary, compactionStats, compactionStatusLine, noteCompaction, noteAutoSummary, compressCallsIn, nativeCompactionsIn, compressToolCallsIn, compressionKindOf, readCompactionLog, appendCompactionRecord, ingestCompactionEvent, compactionRecords, compactionSelfCheck, dutyBoardData, sendHandoff, pullHandoff, listHandoffs, compactionSuiteDetected, listAutoSummaries, deleteAutoSummary, setFactCaller, factOptions, readFactCandidates, writeFactCandidates, pendingFactCandidates, factCandidateStats, factStatusLine, parseFactCandidates, buildFactPrompt, factInventory, isDuplicateFact, extractFactCandidates, acceptFactCandidate, rejectFactCandidate, updateBackupPolicy, updateAutoSummaryPolicy, featuresView, setFeature, memoryOverview, openingUpdate, openingDelete, nowView, updateNowMode, cuepromptView, updateCuePrompt, autoSummaryConfigView, registerBackupApi, hostIsLoopback, readRequestBody, searchMemory, searchMemoryKeyword, searchTokensOf, ensureSearchIndex, bm25ScoreOf, searchTargets, writeMemory, voidMemory, exportArchive, readQqWatchSettings, writeQqWatchSettings, qqWatchView, briefOf, aliasesOf, mergeAliases, writeGuardOf, writeGuardCheck, similarityOf, backupNow, pruneOldSnapshots, shouldSkipBackup, backupStampOf, writeTurnDiary, isCompressionEvent, renameAssetImage, listAssetImages, assetDetail, arrayIndexFiles, arrayIndexFileForMonth, migrateArrayIndexIfNeeded, AUDIO_SOURCE, AUDIO_KIND, AUDIO_USE, audioClassTag, buildStats, tagsOf, validateTags, checkedTags, TAG_VOCAB, clearMemos, tagCard, isVocabTag, normalizeTag, CUSTOM_TAG_MAX, CUSTOM_TAG_LEN, RARE_TAG_MAX_COUNT, recallSession, decodeSessionFile, findSessionFile, archiveSessions, scanSessionOriginals, sessionHeaderOf, findArchivedSession, rawArchiveRows, rawSessionFileName, cwdOfSlug, sha256OfFile, roundsOfSessionFile, relationInjectionLines, archiveRelationOverflow, locateMemory, jsonlHasHash, rebuildGuide, guideStats, guideLinks, guideNodes, addSource, listSources, findSources, sourceStats, loadSources, sourceTag, entryProvenance, sourceIndex, runAutoSummary, pendingTurns, autoSummaryOptions, buildAutoSummaryEntry, buildSummaryPrompt, summaryStyleLine, parseSummaryText, summaryInputOf, callWithThinkingRetry, setAutoSummaryCaller, defaultConfig, loadConfig, AUTO_SUMMARY_PREFIX, createRules, parseRulesMarkdown, formatRuleRow, rulesForSearch, parseTimeBound, handleRecord, searchRecords, searchRecordsGrouped, addSubject, subjectRows, voidRecord, unvoidRecord, isStaleInjection, addRecord, removeRecord, recordRows };
+export { copyWorkDir, measureDir, humanBytes, apply, loadState, saveState, STATE_PATH, filterMsgsBySeq, searchEngineOf, searchIndexStatus, closeSearchIndex, buildInjectionText, buildHandoffInjection, buildRecallInjection, buildDueInjection, buildOpeningInjection, ensureOpeningLunarRows, addOpeningRow, removeOpeningRow, readOpeningRows, pruneOpeningRows, formatNowLine, ageLabelOf, modelRouteOf, sessionMemory, createSessionMemory, sessionMemoryPaths, normalizeSessionId, isSpecialKey, doctorReport, renderDoctor, resolveBackupDir, probeWritable, coreInjection, coreOptions, createSocial, detectScene, normalizeName, personIdOf, registerSocialTools, sceneLabel, socialConfigDefaults, socialPaths, searchSocialContext, backupPolicySummary, compactionStats, compactionStatusLine, noteCompaction, noteAutoSummary, compressCallsIn, nativeCompactionsIn, compressToolCallsIn, compressionKindOf, readCompactionLog, appendCompactionRecord, ingestCompactionEvent, compactionRecords, compactionSelfCheck, dutyBoardData, sendHandoff, pullHandoff, listHandoffs, compactionSuiteDetected, listAutoSummaries, deleteAutoSummary, setFactCaller, factOptions, readFactCandidates, writeFactCandidates, pendingFactCandidates, factCandidateStats, factStatusLine, parseFactCandidates, buildFactPrompt, factInventory, isDuplicateFact, extractFactCandidates, acceptFactCandidate, rejectFactCandidate, updateBackupPolicy, updateAutoSummaryPolicy, featuresView, setFeature, memoryOverview, openingUpdate, openingDelete, nowView, updateNowMode, cuepromptView, updateCuePrompt, autoSummaryConfigView, registerBackupApi, hostIsLoopback, readRequestBody, searchMemory, searchMemoryKeyword, searchTokensOf, ensureSearchIndex, bm25ScoreOf, searchTargets, writeMemory, voidMemory, exportArchive, readQqWatchSettings, writeQqWatchSettings, qqWatchView, briefOf, aliasesOf, mergeAliases, writeGuardOf, writeGuardCheck, similarityOf, backupNow, pruneOldSnapshots, shouldSkipBackup, backupStampOf, writeTurnDiary, isCompressionEvent, renameAssetImage, listAssetImages, assetDetail, arrayIndexFiles, arrayIndexFileForMonth, migrateArrayIndexIfNeeded, AUDIO_SOURCE, AUDIO_KIND, AUDIO_USE, audioClassTag, buildStats, tagsOf, validateTags, checkedTags, TAG_VOCAB, clearMemos, tagCard, isVocabTag, normalizeTag, CUSTOM_TAG_MAX, CUSTOM_TAG_LEN, RARE_TAG_MAX_COUNT, recallSession, decodeSessionFile, findSessionFile, archiveSessions, scanSessionOriginals, sessionHeaderOf, findArchivedSession, rawArchiveRows, rawSessionFileName, cwdOfSlug, sha256OfFile, roundsOfSessionFile, relationInjectionLines, archiveRelationOverflow, locateMemory, jsonlHasHash, rebuildGuide, guideStats, guideLinks, guideNodes, addSource, listSources, findSources, sourceStats, loadSources, sourceTag, entryProvenance, sourceIndex, runAutoSummary, pendingTurns, autoSummaryOptions, buildAutoSummaryEntry, buildSummaryPrompt, summaryStyleLine, parseSummaryText, summaryInputOf, callWithThinkingRetry, setAutoSummaryCaller, defaultConfig, loadConfig, AUTO_SUMMARY_PREFIX, createRules, parseRulesMarkdown, formatRuleRow, rulesForSearch, parseTimeBound, handleRecord, searchRecords, searchRecordsGrouped, addSubject, subjectRows, voidRecord, unvoidRecord, isStaleInjection, addRecord, removeRecord, recordRows };
 export default plugin;
 
 

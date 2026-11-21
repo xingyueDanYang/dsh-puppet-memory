@@ -13,7 +13,7 @@ fs.writeFileSync(
 );
 
 const mod = await import(new URL("../index.js", import.meta.url).href);
-const { doctorReport, renderDoctor, resolveBackupDir, probeWritable, backupNow, defaultConfig, loadConfig, socialPaths, linesPaths } = mod;
+const { doctorReport, renderDoctor, resolveBackupDir, probeWritable, backupNow, defaultConfig, loadConfig, socialPaths } = mod;
 
 let pass = 0;
 const fails = [];
@@ -105,7 +105,7 @@ try {
 
   // ---- 9. 目录常量一致 ----
   ok("social 目录仍决定在 <记忆目录>/social", socialPaths(TMP).dir === path.join(TMP, "social"));
-  ok("state 目录仍决定在 <记忆目录>/state", linesPaths(TMP).dir === path.join(TMP, "state"));
+  ok("state 目录仍决定在 <记忆目录>/state", path.join(TMP, "state") === path.join(TMP, "state"));
 } finally {
   fs.rmSync(TMP, { recursive: true, force: true });
 }

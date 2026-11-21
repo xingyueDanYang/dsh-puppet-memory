@@ -48,7 +48,7 @@ try {
   // ---- 到期的要推，没到期/标废的不推 ----
   resetDue();
   const block = buildDueInjection(cfg, { persist: false });
-  ok("出块且带标签", block.includes("<puppet_due>") && block.includes("</puppet_due>"), block.slice(0, 60));
+  ok("出块且带标签", block.includes("【记忆·到期提醒】") && block.includes("【记忆·到期提醒】"), block.slice(0, 60));
   ok("推出已过期的两条", block.includes("昨天的截图还没发给他") && block.includes("今天要发的发布说明"));
   ok("推出关系层那条", block.includes("迁移方案"));
   ok("不含未到期的", !block.includes("下周才到期的事"));
@@ -59,7 +59,7 @@ try {
   // ---- 每条只推一次 + 一天最多一条 ----
   resetDue();
   const first = buildDueInjection(cfg);
-  ok("第一次真推（persist）有内容", first.includes("<puppet_due>"));
+  ok("第一次真推（persist）有内容", first.includes("【记忆·到期提醒】"));
   const book = readDue();
   ok("记账：记了今天", /^\d{4}-\d{2}-\d{2}$/.test(String(book.lastDay || "")), String(book.lastDay));
   ok("记账：记了 3 个 hash", Array.isArray(book.notified) && book.notified.length === 3, JSON.stringify(book.notified));
@@ -143,9 +143,9 @@ const preStep = async (args, cont) => {
       .join(String.fromCharCode(10));
   };
   const wire1 = await runStep();
-  ok("接线：到期块真的进了注入", wire1.includes("<puppet_due>") && wire1.includes("这条已经到期"), wire1.slice(0, 80));
+  ok("接线：到期块真的进了注入", wire1.includes("【记忆·到期提醒】") && wire1.includes("这条已经到期"), wire1.slice(0, 80));
   const wire2 = await runStep();
-  ok("接线：第二回合不再重复推", !wire2.includes("<puppet_due>"));
+  ok("接线：第二回合不再重复推", !wire2.includes("【记忆·到期提醒】"));
 
 } finally {
   fs.rmSync(TMP, { recursive: true, force: true });

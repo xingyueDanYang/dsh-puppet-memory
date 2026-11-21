@@ -188,7 +188,7 @@ check("tags removable with minus", tagRemove.includes("已更新") && !tagRemove
 
 const cfg = { inject: { maxChars: 1400 } };
 const injection = mem.buildInjectionText(cfg);
-check("injection has puppet_memory", injection.includes("<puppet_memory>"));
+check("injection has puppet_memory", injection.includes("【记忆·跨会话摘要】"));
 check("injection has 人设", injection.includes("【人设】"));
 check("injection has 关系", injection.includes("【关系】"));
 check("injection has 笔记", injection.includes("【最近笔记】"));
