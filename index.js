@@ -9092,7 +9092,9 @@ function apply(ctx) {
         }
         const stateDigest = stateText ? sha1(stateText) : "";
         // 取向没变就不重复塞（但压缩后会清指纹，自动补回）
-        const stateForInject = stateText && !suppressed.has("state") && lastStateInjected.get(sessionId) !== stateDigest ? stateText : "";
+        // 注意：这一份是「三线状态」，不是状态卡（状态卡在 coreStateForInject）。
+        // 用 let 是为了首轮 cardsOnly 能把它一起清掉——否则首轮只三卡会被它破功。
+        let stateForInject = stateText && !suppressed.has("state") && lastStateInjected.get(sessionId) !== stateDigest ? stateText : "";
         // 完整摘要（人设+关系+笔记+日记）：mode=first-step 时只在第一次注入
         // v1.6（2026-11-17）：补充层也分节奏——压缩后全量补（不带日记）；平时每 8 轮查一次，
         // 哪层缺超 30% 就只补那一层；没缺就啥也不补。
@@ -9255,7 +9257,9 @@ function apply(ctx) {
             }
           }
           // v0.38（B-86）：到期的欠着的事（默认关；一天最多推一条汇总，每条只推一次）
-          if (!suppressed.has("due")) dueText = buildDueInjection(cfgLive);
+          // 首轮不构建到期块：buildDueInjection 默认 persist=true（会把提醒标成已推），
+        // 首轮反正不显示（cardsOnly），先构建等于把它白白吃掉——同交接纸条那个坑。
+        if (!cardsOnly && !suppressed.has("due")) dueText = buildDueInjection(cfgLive);
           // v0.40（B-99）：开幕表——今天/最近 N 天的特殊日子，每天只读一次
           if (!suppressed.has("opening")) openingText = buildOpeningInjection(cfgLive);
 
@@ -9483,11 +9487,11 @@ function apply(ctx) {
         if (cardsOnly) {
           text = ""; socialText = ""; recallText = ""; conflictText = ""; loreText = "";
           circleText = ""; sayingText = ""; dueText = ""; openingText = ""; cueText = "";
-          peopleText = ""; lostDetailText = ""; nowText = ""; stateText = "";
+          peopleText = ""; lostDetailText = ""; nowText = ""; stateText = ""; stateForInject = "";
           diag("首轮只注入三张卡（其余块从第二轮起）");
         }
         // 第 2 轮只补人设全文：这时候三张卡和其它注入都没得给，早退会让这一条永远轮不到
-        if (!personaDue && !text && !socialText && !handoffText && !recallText && !conflictText && !loreText && !circleText && !lostDetailText && !dueText && !openingText && !cueText && !nowText && !rulesForInject && !habitsForInject && !coreText && !coreStateForInject && !stateForInject && !resetNote) return decision;
+        if (!personaDue && !text && !socialText && !handoffText && !recallText && !conflictText && !loreText && !circleText && !lostDetailText && !dueText && !openingText && !cueText && !nowText && !stateText && !rulesForInject && !habitsForInject && !coreText && !coreStateForInject && !stateForInject && !resetNote) return decision;
         const digest = sha1(`${text}\u0000${socialText}\u0000${handoffText}\u0000${recallText}\u0000${dueText}${openingText}\u0000${cueText}\u0000${nowText}\u0000${conflictText}\u0000${loreText}\u0000${circleText}\u0000${lostDetailText}\u0000${rulesForInject}\u0000${habitsForInject}\u0000${coreText}\u0000${coreStateForInject}\u0000${stateForInject}\u0000${resetNote}`);
         // v0.44.1：注入只跟着「用户说话」走——一条新用户消息只注入一次。
         // 触发源在外部（用户消息），注入本身不会再触发注入，也就不会自激循环。

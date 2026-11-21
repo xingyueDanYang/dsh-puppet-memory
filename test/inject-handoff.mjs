@@ -46,7 +46,9 @@ try {
   ok("不含超过 7 天的", !block.includes("十天前的旧纸条"));
   ok("最多 3 条", (block.match(/^· /gm) || []).length <= 3, `实际 ${(block.match(/^· /gm) || []).length}`);
   ok("块里说清「取走后不再出现」", block.includes("取走"));
-  ok("只读：注入后 handoff.jsonl 字节不变", before.equals(after));
+  // 2026-11-21：改成「注入即消费」——发出去的纸条标 injected，文件会变（变的是状态，不是内容）
+  ok("注入即消费：注入后文件被标记（不再只读）", !before.equals(after));
+  ok("同一批纸条不再出现（一次性）", buildHandoffInjection(cfg) === "");
 
   // ---- 开关 ----
   const off = buildHandoffInjection({ ...cfg, handoff: { injectOpen: false } });

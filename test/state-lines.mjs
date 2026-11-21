@@ -9,7 +9,8 @@ process.env.DSH_MEMORY_DIR = TMP;
 fs.mkdirSync(path.join(TMP, "behavior"), { recursive: true });
 fs.writeFileSync(
   path.join(TMP, "config.json"),
-  JSON.stringify({ enabled: true, inject: { maxChars: 1200, mode: "every-step" }, backup: { enabled: false } }),
+  // 2026-11-21：三线状态默认不注入；要测注入路径必须显式开 lines.inject
+  JSON.stringify({ enabled: true, inject: { maxChars: 1200, mode: "every-step" }, lines: { inject: true }, backup: { enabled: false } }),
   "utf8",
 );
 fs.writeFileSync(path.join(TMP, "behavior", "persona.md"), "# 人设\n- 称呼：大肥鱼\n", "utf8");
@@ -132,7 +133,7 @@ try {
   // ---- 9. 假宿主：真跑 apply + pre-step ----
   fs.writeFileSync(
     path.join(TMP, "config.json"),
-    JSON.stringify({ enabled: true, inject: { maxChars: 1200, mode: "every-step" }, backup: { enabled: false } }),
+    JSON.stringify({ enabled: true, inject: { maxChars: 1200, mode: "every-step" }, lines: { inject: true }, backup: { enabled: false } }),
     "utf8",
   );
   const tools = [];
@@ -174,14 +175,15 @@ try {
     return { texts, joined: texts.join("\n"), count: texts.length };
   };
 
-  const first = await run([userMsg("今天好累，想聊聊天", "m1")]);
-  ok("第一次注入三线状态", first.joined.includes("<puppet_state>"), first.joined.slice(0, 120));
-  ok("注入里有取向", first.joined.includes("当前取向") && first.joined.includes("陪伴"));
-  ok("状态注入不含百分比", !/取向[^\n]*\d+%/.test(first.joined));
-  const again2 = await run([userMsg("今天好累，想聊聊天", "m1")]);
-  ok("同一条消息不重复吃信号", again2.joined.includes("<puppet_state>") === false || again2.joined.includes("<puppet_state>"), String(again2.count));
-  const switched = await run([userMsg("ddl 要到了，代码报错，帮我修一下还有交付", "m2")]);
-  ok("换话题后取向跟着变", switched.joined.includes("工作") || switched.joined.includes("当前取向"));
+  // 2026-11-21 设计：① 三线默认不注入；② 首轮只三卡（cardsOnly 连三线一起清）；
+  // ③ 显式开启后，取向变了才补一次（同取向不重复塞）。
+  const firstTurn = await run([userMsg("今天好累，想聊聊天", "m1")]);
+  ok("首轮只三卡：不注入三线", firstTurn.joined.includes("<puppet_state>") === false, firstTurn.joined.slice(0, 120));
+  const turned = await run([userMsg("ddl 要到了，代码报错，帮我修一下还有交付", "m2")]);
+  ok("取向一变就补一次三线", turned.joined.includes("<puppet_state>"), turned.joined.slice(0, 120));
+  ok("注入里有取向", turned.joined.includes("当前取向"));
+  ok("状态注入不含百分比", !/取向[^\n]*\d+%/.test(turned.joined));
+  ok("换话题后取向跟着变", turned.joined.includes("工作") || turned.joined.includes("当前取向"));
 
   // ---- 10. 工具面 ----
   const stateTool = tools.find((t) => t.name === "memory_state");

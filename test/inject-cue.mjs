@@ -100,7 +100,18 @@ try {
   ok("apply() 不抛异常", !applyErr, applyErr);
   ok("memory_cue 工具已注册", ctx.toolList.some((t) => t.name === "memory_cue"));
 
-  const preStep = ctx.handlers.get("agent/pre-step")?.[0];
+  const rawPreStep = ctx.handlers.get("agent/pre-step")?.[0];
+// 2026-11-21：首轮只给三张卡，到期块/回忆提示从第二轮起才注入——测试先热身一轮，
+// 真实断言跑在第二轮上（首轮行为由 state-lines.mjs 覆盖）。
+const warmed = new Set();
+const preStep = async (args, cont) => {
+  const sid = String(args?.agent?.session?.header?.id || "x");
+  if (!warmed.has(sid)) {
+    warmed.add(sid);
+    try { await rawPreStep(args, async () => ({ kind: "enter", messages: [{ id: "warm", role: "user", content: [{ type: "text", text: "热身一句" }] }] })); } catch {}
+  }
+  return rawPreStep(args, cont);
+};
   ok("pre-step 注册上了", typeof preStep === "function");
 
   const agent = { session: { header: { id: "cue-s1", cwd: "E:/tmp", origin: "web" }, snapshotEvents: () => [], events: [] }, ctx: { get: () => null } };

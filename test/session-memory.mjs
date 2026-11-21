@@ -106,9 +106,12 @@ try {
   // 2026-11-18：v1.6 起补充层只在 turn<=1 或距上次 ≥8 轮时检查——老写法在第二步验「屏蔽」，
   // 测到的其实是节奏（第二步本来就不补关系）。所以换成一个新会话，在它的第一步上验屏蔽。
   mem2.suppress("sess-e2e-2", ["core", "rel-bad"]);
-  const after = await run(mkSession("sess-e2e-2"), "随便说一句不一样的话");
-  ok("屏蔽后核心卡不注入", !after.includes("<puppet_core>"), after.slice(0, 120));
-  ok("屏蔽的条目也不注入", after.includes("好关系") && !after.includes("脏关系"));
+  const after1 = await run(mkSession("sess-e2e-2"), "随便说一句不一样的话");
+  ok("屏蔽后核心卡不注入", !after1.includes("<puppet_core>"), after1.slice(0, 120));
+  // 2026-11-21：首轮只给三张卡，补充层（关系等）平时每 8 轮才查一次——所以跑到第 9 轮再验屏蔽
+  let after = after1;
+  for (let i = 2; i <= 9; i++) after = await run(mkSession("sess-e2e-2"), `第 ${i} 句：补充层到点才会补`);
+  ok("屏蔽的条目也不注入", after.includes("好关系") && !after.includes("脏关系"), after.slice(0, 200));
 
   // ---- 6. 工具 ----
   const tool = tools.find((t) => t.name === "memory_forget");
