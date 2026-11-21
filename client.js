@@ -1620,54 +1620,63 @@ window.__ModuleLoader__.load({
 
     // ---------------------------------------------------------------
     // v0.46.0：插件更新（只查不装）
-    // 设置项只有两个：开关 + 间隔；其余都是展示。点「立即检查」才联网。
+    // 仅打开本页或保存到期设置时自动检查；手动检查可绕过间隔，无后台定时器。
     // ---------------------------------------------------------------
     function UpdatePanel() {
-      const { useState, useEffect, useCallback } = React
+      const { useState, useEffect, useCallback, useRef } = React
       const [data, setData] = useState(null)
       const [busy, setBusy] = useState(false)
       const [error, setError] = useState('')
+      const pending = useRef(null)
 
-      const load = useCallback(async () => {
-        try {
-          const res = await callApi('update-state')
-          if (!res || res.ok !== true) throw new Error((res && res.error) || '读取失败')
-          setData(res)
-        } catch (err) {
-          setError(err && err.message ? err.message : String(err))
-        }
+      const run = useCallback((work) => {
+        if (pending.current) return pending.current
+        setBusy(true)
+        setError('')
+        const task = (async () => {
+          try { await work() }
+          catch (err) { setError(err && err.message ? err.message : String(err)) }
+        })().finally(() => {
+          pending.current = null
+          setBusy(false)
+        })
+        pending.current = task
+        return task
       }, [])
+
+      const check = useCallback(async (force) => {
+        const res = await callApi('update-check', { force })
+        if (res && res.currentVersion !== undefined) setData(res)
+        if (!res || (res.ok !== true && !res.skipped)) throw new Error((res && (res.error || res.message)) || '检查失败')
+      }, [])
+
+      const load = useCallback(() => run(async () => {
+        const res = await callApi('update-state')
+        if (!res || res.ok !== true) throw new Error((res && res.error) || '读取失败')
+        setData(res)
+        if (res.enabled && res.due) await check(false)
+      }), [run, check])
 
       useEffect(() => { load() }, [load])
 
-      const save = async (patch) => {
-        setError('')
+      const save = (patch) => run(async () => {
         const res = await callApi('update-configure', patch)
-        if (res && res.ok === true) setData(res)
-        else setError((res && res.error) || '保存失败')
-      }
+        if (!res || res.ok !== true) throw new Error((res && res.error) || '保存失败')
+        setData(res)
+        if (res.enabled && res.due) await check(false)
+      })
 
-      const checkNow = async () => {
-        setBusy(true)
-        setError('')
-        try {
-          const res = await callApi('update-check', { force: true })
-          if (res) setData(res)
-          if (!res || res.ok !== true) setError((res && (res.error || res.message)) || '检查失败')
-        } catch (err) {
-          setError(err && err.message ? err.message : String(err))
-        } finally {
-          setBusy(false)
-        }
-      }
+      const checkNow = () => run(() => check(true))
 
-      if (error && !data) return h('div', { className: 'pmb' }, h('div', { className: 'pmb-error' }, error))
+      if (error && !data) return h('div', { className: 'pmb' },
+        h('div', { className: 'pmb-error' }, error),
+        h('button', { type: 'button', className: 'pmb-btn', disabled: busy, onClick: load }, '重试'))
       if (!data) return h('div', { className: 'pmb' }, h('div', { className: 'pmb-hint' }, '读取中…'))
 
       const latest = data.latest
-      const status = data.hasUpdate
+      const status = data.lastError ? '检查失败，以下为上次结果' : data.hasUpdate
         ? '有新版本 ' + latest.version
-        : (latest ? '已是最新' : '还没查过')
+        : (latest ? '未发现更新' : '还没查过')
       const name = 'pmb-update'
       return h('div', { className: 'pmb', id: name },
         h('div', { className: 'pmb-title' }, '插件更新'),
@@ -1682,14 +1691,14 @@ window.__ModuleLoader__.load({
           )),
           h(Row, { label: '自动检查' },
             h('button', {
-              type: 'button', className: 'pmb-btn',
+              type: 'button', className: 'pmb-btn', disabled: busy,
               onClick: () => save({ enabled: data.enabled !== true }),
             }, data.enabled === true ? '开' : '关'),
             h('span', { className: 'pmb-hint' }, '每'),
             h('select', {
-              className: 'pmb-input', value: String(data.intervalDays || 7),
+              className: 'pmb-input', value: String(data.intervalDays || 7), disabled: busy,
               onChange: (e) => save({ intervalDays: Number(e.target.value) }),
-            }, [1, 3, 7, 14, 30].map((d) => h('option', { key: d, value: String(d) }, d + ' 天'))),
+            }, Array.from({ length: 30 }, (_, i) => i + 1).map((d) => h('option', { key: d, value: String(d) }, d + ' 天'))),
             h('span', { className: 'pmb-hint' }, '查一次'),
           ),
           h(Row, { label: '上次检查' },

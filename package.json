@@ -76,6 +76,6 @@
   "icon": "./icon.png",
   "scripts": {
     "check:privacy": "node 脱敏检查.mjs",
-    "test": "node test/smoke.mjs"
+    "test": "node test/smoke.mjs && node test/update-check.mjs && node test/update-api.mjs && node test/update-client.mjs && node test/backup-client.mjs"
   }
 }

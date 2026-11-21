@@ -31,6 +31,7 @@ import { createHash, randomUUID } from "node:crypto";
 // v0.43（B-103）：时间词 → 日期窗口检索（「昨天/前几天」按天翻）
 import { parseDaySpans, buildDayBlock } from "./dayspan.js";
 import fs from "node:fs";
+import { isIP } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import zlib from "node:zlib";
@@ -2654,6 +2655,31 @@ function hostIsLoopback(req) {
   return LOOPBACK_HOSTS.has(name.toLowerCase());
 }
 
+// 更新接口需要真实的本机 TCP 对端；无 socket 的 Web Worker 隧道不提供此能力。
+// 旧备份/记忆接口仍沿用原来的 hostIsLoopback 契约，不在此 PR 改变其传输支持。
+function updateRequestIsLoopback(req) {
+  const remote = String(req?.socket?.remoteAddress || "").toLowerCase();
+  let local = isIP(remote) === 4 && remote.startsWith("127.");
+  if (isIP(remote) === 6 && !remote.includes("%")) {
+    const normalized = new URL("http://[" + remote + "]").hostname;
+    local = normalized === "[::1]" || /^\[::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}\]$/.test(normalized);
+  }
+  if (!local) return false;
+  const host = req?.headers?.host;
+  if (typeof host !== "string" || !/^(?:localhost|127\.0\.0\.1|\[::1\])(?::\d{1,5})?$/i.test(host)) return false;
+  try {
+    // URL 同时验证端口范围；不接收转发头来代替 TCP 对端、Host 或 Origin。
+    new URL("http://" + host);
+    const origin = req?.headers?.origin;
+    if (origin === undefined) return true; // 本机 CLI 没有浏览器 Origin
+    if (typeof origin !== "string") return false;
+    const url = new URL(origin);
+    const protocol = req.socket.encrypted ? "https:" : "http:";
+    return url.protocol === protocol
+      && url.origin === origin && url.host === new URL(protocol + "//" + host).host;
+  } catch { return false; }
+}
+
 // 数一数备份目录里有多少快照、最新的是哪份（备份盘不在线时返回 0）
 function backupSnapshotStats(dir) {
   let snapshots = 0;
@@ -3172,6 +3198,9 @@ function registerBackupApi(service) {
       if (!hostIsLoopback(req)) return sendJson(res, { ok: false, error: "拒绝：只接受本机（回环地址）请求" }, 403);
       const url = new URL(req.url || "/", "http://localhost");
       const action = url.searchParams.get("action") || "status";
+      if (["update-state", "update-configure", "update-check"].includes(action) && !updateRequestIsLoopback(req)) {
+        return sendJson(res, { ok: false, error: "更新检查只接受本机 TCP 回环请求，Host / Origin 必须匹配；无 socket 的隧道不支持" }, 403);
+      }
       if (req.method === "GET") {
         if (action === "status") return sendJson(res, { ...backupPolicySummary(), compaction: compactionStats() });
         // 取词器/提词器：面板读当前开关与模式
@@ -3241,7 +3270,8 @@ function registerBackupApi(service) {
       }
       if (action === "update-check") {
         // 只查不装：返回最新版本与 Release 链接；force=true 时忽略间隔与冷却
-        const r = await updateChecker.check({ force: Boolean(body && body.force) });
+        if (body.force !== undefined && typeof body.force !== "boolean") return sendJson(res, { ok: false, error: "force 必须是布尔值" }, 400);
+        const r = await updateChecker.check({ force: body.force === true });
         return sendJson(res, { ...r, message: r.ok ? "已检查" : r.skipped || "检查失败" }, r.ok || r.skipped ? 200 : 502);
       }
       if (action === "persona-hint-set") {
@@ -3266,11 +3296,13 @@ function registerBackupApi(service) {
       }
       if (action === "update-configure") {
         const patch = {};
-        if (body && body.enabled !== undefined) patch.enabled = body.enabled === true;
+        if (body && body.enabled !== undefined) patch.enabled = body.enabled;
         if (body && body.intervalDays !== undefined) patch.intervalDays = body.intervalDays;
         if (!Object.keys(patch).length) return sendJson(res, { ok: false, error: "没有要改的字段（enabled / intervalDays）" }, 400);
-        const s = updateChecker.configure(patch);
-        return sendJson(res, { ok: true, ...s, message: "已保存（下次打开面板生效）" });
+        let s;
+        try { s = updateChecker.configure(patch); }
+        catch (err) { return sendJson(res, { ok: false, error: err.message }, 400); }
+        return sendJson(res, { ok: true, ...s, message: "已保存" });
       }
       if (action === "save-feature") {
         const result = setFeature(body.id, body.enabled);

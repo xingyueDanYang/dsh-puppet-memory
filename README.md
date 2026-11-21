@@ -841,9 +841,23 @@ v0.21 先立**数据模型 + 分区 + 注入出口**，把这三件事变成测�
 
 删掉 `~/.dsh/memory/social/` 就回到单人记忆；`config.json` 里 `social.enabled` 改回 `false` 就停止注入。旧层没有任何改动，不需要迁移回滚。
 
+## 插件更新检查（PR #2 对齐当前 main）
+
+设置 →「插件更新」沿用现有页面和 `config.json` 的 `update` 段，不迁移记忆数据，不回退插件版本。
+
+- 默认启用、每 7 天检查；页面打开或保存设置后，启用且到期才查询。可选 1–30 的整数天；关闭后仍可手动「立即检查」。没有后台定时器。
+- 失败后 5 分钟允许在下次打开页面时重试，包括刚成功过、又手动检查失败的情况。并发点击复用同一次请求；检查期间保存的开关和间隔不会被结果覆盖。
+- 只访问固定 GitHub API，不跟随重定向。验证稳定版标志、标签与 Release URL、唯一的 `dsh-puppet-memory.tgz` 资产及下载 URL、正整数大小，以及可选 SHA-256 **元数据格式**；响应按 UTF-8 字节限制为 64 KiB，8 秒超时覆盖响应体读取。
+- **不下载、不安装，不校验安装包实际字节或实际哈希**。元数据通过也不能证明包内版本、内容或宿主兼容性。
+- 更新相关的三个 API 需要真实 TCP 回环对端、有效回环 Host；浏览器 Origin 必须与 Host 同源。本机 CLI 可以不带 Origin。无 socket 的 Web Worker/隧道不支持这些更新 API；其它备份/记忆 API 的传输行为不变。
+- 本地预发布版也参与版本比较：同号稳定版高于 `-rc`，更低的稳定版不会误报为更新。
+
 ## 测试
 
 ```bash
+node test/update-check.mjs            # 更新检查：离线元数据/限额/超时/重试
+node test/update-api.mjs              # 更新 API：假请求的对端/Host/Origin 与参数校验
+node test/update-client.mjs           # 更新页面：打开/保存/错误/重复点击
 node test/smoke.mjs                    # 主冒烟：读写/检索/备份/清理等
 node test/auto-summary-integration.mjs # 自动摘要集成
 node test/auto-summary-retry.mjs       # 思考吃光 tokens 时的预算重试（10 项）
