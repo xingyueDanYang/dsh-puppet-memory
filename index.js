@@ -7126,7 +7126,33 @@ function handleRecord(args = {}) {
   return `记录册 ${rows.length} 条（显示最近 ${shown.length} 条）：\n` + shown.map(formatRecordRow).join("\n");
 }
 
+// A-145：记录册写入（不占新工具）——memory_write 带 records 时顺带登记三元组。
+// 三栏不全/抽不出就跳过，不阻塞主写入（宁可漏判，不可误判）。
+function writeRecordsOf(args) {
+  const raw = args && args.records;
+  if (!raw) return "";
+  const list = Array.isArray(raw) ? raw : [raw];
+  const out = [];
+  for (const item of list) {
+    const line = typeof item === "string"
+      ? item
+      : [item && item.sub, item && item.attr, item && item.state].filter(Boolean).join("｜");
+    if (!line) continue;
+    const obj = item && typeof item === "object" ? item : {};
+    const r = addRecord(line, { note: obj.note || args.recordNote, aliases: obj.aliases || args.recordAliases });
+    if (r) out.push(r);
+  }
+  return out.length ? `记录册：${out.join("；")}` : "";
+}
+
 function writeMemory(args) {
+  const a = args || {};
+  const recOut = writeRecordsOf(a);
+  const main = writeMemoryCore(a);
+  return recOut ? `${main}\n${recOut}` : main;
+}
+
+function writeMemoryCore(args) {
   const layer = String(args.layer || "");
   const ts = nowISO();
   // v1.0（2026-11-15）：来源三档——"用户说的 / 我说的 / 我推断的"要分开，检索时能看见。
@@ -9696,6 +9722,20 @@ ${selfText}
             items: { type: "string" },
             description: "与音频对应的转写；不传会自动读同名 .txt",
           },
+          records: {
+            type: "array",
+            description: "可选：顺带登记记录册三元组（主词｜副词｜状态），一行一件事，如 {sub:'父亲',attr:'芹菜',state:'不喜欢',aliases:['我爸']}。同主词副词改值会拒绝覆盖并提示先问用户。",
+            items: {
+              type: "object",
+              properties: {
+                sub: { type: "string", description: "主词（谁/什么），如 父亲" },
+                attr: { type: "string", description: "副词（哪件事/哪个属性），如 芹菜" },
+                state: { type: "string", description: "状态（自由文本），如 不喜欢" },
+                aliases: { type: "array", items: { type: "string" }, description: "主词的其他说法，如 我爸/爸爸" },
+                note: { type: "string", description: "备注，不参与检索主键" },
+              },
+            },
+          },
         },
         required: ["layer"],
       },
@@ -9706,45 +9746,6 @@ ${selfText}
           return writeMemory(args || {});
         } catch (err) {
           return `写入失败：${err?.message || err}`;
-        }
-      },
-    });
-
-    register({
-      name: "memory_record",
-      description:
-        "记录册：一行一条「主词｜副词｜状态」（如 父亲｜芹菜｜不喜欢），专收散在长对话里的第三方/属性事实。action=add（rows 可多行）| list | search | remove。同主词副词改值会**拒绝覆盖**并提示先跟用户确认。",
-      parameters: {
-        type: "object",
-        properties: {
-          action: {
-            type: "string",
-            enum: ["add", "list", "search", "remove"],
-            description: "add 写一行或多行；list 列全部；search 检索；remove 删一条",
-          },
-          rows: {
-            type: "array",
-            items: { type: "string" },
-            description: "add 用：一行一条「主词｜副词｜状态」，如 「父亲｜芹菜｜不喜欢」",
-          },
-          note: { type: "string", description: "add 用：备注（跟着这条记录走，不参与检索主键）" },
-          aliases: {
-            type: "array",
-            items: { type: "string" },
-            description: "add 用：主词的其他说法（如 父亲 → 我爸/爸爸/老爹），命中原样算；做法同关系文件的 aliases",
-          },
-          query: { type: "string", description: "search 用：检索词（可多个，空格分隔）" },
-          id: { type: "string", description: "remove 用：hash 前 8 位，或「主词｜副词」" },
-          limit: { type: "number", description: "list/search 最多几条，默认 20 / 8" },
-        },
-      },
-      output,
-      async execute(args) {
-        try {
-          ensureDirs();
-          return handleRecord(args || {});
-        } catch (err) {
-          return `记录册操作失败：${err?.message || err}`;
         }
       },
     });
