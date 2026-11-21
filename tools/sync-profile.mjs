@@ -5,11 +5,12 @@
 //   node sync-profile.mjs --apply    # 把仓库里的 js 拷到 profile
 import fs from "node:fs"
 import path from "node:path"
+import os from "node:os"
 import crypto from "node:crypto"
 
 const arg = (k, d) => { const i = process.argv.indexOf(k); return i > 0 ? process.argv[i + 1] : d }
 const repo = arg("--repo", "C:/Data/deepseek-harness/plugins/dsh-puppet-memory")
-const prof = arg("--profile", "C:/Users/Administrator/.dsh/profiles/desktop/node_modules/dsh-puppet-memory")
+const prof = arg("--profile", path.join(os.homedir(), ".dsh", "profiles", "desktop", "node_modules", "dsh-puppet-memory"))
 const APPLY = process.argv.includes("--apply")
 
 if (!fs.existsSync(repo) || !fs.existsSync(prof)) {

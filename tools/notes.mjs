@@ -11,14 +11,14 @@
 //   node notes.mjs --ver 0.49.0     # 指定版本
 //   node notes.mjs --extract        # 只打印 build 会用的「本版正文」
 //   node notes.mjs --name           # 只打印建议的 Release 标题
-//   node notes.mjs --dir <目录>      # 产物与说明所在目录（默认 E:/dshf/gz/release）
+//   node notes.mjs --dir <目录>      # 产物与说明所在目录（默认取环境变量 MEMORY_RELEASE_DIR，再退当前目录）
 //   node notes.mjs --repo <路径>     # 插件仓库（默认 C:/Data/deepseek-harness/plugins/dsh-puppet-memory）
 import fs from "node:fs"
 import path from "node:path"
 import crypto from "node:crypto"
 
 const arg = (k, d) => { const i = process.argv.indexOf(k); return i > 0 ? process.argv[i + 1] : d }
-const DIR = arg("--dir", "E:/dshf/gz/release")
+const DIR = arg("--dir", process.env.MEMORY_RELEASE_DIR || process.cwd())
 const REPO = arg("--repo", "C:/Data/deepseek-harness/plugins/dsh-puppet-memory")
 
 let ver = arg("--ver", "")

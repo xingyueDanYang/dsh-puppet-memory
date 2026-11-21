@@ -19,15 +19,16 @@
 //   6. 过期未清     —— until 已过期、或 heard 超 30 天仍未验证，却还在活跃层
 //
 // 用法：
-//   node memory-audit.mjs                 # 默认扫 C:/Users/Administrator/.dsh/memory
+//   node memory-audit.mjs                 # 默认扫 ~/.dsh/memory
 //   node memory-audit.mjs --dir <目录>
 //   node memory-audit.mjs --all           # 连 archive 也逐条查（默认 archive 只当 hash 池）
 //   node memory-audit.mjs --limit 20      # 每类最多列几条（默认 8）
 import fs from "node:fs"
 import path from "node:path"
+import os from "node:os"
 
 const arg = (k, d) => { const i = process.argv.indexOf(k); return i > 0 ? process.argv[i + 1] : d }
-const DIR = arg("--dir", "C:/Users/Administrator/.dsh/memory")
+const DIR = arg("--dir", path.join(os.homedir(), ".dsh", "memory"))
 const LIMIT = Number(arg("--limit", "8")) || 8
 const CHECK_ARCHIVE = process.argv.includes("--all")
 
