@@ -61,7 +61,7 @@ export function nextPhaseTurn(prev, userKey) {
     isNew,
   };
 }
-import { harvestCandidates, harvestTodo } from "./self-promote.js";
+import { harvestTodo } from "./self-promote.js";
 import { pickCandidates } from "./session-digest.js";
 import { appendCandidates } from "./session-pool.js";
 import { judgePending as judgePoolPending } from "./session-pool-judge.js";
@@ -1686,7 +1686,9 @@ function buildRecallInjection(cfg, userText, { nowMs = Date.now(), collect } = {
       // 超过 300 的不硬塞——压到 200 并标出来，建议放到别的插件（库/文档）去
       const concl = String(k.conclusion || "");
       const overNote = concl.length > 300 ? `〔原文 ${concl.length} 字·建议外置到别的插件〕` : "";
-      knowLines.push("· [知识] " + String(k.term) + "｜" + clip(concl, 200) + overNote + where);
+      // 2026-11-21 丹阳：≤300 字整条给出（300 内都能找回），只有超 300 才压到 200 并提醒外置
+      const shownConcl = concl.length > 300 ? clip(concl, 200) : concl;
+      knowLines.push("· [知识] " + String(k.term) + "｜" + shownConcl + overNote + where);
       if (knowLines.length >= 2) break;
     }
   } catch (err) {
@@ -7326,45 +7328,6 @@ function writeMemory(args) {
   return `未知 layer：${layer}（可选 relation/note/saying/persona/diary）`;
 }
 
-// v0.48（2026-11-19）：自我改进入口——从我这一轮说的话里捞「教训类」句子进候选池。
-// 不直接写自我层（写不写由确认决定）；零模型、失败静默。
-function harvestSelfCandidates(assistantText) {
-  try {
-    const text = String(assistantText || "").trim();
-    if (text.length < 20) return 0;
-    const cands = harvestCandidates([text], { max: 2 });
-    if (!cands.length) return 0;
-    const file = path.join(MEM_DIR, "deep", "self-candidates.jsonl");
-    const now = Date.now();
-    const ttl = 30 * 86400000;
-    const rows = readJsonl(file).filter((r) => r && r.status === "pending" && now - Date.parse(String(r.ts || "")) < ttl);
-    const seen = new Set(rows.map((r) => String(r.key || "")));
-    let added = 0;
-    for (const t of cands) {
-      const key = t.replace(/\s+/g, "").slice(0, 12);
-      if (seen.has(key)) continue;
-      rows.push({ id: "sc-" + sha1(key + now).slice(0, 8), text: t, key, ts: new Date(now).toISOString(), status: "pending" });
-      seen.add(key);
-      added += 1;
-    }
-    if (added) writeJsonl(file, rows);
-    return added;
-  } catch (err) {
-    return 0;
-  }
-}
-
-function pendingSelfCandidates() {
-  try {
-    const now = Date.now();
-    const ttl = 30 * 86400000;
-    return readJsonl(path.join(MEM_DIR, "deep", "self-candidates.jsonl"))
-      .filter((r) => r && r.status === "pending" && now - Date.parse(String(r.ts || "")) < ttl);
-  } catch (err) {
-    return [];
-  }
-}
-
 function writeTurnDiary(agent, events) {
   const session = agent?.session;
   const sessionId = session?.header?.id || "unknown";
@@ -7373,7 +7336,6 @@ function writeTurnDiary(agent, events) {
   if (!turn.user && !turn.assistant) return;
 
   const ts = nowISO();
-  safe("自我候选", () => harvestSelfCandidates(turn.assistant));
   // ⑤（2026-11-19）：用户口中明确的待办 → 状态卡（kind=state），同一句不重复入
   // 默认关（2026-11-19 丹阳：不该每句话都总结，等每天固定时间的「整理笔记」再记）
   // 要恢复逐回合捞：config.todo.autoHarvest = true
@@ -9252,13 +9214,9 @@ function apply(ctx) {
             } else if (selfDue) {
               planNow.self = planNow.turn;
               cardPlan.set(sessionId, planNow);
-              const pend = pendingSelfCandidates();
-              const pendLine = pend.length
-                ? "\n（自我候选 " + pend.length + " 条待确认：确认后用 memory_self action=write 写入，或让我把它并进已有条目。）"
-                : "";
               selfText = missingRatioOf(selfFull, selfCtx) >= 0.2
-                ? selfFull + pendLine
-                : "（自我层按弱补充：只提醒到这里，需要时用 memory_self action=list 看具体条目。）" + pendLine;
+                ? selfFull
+                : "（自我层按弱补充：只提醒到这里，需要时用 memory_self action=list 看具体条目。）";
             } else {
               selfText = "（自我层按弱补充：只提醒到这里，需要时用 memory_self action=list 看具体条目。）";
             }
