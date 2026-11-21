@@ -967,7 +967,7 @@ function writeGuardCheck(text, layer, guard) {
   }
   for (const re of INJECTION_SIGNS) {
     if (re.test(body)) {
-      return "内容里带着注入块的结构标记（比如 <puppet_memory>、【核心记忆】），那是系统注入的格式，不能当记忆存。改成你自己的话。";
+      return "内容里带着系统注入的痕迹（比如【记忆·跨会话摘要】【核心记忆】这类抬头，或旧版的英文标记），那是注入格式，不能当记忆存。改成你自己的话。";
     }
   }
   return null;
@@ -1518,10 +1518,9 @@ function buildHandoffInjection(cfg, { nowMs = Date.now() } = {}) {
     /* 标记失败也不影响这一轮显示 */
   }
   return [
-    "<puppet_handoff>",
-    "以下是留给这个工作台的交接纸条（上一个会话/另一张桌子留下的「下一步该做什么」，取走后不再出现，别当长期记忆用）：",
+    "【记忆·交接纸条】",
+    "上一个会话或另一张桌子留下的「下一步该做什么」，取走后不再出现，别当长期记忆用：",
     clip(lines.join("\n"), 300),
-    "</puppet_handoff>",
   ].join("\n");
 }
 
@@ -1738,11 +1737,10 @@ function buildRecallInjection(cfg, userText, { nowMs = Date.now(), collect } = {
     matched: [...new Set(picked.flatMap((h) => h.matched || []))].slice(0, 8),
   });
   const recallBlock = [
-    "<puppet_recall>",
+    "【记忆·顺手取回】",
     head,
-    "（上面是原话摘要；要完整内容用 memory_search 或 memory_locate 取原文，别凭摘要猜。）",
+    "（上面是原话摘要；要完整内容就翻原文，别凭摘要猜。）",
     ...body,
-    "</puppet_recall>",
   ].join("\n");
   try {
     if (collect && Array.isArray(collect)) {
@@ -2064,7 +2062,7 @@ function buildOpeningInjection(cfg, { nowMs = Date.now(), persist = true } = {})
       writeOpeningRows(rest);
     });
   }
-  return ["<puppet_opening>", "开幕表（特殊日子 / 一次性提醒，每天第一次打开时读一次；不是用户消息）：", ...(auditLine ? [auditLine] : []), ...hits.slice(0, Math.max(1, Number(opt.maxItems) || 5)).map((h) => h.text), "</puppet_opening>"].join("\n");
+  return ["【记忆·开幕表】", "特殊日子 / 一次性提醒，每天第一次打开时读一次；不是用户消息：", ...(auditLine ? [auditLine] : []), ...hits.slice(0, Math.max(1, Number(opt.maxItems) || 5)).map((h) => h.text)].join("\n");
 }
 
 function buildDueInjection(cfg, { nowMs = Date.now(), persist = true } = {}) {
@@ -2102,10 +2100,9 @@ function buildDueInjection(cfg, { nowMs = Date.now(), persist = true } = {}) {
     }
   }
   return [
-    "<puppet_due>",
-    "以下是你欠着的事，时间到了（插件按条目的到期时间推的一次性提醒，不是用户消息；处理完就不用再提）：",
+    "【记忆·到期提醒】",
+    "以下是你欠着的事，时间到了（一次性提醒，不是用户消息；处理完就不用再提）：",
     body,
-    "</puppet_due>",
   ].join("\n");
 }
 
@@ -2222,11 +2219,10 @@ function buildInjectionText(cfg, coreUsed = 0, lines = null, opts = {}) {
 
   const body = trimToBudget(parts.join("\n"), maxChars);
   return [
-    `<puppet_memory>`,
+    "【记忆·跨会话摘要】",
     `以下是跨会话记忆摘要（由 ${DISPLAY_NAME} 插件自动注入，不是用户消息）：`,
     body,
-    `需要细节时用 memory_search 检索；带〔标签〕的条目可用 memory_search 的 tag 参数按标签查；用户档案（layer=user）和便签（layer=memo）不常注入，需要时按层检索；值得长期记住的事用 memory_write 写入（tags 可打分类标签，cue 可记情境线索）。`,
-    `</puppet_memory>`,
+    "需要细节就去检索：带〔标签〕的条目按标签查；用户档案和便签不常注入，需要时按层取；值得长期记住的事直接写进记忆。",
   ].join("\n");
 }
 
@@ -2328,9 +2324,11 @@ function textOfMessage(msg) {
 }
 
 function isStaleInjection(msg) {
-  const texts = [textOfMessage(msg)];
-  if (!texts.length) return false;
-  const joined = texts.join("\n").trim();
+  // 2026-11-21 丹阳定：注入里不再留英文标记，所以靠来源认自己的消息——
+  // source.kind 只认本插件；另外兼容旧会话里以 <puppet_ 开头的历史块。
+  const src = String((msg && msg.source && msg.source.kind) || "");
+  if (src === `plugin:${PLUGIN_NAME}`) return true;
+  const joined = [textOfMessage(msg)].join("\n").trim();
   if (!joined.startsWith("<puppet_")) return false;
   if (joined.startsWith("<puppet_reset>")) return true;
   return /^<puppet_[a-z_]+>[\s\S]*<\/puppet_[a-z_]+>$/.test(joined);
@@ -9153,10 +9151,9 @@ function apply(ctx) {
               }
               if (hits.length) {
                 sayingText = [
-                  "<puppet_saying>",
-                  "常言（本质是知识：谁说过什么、什么梗怎么来的；不是规则）：",
+                  "【记忆·常言】",
+                  "本质是知识：谁说过什么、什么梗怎么来的；不是规则。",
                   ...hits,
-                  "</puppet_saying>",
                 ].join("\n");
                 diag(`常言补充：${hits.length} 条`);
               }
@@ -9186,10 +9183,9 @@ function apply(ctx) {
               if (ld) {
                 pendingLostDetail.delete(sessionId);
                 lostDetailText = [
-                  "<puppet_lostdetail>",
-                  `上下文刚被压缩（压掉约 ${ld.items || "若干"} 条），**原文里的细节已经不在上下文里了**：数字、名字、地点、约定、谁说了什么，可能都只剩摘要。`,
-                  "处理：靠摘要答不出来的，不要凭印象补——需要就 memory_search 原文（或 memory_locate 按 hash）；确实长期要用的**事实**，现在用 memory_write 或 memory_lorebook（≤30 条）记下来。",
-                  "</puppet_lostdetail>",
+                  "【记忆·压缩提示】",
+                  `上下文刚被压缩（压掉约 ${ld.items || "若干"} 条），原文里的细节已经不在上下文里：数字、名字、地点、约定、谁说了什么，可能只剩摘要。`,
+                  "处理：靠摘要答不出来的不要凭印象补——需要就翻原文；确实长期要用的事实，现在就记下来。",
                 ].join("\n");
               }
             } catch (err) {
@@ -9291,8 +9287,8 @@ function apply(ctx) {
                   ];
                   if (ex.text) rows.push(`原文摘录：${NL}${ex.text}`);
                   else rows.push("原文取不到 → 老实说「我查不到那段原话」，不要编。");
-                  rows.push("核对完二选一：原文支持我 → 修正表述重说一遍；原文不支持 → 用 memory_cue demote 把这条降级。");
-                  cueText = ["<puppet_verify>", rows.join(NL), "</puppet_verify>"].join(NL);
+                  rows.push("核对完二选一：原文支持我 → 修正表述重说一遍；原文不支持 → 把这条记忆降级。");
+                  cueText = ["【记忆·核对原文】", rows.join(NL)].join(NL);
                   diag(`反对后回原文：${ex.text ? "取到" : "没取到"}（${ex.gate}）`);
                 }
                 cp.clearPending(sessionId);
@@ -9372,14 +9368,14 @@ function apply(ctx) {
                     const rows = ["（提示：这件事你和他之前聊过。若自然就用平常语气带出来，别罗列资料、别贴编号）", judged.hint];
                     if (judged.question) rows.push(`（拿不准可以先问一句：${judged.question}）`);
                     cueSeenSet(sessionId, { cueKey: textKey });
-                    cueText = ["<puppet_cue>", rows.join(NL), "</puppet_cue>"].join(NL);
+                    cueText = ["【记忆·取词】", rows.join(NL)].join(NL);
                   }
                 }
               }
             }
             // shadow（观察态）：该做的都做了、事件也记了，只是不往上下文里塞——借自 dsh-memory-gate
             if (cueMode === "shadow" && cueText) {
-              diag(`shadow：本应注入${cueText.includes("<puppet_verify>") ? "核对原文" : "回忆提示"}，按观察态不注入`);
+              diag(`shadow：本应注入${cueText.includes("【记忆·核对原文】") ? "核对原文" : "回忆提示"}，按观察态不注入`);
               cueText = "";
             }
           }
@@ -9465,24 +9461,24 @@ function apply(ctx) {
         if (injectMode === "first-step") injectedOnce.add(sessionId);
         // B-47：复位带的临时约束注入一次就删——不能每轮念，也不许写进任何文件
         const resetMessage = resetNote
-          ? injectionMessage(`<puppet_reset>\n用户刚按了复位，这一轮起按下面这条走（一次性的临时约束，不进任何文件，之后不再重复）：\n${resetNote}\n</puppet_reset>`)
+          ? injectionMessage(["【复位】这一轮起按下面的约束走（只生效一次，不进任何文件）：", resetNote].join("\n"))
           : null;
         if (resetNote) sessionResetNotes.delete(sessionId);
         // 注入装不下的旧关系转存深层引导（带日期标注），避免记忆只靠检索才找得回
         archiveRelationOverflow(cfg);
         const rulesMessage = (!silent && rulesForInject)
           ? injectionMessage(
-              (fullTurn ? `<puppet_rules>\n${MERGED_HEAD}\n` : `<puppet_rules>\n以下是行为规则（behavior/core-rules.md：说话方式 / 红线 / 约定）。只在规则改过或上下文压缩后补一次；已经遵守的规则不必每轮重复念叨，按它做就行。\n`) + `${rulesForInject}${core.rulesClipped ? `\n（规则超 ${core.rulesBudget} 字预算，已截断；用 memory_core action=get target=rules 看全文）` : ""}${habitsForInject ? `\n【正在养的习惯】${habitsForInject}\n（做到就好，别僵硬；用 memory_learn 管）` : ""}\n</puppet_rules>`,
+              (fullTurn ? `${MERGED_HEAD}\n` : "以下是行为规则：说话方式 / 红线 / 约定。只在规则改过或上下文压缩后补一次；已经遵守的不必每轮念叨，按它做就行。\n") + `${rulesForInject}${core.rulesClipped ? `\n（规则超预算已截断，需要全文就说一声）` : ""}${habitsForInject ? `\n【正在养的习惯】${habitsForInject}\n（做到就好，别僵硬）` : ""}`,
             )
           : null;
         const coreMessage = (!silent && coreText)
           ? injectionMessage(
-              `<puppet_core>\n${fullTurn ? "" : "以下是核心记忆（behavior/core.md：称呼约定 / 用户 / 能力这些不会经常变的内容；和其它记忆冲突时以它为准）：\n"}${coreText}${core.clipped ? `\n（核心记忆超 ${core.budget} 字预算，已截断；用 memory_core action=get 看全文，精简后 action=set 覆盖）` : ""}\n</puppet_core>`,
+              `${fullTurn ? "" : "以下是核心记忆：称呼 / 用户 / 能力这些不常变的内容；和其它记忆冲突时以它为准。\n"}${coreText}${core.clipped ? `\n（核心记忆超预算已截断，需要全文就说一声）` : ""}`,
             )
           : null;
         const coreStateMessage = (!silent && coreStateForInject)
           ? injectionMessage(
-              `<puppet_core_state>\n${fullTurn ? "" : "以下是当前状态（behavior/core-state.md：当前主线 / 进度 / 待办，会变的那部分）。变了才补，不变就不重复：\n"}${coreStateForInject}${core.stateClipped ? `\n（当前状态超 ${core.stateBudget} 字预算，已截断；用 memory_core action=get target=state 看全文）` : ""}\n</puppet_core_state>`,
+              `${fullTurn ? "" : "以下是当前状态：主线 / 进度 / 待办，会变的那部分。变了才补，不变就不重复。\n"}${coreStateForInject}${core.stateClipped ? `\n（当前状态超预算已截断，需要全文就说一声）` : ""}`,
             )
           : null;
         // v0.47.0：人设弱注入（默认 off；实验模块，通用记忆插件不依赖它）
@@ -9517,8 +9513,8 @@ function apply(ctx) {
             // 2026-11-21 丹阳定：**纯数字块不再注入**——<puppet_persona>97/100</puppet_persona>
             // 没有正文、只有数字和符号，是空白注入。缺卡/被截断时 personaHintLine 返回的是
             // 「重载＋完整人设」，那种仍然要发；只要分数不要。
-            if (personaIntact) return null;
-            return line ? injectionMessage("<puppet_persona>" + String.fromCharCode(10) + line + String.fromCharCode(10) + "</puppet_persona>") : null;
+            // 显眼点机制（丹阳 2026-11-21 明确不可改）：首轮 + 每 25 轮给一个裸数字，不带说明、不带标记。
+            return line ? injectionMessage(line) : null;
           } catch (err) {
             return null;
           }
@@ -9546,7 +9542,7 @@ function apply(ctx) {
               if (sessionId) { phaseAll[sessionId] = phPhase; writeJson(phaseFile, phaseAll); }
               diag(`人设全文注入 phaseTurn=${phaseTurn} 字数=${raw.length} 预算=${BUDGET} 截断=${raw.length > BUDGET}`);
             } catch {}
-            return injectionMessage(`<puppet_persona_full>\n（以下是完整人设，压缩后只补这一次；后面凭这次建立的印象说话，不必逐条复述）\n${text}\n</puppet_persona_full>`);
+            return injectionMessage(["【记忆·完整人设】（压缩后只补这一次；后面凭这次建立的印象说话，不必逐条复述）", text].join("\n"));
           } catch (e) {
             try { diag("人设全文·异常：" + (e && e.message || e)); } catch {}
             return null;
@@ -9554,7 +9550,7 @@ function apply(ctx) {
         })();
         const socialMessage = socialText
           ? injectionMessage(
-              `<puppet_social>\n以下是当前场景的社交档案（由 ${DISPLAY_NAME} 插件按「场景 + 对象」注入，不是用户消息）：\n${socialText}\n只按这份档案说话；档案里没有的别人的事，不要主动提起。\n</puppet_social>`,
+              ["【记忆·社交档案】以下是当前场景的社交档案（按「场景 + 对象」注入，不是用户消息）：", socialText, "只按这份档案说话；档案里没有的别人的事，不要主动提起。"].join("\n"),
             )
           : null;
         const handoffMessage = handoffText ? injectionMessage(handoffText) : null;
@@ -9625,10 +9621,7 @@ function apply(ctx) {
         }
         const selfMessage = selfText
           ? injectionMessage(
-              `<puppet_self>
-以下是${DISPLAY_NAME}自己的认知（behavior/self.jsonl：我自己挑出来要记住的风格 / 习惯 / 事情；独立预算，不占核心卡）：
-${selfText}
-</puppet_self>`,
+              ["【记忆·自我认知】以下是" + DISPLAY_NAME + "自己挑出来要记住的风格 / 习惯 / 事情（独立预算，不占核心卡）：", selfText].join("\n"),
             )
           : null;
         return {

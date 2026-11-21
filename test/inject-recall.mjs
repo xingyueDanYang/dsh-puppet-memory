@@ -37,7 +37,7 @@ try {
 
   // ---- 命中 relations keyword ----
   const r1 = buildRecallInjection(cfg, "你还记得守夜人的最终条例吗");
-  ok("relation 关键词命中 → 出块", r1.includes("<puppet_recall>") && r1.includes("</puppet_recall>"), r1.slice(0, 80));
+  ok("relation 关键词命中 → 出块", r1.includes("【记忆·顺手取回】") && r1.includes("【记忆·顺手取回】"), r1.slice(0, 80));
   // v1.0 标题卡：默认只给标题/标签/id，正文不进块
   ok("块里带标题卡（不带正文）", r1.includes("守夜人") && r1.includes("#r0000001"), r1);
   ok("块里带 hash 便于回查", r1.includes("#r0000001"));

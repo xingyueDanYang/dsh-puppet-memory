@@ -27,7 +27,7 @@ try {
   ok("取第一句", briefOf({ text: "第一句是重点。第二句是补充。" }) === "第一句是重点", String(briefOf({ text: "第一句是重点。第二句是补充。" })));
   ok("没有句号就用整段", briefOf({ text: "没有标点的一句话" }) === "没有标点的一句话");
   ok("去掉层标记", briefOf({ text: "【工作】修复了写入守卫" }) === "修复了写入守卫", briefOf({ text: "【工作】修复了写入守卫" }));
-  ok("去掉 HTML 标签", !briefOf({ text: "<puppet_memory>内容</puppet_memory>" }).includes("<"));
+  ok("去掉 HTML 标签", !briefOf({ text: "【记忆·跨会话摘要】内容【记忆·跨会话摘要】" }).includes("<"));
   ok("超长截断到 200 字内（2026-11-20 起上限 60→200）", briefOf({ text: "长".repeat(400) }).length <= 200);
   ok("空条目返回空", briefOf({}) === "");
   ok("relation 用 meaning", briefOf({ kind: "relation", keyword: "测试", meaning: "这是释义。后面还有。" }) === "这是释义");

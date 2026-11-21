@@ -199,9 +199,9 @@ try {
   // 要验「说明合并」，先给规则卡写点东西。
   writeRules("【红线】不傲娇\n");
   const first = await run(mkAgent("core-s1"));
-  ok("第一次：注入核心卡", first.joined.includes("<puppet_core>"));
-  ok("第一次：同时注入完整摘要", first.joined.includes("<puppet_memory>"));
-  ok("核心卡排在完整摘要前面", first.joined.indexOf("<puppet_core>") < first.joined.indexOf("<puppet_memory>"));
+  ok("第一次：注入核心卡", first.joined.includes("以下是核心记忆"));
+  ok("第一次：同时注入完整摘要", first.joined.includes("【记忆·跨会话摘要】"));
+  ok("核心卡排在完整摘要前面", first.joined.indexOf("以下是核心记忆") < first.joined.indexOf("【记忆·跨会话摘要】"));
   // 2026-11-21：全量轮（第 1 轮 / 每 100 轮）三张卡共用一句说明，核心卡自己不再带「以下是核心记忆…以它为准」的抬头；
   // 那句抬头只在「内容改过、单独补这一张」时出现（见下面 changed 那次）。
   ok("全量轮：三张卡说明合并成一句，核心卡不带单卡抬头", first.joined.includes("以下是三张卡") && !first.joined.includes("以下是核心记忆"));
@@ -209,18 +209,18 @@ try {
   const second = await run(mkAgent("core-s1"));
   // 2026-11-21：弱提示已取消——第 2 轮起不是「只补一句字数提示」，而是三张卡一张都不注入
   //（全量只在第 1 轮 / 每 100 轮 / 某张卡内容改过时来，其余轮次一张都不给）。
-  ok("第二次：三张卡一张都不注入", !second.joined.includes("<puppet_core>") && !second.joined.includes("<puppet_rules>") && !second.joined.includes("<puppet_core_state>") && !second.joined.includes("这轮只给提示") && !second.joined.includes("不装雌小鬼"), second.joined.slice(0, 80));
+  ok("第二次：三张卡一张都不注入", !second.joined.includes("以下是核心记忆") && !second.joined.includes("以下是行为规则") && !second.joined.includes("以下是当前状态") && !second.joined.includes("这轮只给提示") && !second.joined.includes("不装雌小鬼"), second.joined.slice(0, 80));
 
   writeCore("【称呼】大肥鱼\n【红线】不傲娇、不装雌小鬼\n【新增】刚改过一行\n", "utf8");
   const changed = await run(mkAgent("core-s1"));
-  ok("核心卡改了就补：只补核心卡，不重复完整摘要", changed.joined.includes("<puppet_core>") && !changed.joined.includes("<puppet_memory>"));
+  ok("核心卡改了就补：只补核心卡，不重复完整摘要", changed.joined.includes("以下是核心记忆") && !changed.joined.includes("【记忆·跨会话摘要】"));
   // 2026-11-21：弱提示已取消——改过的卡直接整段全量补进来（含正文），不再只发一句「核心卡 N 字」提示。
   const changedChars = fs.readFileSync(CORE, "utf8").replace(/\s+/g, "").length;
   ok("补进来的是整段新正文，不再只是字数提示", changed.joined.includes("刚改过一行") && !changed.joined.includes(`核心卡 ${changedChars} 字`), changed.joined.slice(0, 120));
   ok("单独补这一张卡时仍带优先级说明", changed.joined.includes("以它为准"));
   const stableAfterChange = await run(mkAgent("core-s1"));
   // 2026-11-21：三卡之外还有自我层等块会跟着来，这里只断「核心卡没被再灌一遍」。
-  ok("改完再跑：没有新变化就不再重复核心卡", !stableAfterChange.joined.includes("<puppet_core>") && !stableAfterChange.joined.includes("刚改过一行"), String(stableAfterChange.texts.length));
+  ok("改完再跑：没有新变化就不再重复核心卡", !stableAfterChange.joined.includes("以下是核心记忆") && !stableAfterChange.joined.includes("刚改过一行"), String(stableAfterChange.texts.length));
 
   // 压缩（消息量骤降 + 官方 compaction 事件）→ 核心卡和完整摘要都要能被补回来
   const big = [{ content: "x".repeat(40000) }];
@@ -228,41 +228,41 @@ try {
   await run(mkAgent("core-s2"), big);
   simulateCompaction("core-s2");
   const afterCompaction = await run(mkAgent("core-s2"), drop);
-  ok("压缩后：核心卡重新注入", afterCompaction.joined.includes("<puppet_core>"));
-  ok("压缩后：完整摘要也重新注入", afterCompaction.joined.includes("<puppet_memory>"));
+  ok("压缩后：核心卡重新注入", afterCompaction.joined.includes("以下是核心记忆"));
+  ok("压缩后：完整摘要也重新注入", afterCompaction.joined.includes("【记忆·跨会话摘要】"));
 
   // ---- 6b. 规则只注入一次：状态变不会带出规则，规则变才补 ----
   writeCore("【称呼】大肥鱼\n");
   writeRules("【红线】不傲娇\n");
   writeState("【主线】第一步\n");
   const fresh = await run(mkAgent("core-r1"));
-  ok("首步：规则块出现", fresh.joined.includes("<puppet_rules>"));
-  ok("首步：核心块出现", fresh.joined.includes("<puppet_core>"));
-  ok("首步：状态块出现", fresh.joined.includes("<puppet_core_state>"));
-  ok("规则块排在核心块前面", fresh.joined.indexOf("<puppet_rules>") < fresh.joined.indexOf("<puppet_core>"));
+  ok("首步：规则块出现", fresh.joined.includes("以下是行为规则"));
+  ok("首步：核心块出现", fresh.joined.includes("以下是核心记忆"));
+  ok("首步：状态块出现", fresh.joined.includes("以下是当前状态"));
+  ok("规则块排在核心块前面", fresh.joined.indexOf("以下是行为规则") < fresh.joined.indexOf("以下是核心记忆"));
   const noop = await run(mkAgent("core-r1"));
   // 2026-11-21：弱提示已取消——什么都没变时三张卡一张都不注入（这一轮可能还有自我层等块，所以只断三张卡）。
-  ok("什么都没变：三张卡一张都不注入", !noop.joined.includes("<puppet_rules>") && !noop.joined.includes("<puppet_core>") && !noop.joined.includes("<puppet_core_state>") && !noop.joined.includes("这轮只给提示"), String(noop.texts.length));
+  ok("什么都没变：三张卡一张都不注入", !noop.joined.includes("以下是行为规则") && !noop.joined.includes("以下是核心记忆") && !noop.joined.includes("以下是当前状态") && !noop.joined.includes("这轮只给提示"), String(noop.texts.length));
 
   // 2026-11-21：改过的那张卡立刻全量注入（不再只发一句字数提示）。
   writeState("【主线】第二步，进度往前推了一行\n");
   const stateOnly = await run(mkAgent("core-r1"));
-  ok("只改状态：状态块整段补进来", stateOnly.joined.includes("<puppet_core_state>") && stateOnly.joined.includes("进度往前推了一行"));
-  ok("只改状态：不重复规则卡", !stateOnly.joined.includes("<puppet_rules>") && !stateOnly.joined.includes("【红线】"));
-  ok("只改状态：不重复核心卡", !stateOnly.joined.includes("<puppet_core>") && !stateOnly.joined.includes("【称呼】"));
+  ok("只改状态：状态块整段补进来", stateOnly.joined.includes("以下是当前状态") && stateOnly.joined.includes("进度往前推了一行"));
+  ok("只改状态：不重复规则卡", !stateOnly.joined.includes("以下是行为规则") && !stateOnly.joined.includes("【红线】"));
+  ok("只改状态：不重复核心卡", !stateOnly.joined.includes("以下是核心记忆") && !stateOnly.joined.includes("【称呼】"));
 
   writeRules("【红线】不傲娇、不装雌小鬼\n");
   const rulesOnly = await run(mkAgent("core-r1"));
   // 2026-11-21：规则卡改过 → 整段正文补进来；「三张常驻卡」那句合并说明只在全量轮出现，这一轮不该有。
-  ok("改规则：规则卡整段补进来（不是字数提示）", rulesOnly.joined.includes("<puppet_rules>") && rulesOnly.joined.includes("【红线】不傲娇、不装雌小鬼") && !rulesOnly.joined.includes("以下是三张常驻卡"), rulesOnly.joined.slice(0, 100));
-  ok("改规则：不重复核心卡", !rulesOnly.joined.includes("<puppet_core>") && !rulesOnly.joined.includes("【称呼】"));
+  ok("改规则：规则卡整段补进来（不是字数提示）", rulesOnly.joined.includes("以下是行为规则") && rulesOnly.joined.includes("【红线】不傲娇、不装雌小鬼") && !rulesOnly.joined.includes("以下是三张常驻卡"), rulesOnly.joined.slice(0, 100));
+  ok("改规则：不重复核心卡", !rulesOnly.joined.includes("以下是核心记忆") && !rulesOnly.joined.includes("【称呼】"));
 
   // 压缩后：规则和状态都要补回来
   await run(mkAgent("core-r2"), big);
   simulateCompaction("core-r2");
   const rc = await run(mkAgent("core-r2"), drop);
-  ok("压缩后：规则重新注入", rc.joined.includes("<puppet_rules>"), rc.joined.slice(0, 160));
-  ok("压缩后：状态重新注入", rc.joined.includes("<puppet_core_state>"));
+  ok("压缩后：规则重新注入", rc.joined.includes("以下是行为规则"), rc.joined.slice(0, 160));
+  ok("压缩后：状态重新注入", rc.joined.includes("以下是当前状态"));
 
   // 关掉核心卡 → pre-step 里不再出现 puppet_core
   const cfgPath = path.join(TMP, "config.json");
@@ -270,7 +270,7 @@ try {
   cfg.inject.core = { enabled: false, maxChars: 600, everyStep: true };
   fs.writeFileSync(cfgPath, JSON.stringify(cfg), "utf8");
   const off = await run(mkAgent("core-s3"));
-  ok("关掉核心卡后不再注入", !off.joined.includes("<puppet_core>") && off.joined.includes("<puppet_memory>"));
+  ok("关掉核心卡后不再注入", !off.joined.includes("以下是核心记忆") && off.joined.includes("【记忆·跨会话摘要】"));
 
   // ---- 7. memory_core 工具 ----
   const coreTool = tools.find((t) => t.name === "memory_core");
@@ -292,21 +292,21 @@ try {
   await run(mkAgent("core-reset"));
   const stable = await run(mkAgent("core-reset"));
   // 2026-11-21：弱提示已取消——复位前第二步同样三张卡一张都不注入，正文要等复位/压缩/改卡之后才重发。
-  ok("复位前：第二步三张卡一张都不注入", !stable.joined.includes("<puppet_core>") && !stable.joined.includes("<puppet_rules>") && !stable.joined.includes("不可逆先问"), String(stable.texts.length));
+  ok("复位前：第二步三张卡一张都不注入", !stable.joined.includes("以下是核心记忆") && !stable.joined.includes("以下是行为规则") && !stable.joined.includes("不可逆先问"), String(stable.texts.length));
   const r1 = await call({ action: "reset" }, execOf("core-reset"));
   ok("复位返回已复位", r1.includes("已复位"), r1.slice(0, 50));
   const afterReset = await run(mkAgent("core-reset"));
   // 2026-11-21：复位除了清旧的注入指纹，还会把 inject-phase 的 turn 归零、删掉卡内容指纹
   // （否则 decide() 全 skip，回执里的「重新注入一次」就成了空话）。归零后下一轮 = 第 1 轮 → 三卡全量。
-  ok("复位后：核心卡重新注入", afterReset.joined.includes("<puppet_core>") && afterReset.joined.includes("不可逆先问"));
-  ok("复位后：规则卡也重新注入", afterReset.joined.includes("<puppet_rules>"));
-  ok("复位不带 text 时没有临时约束块", !afterReset.joined.includes("<puppet_reset>"));
+  ok("复位后：核心卡重新注入", afterReset.joined.includes("以下是核心记忆") && afterReset.joined.includes("不可逆先问"));
+  ok("复位后：规则卡也重新注入", afterReset.joined.includes("以下是行为规则"));
+  ok("复位不带 text 时没有临时约束块", !afterReset.joined.includes("【复位】"));
   const r2 = await call({ action: "reset", text: "别用「你应该」，改说「人家觉得」" }, execOf("core-reset"));
   ok("复位带临时约束时回执里带上它", r2.includes("人家觉得"), r2.slice(0, 80));
   const noteRun = await run(mkAgent("core-reset"));
-  ok("临时约束注入一次", noteRun.joined.includes("<puppet_reset>") && noteRun.joined.includes("人家觉得"));
+  ok("临时约束注入一次", noteRun.joined.includes("【复位】") && noteRun.joined.includes("人家觉得"));
   const noteGone = await run(mkAgent("core-reset"));
-  ok("临时约束不会重复注入", !noteGone.joined.includes("<puppet_reset>"));
+  ok("临时约束不会重复注入", !noteGone.joined.includes("【复位】"));
   const filesText = [readCore(), fs.existsSync(RULES) ? fs.readFileSync(RULES, "utf8") : "", fs.existsSync(STATE) ? fs.readFileSync(STATE, "utf8") : ""].join("\n");
   ok("临时约束没写进任何核心卡文件", !filesText.includes("人家觉得"));
   const t1 = await call({ action: "set", text: "【称呼】大肥鱼\n【约定】不可逆先问\n" });
@@ -323,7 +323,7 @@ try {
     ? fs.readdirSync(path.join(TMP, "behavior", "archive")).filter((f) => f.startsWith("core-"))
     : [];
   ok("清空前已归档", archiveFiles.length === 1, String(archiveFiles.length));
-  ok("空卡时不注入", !(await run(mkAgent("core-s4"))).joined.includes("<puppet_core>"));
+  ok("空卡时不注入", !(await run(mkAgent("core-s4"))).joined.includes("以下是核心记忆"));
 
   // ---- 8. memory_stats 能看到核心卡 ----
   writeCore("【称呼】大肥鱼\n");

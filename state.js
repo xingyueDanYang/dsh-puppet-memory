@@ -26,6 +26,8 @@ export function stripFrameworkNoise(text) {
   t = t.replace(/\[Plugin context from[^\]]*\][\s\S]*?(?=\n\n|$)/gi, " ");
   t = t.replace(/\[梗百科[^\]]*\][\s\S]*?(?=\n\n|$)/gi, " ");
   t = t.replace(/^\s*\[[^\]]{0,40}\][\s\S]*$/m, (m) => (/^\s*\[\S/.test(m) ? m : m));
+  // 2026-11-21：注入块改成中文抬头，没有英文标记可剥——整条以「【记忆·…】/【复位】」开头的就不是他说的话
+  if (/^\s*(【记忆·[^】]*】|【复位】)/.test(t.trim())) return "";
   return t.replace(/\s+/g, " ").trim();
 }
 
