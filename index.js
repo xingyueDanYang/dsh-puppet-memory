@@ -8991,7 +8991,9 @@ function apply(ctx) {
         const justStarted = plan.turn === 1;
         // 2026-11-21 丹阳定：**会话首轮只给三张卡**——人设/关系/自我/书签/取回/交接/回忆/自我层
         // 都从第二轮起才注入。首轮 2960 字里，真正必需的只有三张卡。
-        const cardsOnly = justStarted;
+        // 注意（0.49.2 修）：cardsOnly 不能只看 justStarted——plan.turn 是内存计数，重启即归 1，
+        // 而三卡走的是持久化的 phaseTurn。两者错位时（重启后在非 1/100 轮）会出现
+        // 「别的块全清掉、三卡又不到点」→ 整轮一个块都不注入。所以必须等 fullTurn/justCompressed 算完再定。
         // offset：错开检查轮次，避免几张卡挤在同一轮一起补（丹阳 2026-11-17）
         const cardPolicy = {
           core: { every: 5, off: 0, thr: 0.2 },
@@ -9039,6 +9041,7 @@ function apply(ctx) {
         // 节奏（2026-11-21 丹阳定）：第 1 轮与 100 的倍数强注入，其余弱注入
         const phase = phaseOf(phaseTurn);
         const fullTurn = phase.full;
+        const cardsOnly = justStarted && (fullTurn || justCompressed);
         const silent = false;
         const MERGED_HEAD = "以下是三张卡（行为规则 / 核心记忆 / 当前状态）：会话首轮、每 100 轮、以及压缩后的首轮各全量给一次，平时不重复；已经遵守的不必念叨，按它做就行。";
         // 2026-11-21 丹阳定（第三版）：取消三卡错开、取消弱提示。
