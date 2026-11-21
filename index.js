@@ -2287,13 +2287,15 @@ export function dedupeBlocks(sessionId, blocks) {
   let logged = dedupeLogged.get(sid);
   if (!logged) { logged = new Set(); dedupeLogged.set(sid, logged); }
   const out = [];
+  // 体积回执（2026-11-21 丹阳：「现在是上下文注入占大头了」）：先量再砍，别凭感觉删
+  const sizes = [];
   for (const item of blocks || []) {
     const name = String((item && item[0]) || "");
     const msg = item && item[1];
     if (!msg) continue;
-    if (ALWAYS_SEND_BLOCKS.has(name)) { out.push(msg); continue; }
     const text = blockText(msg).trim();
     if (!text) continue;
+    if (ALWAYS_SEND_BLOCKS.has(name)) { out.push(msg); sizes.push([name, text.length]); continue; }
     const h = sha1(text);
     if (set.has(h)) {
       if (!logged.has(name)) {
@@ -2304,7 +2306,15 @@ export function dedupeBlocks(sessionId, blocks) {
     }
     set.add(h);
     out.push(msg);
+    sizes.push([name, text.length]);
   }
+  try {
+    if (sizes.length) {
+      const total = sizes.reduce((n, x) => n + x[1], 0);
+      const top = sizes.slice().sort((a, b) => b[1] - a[1]).slice(0, 6).map(([n, len]) => `${n}=${len}`).join(" ");
+      diag(`注入体积 共 ${total} 字 / ${sizes.length} 块：${top}`);
+    }
+  } catch {}
   return out;
 }
 
