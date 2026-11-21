@@ -119,11 +119,25 @@ try {
   let applyErr = "";
   try { mod.apply(ctx); } catch (err) { applyErr = err?.message || String(err); }
   ok("apply() 不抛异常", !applyErr, applyErr);
-  const preStep = handlers.get("agent/pre-step")?.[0];
+  const rawPreStep = handlers.get("agent/pre-step")?.[0];
+// 2026-11-21：首轮只给三张卡，到期块/回忆提示从第二轮起才注入——测试先热身一轮，
+// 真实断言跑在第二轮上（首轮行为由 state-lines.mjs 覆盖）。
+const warmed = new Set();
+const preStep = async (args, cont) => {
+  const sid = String(args?.agent?.session?.header?.id || "x");
+  if (!warmed.has(sid)) {
+    warmed.add(sid);
+    try { await rawPreStep(args, async () => ({ kind: "enter", messages: [{ id: "warm", role: "user", content: [{ type: "text", text: "热身一句" }] }] })); } catch {}
+  }
+  return rawPreStep(args, cont);
+};
   ok("pre-step 注册上了", typeof preStep === "function");
   const agent = { session: { header: { id: "due-s1", cwd: "E:/tmp", origin: "web" }, snapshotEvents: () => [], events: [] }, ctx: { get: () => null } };
+  let stepNo = 0;
   const runStep = async () => {
-    const decision = await preStep({ agent }, async () => ({ kind: "enter", messages: [] }));
+    // 2026-11-21：新版注入只跟着「新用户发言」走；空消息那套在第二轮起会被当成同一回合跳过
+    stepNo += 1;
+    const decision = await preStep({ agent }, async () => ({ kind: "enter", messages: [{ id: `d${stepNo}`, role: "user", content: [{ type: "text", text: `第 ${stepNo} 句` }] }] }));
     return (decision?.messages || [])
       .map((m) => (Array.isArray(m.content) ? m.content.map((b) => b.text || "").join("") : String(m.content || "")))
       .join(String.fromCharCode(10));
