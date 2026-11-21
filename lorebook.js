@@ -206,11 +206,14 @@ export function createLorebook({ dir } = {}) {
     if (!picked || !picked.length) return "";
     const lines = picked.map((h) => {
       const st = h.r.state ? `｜状态：${h.r.state}${h.r.stateAt ? `（${h.r.stateAt}）` : ""}` : "";
-      return `- 「${h.r.name}」${h.r.content}${st}`;
+      // 2026-11-21：每条书签压到 200 字（两条约 600 字/轮太重），要点仍在，长文请另存笔记
+      const body = String(h.r.content || "");
+      const clipped = body.length > 200 ? body.slice(0, 200) + `…〔原 ${body.length} 字，全文用 memory_lorebook list 看〕` : body;
+      return `- 「${h.r.name}」${clipped}${st}`;
     });
     return [
       "<puppet_lore>",
-      "约定书签（世界书）：下面是你和他之间挂在这个话题上的约定，命中就按它来。它**不是规则册**（规则册 R 编号才是唯一源），但也不是背景资料——是要照做的口径。带「状态」的条目是事件当前值：这一轮如果说的和状态不一样，先说一句「书签里是 X」，别顺着错的说。",
+      "约定书签（世界书）：命中就按它来（不是规则册——规则册 R 编号才是唯一源）。带「状态」的是事件当前值，你说的和它不一样先纠一句。",
       ...lines,
       "</puppet_lore>",
     ].join("\n");

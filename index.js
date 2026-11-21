@@ -1667,7 +1667,8 @@ function buildRecallInjection(cfg, userText, { nowMs = Date.now(), collect } = {
   // 2026-11-20：退回见正文——只给标题/标签等于没给，模型看到标签就当看过了，转头还是忘
   const lineOf = (h) => {
     const why = h.matched && h.matched.length ? `（命中：${h.matched.slice(0, 3).join("、")}）` : "";
-    const prose = String(h.brief || "").replace(/\s+/g, " ").trim();
+    // 2026-11-21：注入内容占了 54.3% 的 token（丹阳的 Token 统计），单条摘要太长就压到 120 字
+    const prose = clip(String(h.brief || "").replace(/\s+/g, " ").trim(), 120);
     return `· [${h.layer}] ${prose}${h.hash ? ` #${h.hash}` : ""}${why}`;
   };
   const head = shown.length === picked.length
@@ -1691,7 +1692,7 @@ function buildRecallInjection(cfg, userText, { nowMs = Date.now(), collect } = {
   } catch (err) {
     knowLines = [];
   }
-  const body = [clip(shown.slice(0, maxLines).map(lineOf).join("\n"), 420), ...knowLines];
+  const body = [clip(shown.slice(0, maxLines).map(lineOf).join("\n"), 300), ...knowLines];
   if (weak.length && rec.showWeak !== false) body.push(`· 另有 ${weak.length} 条只擦到一点（${[...new Set(weak.flatMap((h) => h.matched || []))].slice(0, 3).join("、")}），需要时再查`);
   // v0.42（B-102）：埋点——只记"注入了什么、强/弱各几条"，供一周后判断提示有没有促成真查询
   logRecall({
