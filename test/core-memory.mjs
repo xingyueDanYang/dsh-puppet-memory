@@ -204,7 +204,7 @@ try {
   ok("核心卡排在完整摘要前面", first.joined.indexOf("<puppet_core>") < first.joined.indexOf("<puppet_memory>"));
   // 2026-11-21：全量轮（第 1 轮 / 每 100 轮）三张卡共用一句说明，核心卡自己不再带「以下是核心记忆…以它为准」的抬头；
   // 那句抬头只在「内容改过、单独补这一张」时出现（见下面 changed 那次）。
-  ok("全量轮：三张卡说明合并成一句，核心卡不带单卡抬头", first.joined.includes("以下是三张常驻卡") && !first.joined.includes("以下是核心记忆"));
+  ok("全量轮：三张卡说明合并成一句，核心卡不带单卡抬头", first.joined.includes("以下是三张卡") && !first.joined.includes("以下是核心记忆"));
 
   const second = await run(mkAgent("core-s1"));
   // 2026-11-21：弱提示已取消——第 2 轮起不是「只补一句字数提示」，而是三张卡一张都不注入

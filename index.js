@@ -8633,7 +8633,7 @@ function apply(ctx) {
         const phase = phaseOf(phaseTurn);
         const fullTurn = phase.full;
         const silent = false;
-        const MERGED_HEAD = "以下是三张常驻卡（行为规则 / 核心记忆 / 当前状态）：压缩后首轮或每 100 轮全量给一次；已经遵守的不必重复念叨，按它做就行。";
+        const MERGED_HEAD = "以下是三张卡（行为规则 / 核心记忆 / 当前状态）：会话首轮、每 100 轮、以及压缩后的首轮各全量给一次，平时不重复；已经遵守的不必念叨，按它做就行。";
         // 2026-11-21 丹阳定（第三版）：取消三卡错开、取消弱提示。
         //   全量轮（1、100、200…）三卡全量；内容改过立即全量；其余轮一张都不注入。
         //   保留「内容变了必注入」，否则改了卡模型也看不见。
@@ -9984,7 +9984,7 @@ ${selfText}
 
       name: "memory_cue",
       description:
-        "取词器/提词器的干预面（B-94）：action=list 看「重要」库；events 看最近的回忆事件（成败都记）；misrecall 看记错表（取词时会被跳过、30 天过期）；forget 从记错表删一条（给 keyword 或 hash）；promote/demote 手动改某条重要的状态；stats 看汇总。它只读写 deep/important.jsonl、deep/recall-events.jsonl、deep/misrecall.jsonl，不新增/删除任何记忆条目。",
+        "取词器/提词器的干预面（B-94）：action=list 看「重要」库；events 看最近的回忆事件（成败都记）；misrecall 看记错表（取词时会被跳过、30 天过期）；forget 从记错表删一条（给 keyword 或 hash）；promote/demote 改**已有**条目的状态（hash 不存在会报「没找到」，不会批量动）——重要库是取词时按命中自动攒的，手动加不进去，要给某条挂钩子用 memory_write 的 aliases；stats 看汇总。只读写 deep/important.jsonl、deep/recall-events.jsonl、deep/misrecall.jsonl。",
       parameters: {
         type: "object",
         properties: {
@@ -10141,7 +10141,7 @@ ${selfText}
     register({
       name: "memory_core",
       description:
-        "核心记忆拆三份，都常驻注入、压缩后自动补回：core=不会变的（称呼/用户/能力，400 字）｜rules=怎么办事（说话/红线/约定，400 字，只在规则改过或压缩后各注入一次）｜state=会变的（主线/进度/待办，300 字）。action=get 读 | set 覆盖 | append 追加一行 | clear 清空（先归档）| reset 一句话复位（只清本会话注入指纹，不动文件；text 可带一句只对本会话生效的临时约束）。set 超 2× 预算会被拒。别写成日记或流水账。主人锁：以「[主人]」开头的行受保护，set/clear 删改会被拒，确需动要 ownerRelease=true。",
+        "核心记忆三份：core=不会变的（称呼/用户/能力，400 字）｜rules=怎么办事（红线/约定，400 字）｜state=会变的（主线/进度，300 字，**不放待办**）。注入节奏＝会话首轮 + 每 100 轮各全量一次，卡内容改过的那轮立即补，压缩后相位归零重算首轮——所以「改完卡对方没看到」最多一回合，别反复重写。action=get 读 | set 覆盖 | append 追加一行 | clear 清空（先归档）| reset 只归零本会话注入相位（不动文件；text 可带一句本会话临时约束）。set 超 2× 预算会被拒；别写成日记。主人锁：以「[主人]」开头的行 set/clear 会拒，确需动要 ownerRelease=true。set 超 2× 预算会被拒。别写成日记或流水账。主人锁：以「[主人]」开头的行受保护，set/clear 删改会被拒，确需动要 ownerRelease=true。",
       parameters: {
         type: "object",
         properties: {
@@ -10320,7 +10320,7 @@ ${selfText}
     register({
       name: "memory_lorebook",
       description:
-        "约定书签（世界书）：把「跨会话要守的约定/口径/禁令」挂在关键词上，命中才注入，不命中一条都不带。**不是规则册**（R 编号是唯一源，书签不能覆盖规则），也不放背景设定/名词解释。**一条=一个事件**（name 是事件名，同一事件只存一条；换值用 update 改 state，不新开）。action=add（name+content+keywords，或 always=true）| update（按 id）| remove（按 id）| list | check（试命中）。**locked=true 的书签不计入 30 条上限**（白名单）：长期要守的约定锁上就不占名额，也不会因为「到上限了」被逼着合并。",
+        "约定书签（世界书）：把「跨会话要守的约定/口径/禁令」挂在关键词上，命中才注入，不命中一条都不带。**不是规则册**（R 编号是唯一源，书签不能覆盖规则），也不放背景设定/名词解释。**一条=一个事件**（name 是事件名，同一事件只存一条；换值用 update 改 state，不新开）。action=add（name+content+keywords，或 always=true）| update（按 id）| remove（按 id）| list | check（试命中）。**locked=true 的书签不计入 30 条上限**（白名单）：长期要守的约定锁上就不占名额，也不会因为「到上限了」被逼着合并。注入时每条正文压到 200 字，超了会标原字数并指向 list——长文别塞书签，另存笔记。",
       parameters: {
         type: "object",
         properties: {
@@ -10505,7 +10505,7 @@ ${selfText}
     register({
       name: "memory_forget",
       description:
-        "会话记忆管理（v0.28）：管「当前会话」的记忆片段，避免脏记忆每轮污染上下文（坏记忆进了注入会跟着每个 turn 走）。action=list 看本会话产生的片段（turn 日记 / 自动摘要）和当前屏蔽表 | suppress 把条目加进本会话屏蔽（hashes=[...]；也可以传 core/state/social/persona 屏蔽整块）| unsuppress 解除屏蔽（hashes 省略=全部）| delete 真删本会话的一条（hash=…，删前自动归档到 behavior/archive，可找回）| overview 看状态。session 省略时用当前会话。屏蔽只影响注入，不动数据。【使用规则】delete 属于不可逆面：先说出删的是哪一条、为什么删，并确认后再动手；能屏蔽就别删（屏蔽可撤销）。",
+        "会话记忆管理（v0.28）：管「当前会话」的记忆片段，避免脏记忆每轮污染上下文（坏记忆会被反复注入、把检索带偏）。action=list 看本会话产生的片段（turn 日记 / 自动摘要）和当前屏蔽表 | suppress 把条目加进本会话屏蔽（hashes=[...]；也可以传 core/state/social/persona 屏蔽整块）| unsuppress 解除屏蔽（hashes 省略=全部）| delete 真删本会话的一条（hash=…，删前自动归档到 behavior/archive，可找回）| overview 看状态。session 省略时用当前会话。屏蔽只影响注入，不动数据。【使用规则】delete 属于不可逆面：先说出删的是哪一条、为什么删，并确认后再动手；能屏蔽就别删（屏蔽可撤销）。",
       parameters: {
         type: "object",
         properties: {
@@ -10654,7 +10654,7 @@ ${selfText}
 
       name: "memory_pickup",
       description:
-        "确定性读回自己的记忆：三张常驻卡（核心/规则/状态）+ 自我层最近几条 + 最近几天日记片段，原样返回。**上下文被压缩之后、换了新会话、或用户问「你还记得吗/之前那个」时用它**——它不检索、不猜，只把已经在盘上的东西读回来（和「让模型自己想起来」是两件事）。比记忆注入更可靠的地方是：它是被明确调用的，不依赖模型自觉。",
+        "确定性读回自己的记忆：三张卡（核心/规则/状态；它们只在首轮和每 100 轮注入，所以这里读回更可靠）+ 自我层最近几条 + 最近几天日记片段，原样返回。**上下文被压缩之后、换了新会话、或用户问「你还记得吗/之前那个」时用它**——它不检索、不猜，只把已经在盘上的东西读回来（和「让模型自己想起来」是两件事）。比记忆注入更可靠的地方是：它是被明确调用的，不依赖模型自觉。",
       parameters: {
         type: "object",
         properties: {
@@ -10748,7 +10748,7 @@ ${selfText}
 
       name: "memory_control",
       description:
-        "控制记忆开关。enable/disable/status；summary 开关自动摘要；summarize 立刻给本会话未摘要回合跑一次（写进日记层，只在检索时出现）；inject 切注入频率：every-step 每步注入（默认）/ first-step 只首次注入（省上下文，之后自己 memory_search）；recall 调「顺手取回」：不传参数看设置，传 enabled/minStrong/maxLines/showWeak/profile 改设置，下一轮生效不用重启。scope=session 只影响当前会话，global 影响全部。",
+        "控制记忆开关。enable/disable/status；summary 开关自动摘要；summarize 立刻给本会话未摘要回合跑一次（写进日记层，只在检索时出现）；inject 切注入频率：every-step 每步注入 / first-step 每次 run 只注一次（现在用这个）；recall 调「顺手取回」：不传参数看设置，传 enabled/minStrong/maxLines/showWeak/profile 改设置，下一轮生效不用重启。同内容的块一个会话只发一次（核心卡/规则卡/状态卡、人设、书签、复位这几类白名单除外）。scope=session 只影响本会话，global 影响全部。",
       parameters: {
         type: "object",
         properties: {
