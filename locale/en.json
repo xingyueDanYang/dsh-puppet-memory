@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Puppet Memory",
+    "description": "Cross-session memory for DSH: five layers by when they enter context, multi-person/multi-group, per-session cleanup."
+  }
+}
