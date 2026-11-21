@@ -9041,7 +9041,10 @@ function apply(ctx) {
         // 节奏（2026-11-21 丹阳定）：第 1 轮与 100 的倍数强注入，其余弱注入
         const phase = phaseOf(phaseTurn);
         const fullTurn = phase.full;
-        const cardsOnly = justStarted && (fullTurn || justCompressed);
+        // 2026-11-21 丹阳定（第四版）：**首轮＝只给三张卡，且三卡强制全量**。
+        // 之前两版都错在这个"首轮"到底以谁为准：以内存轮次为准时三卡不到点（只剩别的块），
+        // 以持久相位为准时重启后又不算首轮。现在统一：justStarted 就强制三卡 + 屏蔽其它块。
+        const cardsOnly = justStarted;
         const silent = false;
         const MERGED_HEAD = "以下是三张卡（行为规则 / 核心记忆 / 当前状态）：会话首轮、每 100 轮、以及压缩后的首轮各全量给一次，平时不重复；已经遵守的不必念叨，按它做就行。";
         // 2026-11-21 丹阳定（第三版）：取消三卡错开、取消弱提示。
@@ -9061,6 +9064,8 @@ function apply(ctx) {
         lastRawCardHashes.set(sessionId, rawHashes);
         const decide = (id, raw) => {
           if (!raw) return "skip";
+          // 首轮（新会话 / 重启后的第一轮）永远全量：模型刚起来，三卡必须先立住
+          if (justStarted) return "strong";
           // 压缩兜底（2026-11-21 补回）：官方 compaction 事件会把相位归零，但「消息量骤降又没收到事件」
           // 这条老路只设了 pendingStrong；不认它，三卡就再也回不来。
           if (justCompressed) return "strong";
