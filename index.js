@@ -7198,6 +7198,7 @@ function searchRecords(query, limit = 8) {
   return rows
     .map((r) => {
       let score = 0;
+      let stateHit = 0;
       for (const t of tokens) {
         if (!t) continue;
         const nt = recNorm(t);
@@ -7211,12 +7212,15 @@ function searchRecords(query, limit = 8) {
         const aliasHit = recordAliasesOf(r, map).some((a) => hit(a));
         if (hit(r.sub) || aliasHit) score += 3;
         if (hit(r.attr)) score += 2;
-        if (hit(r.state)) score += 1;
+        // 状态**不算命中**（2026-11-21 丹阳：这种应该直接屏蔽）。
+        // 状态是自由长文本，随便提一句「重启」就能把三条都拽出来——那是噪声，不是联想。
+        // 它只留下同分排序的用处：主词/副词一样时，状态对得上的排前面。
+        if (hit(r.state)) stateHit = 1;
       }
-      return { r, score };
+      return { r, score, stateHit };
     })
     .filter((x) => x.score > 0)
-    .sort((a, b) => b.score - a.score)
+    .sort((a, b) => b.score - a.score || b.stateHit - a.stateHit)
     .slice(0, max)
     .map((x) => x.r);
 }
