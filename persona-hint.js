@@ -60,7 +60,8 @@ export function personaHintLine(hint, turn, opts) {
   if (h.mode === "off") return "";
   const broken = String((opts && opts.integrity) || "intact") === "broken";
   const n = Math.max(1, h.everyN);
-  if (!broken && turn % n !== 0) return "";
+  // 显眼点：首轮 + 每 n 轮各给一次（丹阳 2026-11-21 明确：首轮也要）
+  if (!broken && turn !== 1 && turn % n !== 0) return "";
   if (broken) {
     // 强注入 = 状态刷新：给完整人设卡 + 扣分后的新起点。
     // 带 coreText 就重载全文（深度印象），不带就退化成一句指路。
@@ -71,9 +72,10 @@ export function personaHintLine(hint, turn, opts) {
     const head = "【人设卡重载】上下文里的人设不完整（压缩或截断），下面是完整的人设，按它说话：";
     return card ? head + String.fromCharCode(10) + card : "";
   }
-  // 2026-11-21：平时不再注入任何「完整度」提示——完整就不用说，不完整走上面的重载。
+  // 2026-11-21 丹阳定：这里**只给数字**，不给说明、不加「完整度」这种词。
+  // 它是显眼点（一个能一眼看到的标记），不是给我读的说明书——说明和「完整度」命名都是我自己加的，删掉。
   if (h.mode === "roleplay" && h.encourage) return h.encourage;
-  return "";
+  return String(h.score.value) + "/" + String(h.score.max);
 }
 
 // 压缩后：分数减一个随机数（1–10），计数由调用方清零

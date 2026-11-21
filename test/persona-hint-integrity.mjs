@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { personaHintLine } from "../persona-hint.js";
 let n = 0; const t = (name, fn) => { fn(); n += 1; console.log("  ✓ " + name); };
-t("完整时一个字都不给", () => {
-  assert.equal(personaHintLine({ mode: "score", everyN: 25 }, 25, { integrity: "intact" }), "");
+t("完整时给数字显眼点，非倍数轮不给", () => {
+  assert.equal(/^\d+\/\d+$/.test(personaHintLine({ mode: "score", everyN: 25 }, 25, { integrity: "intact" })), true);
   assert.equal(personaHintLine({ mode: "score", everyN: 25 }, 7, { integrity: "intact" }), "");
 });
 t("不完整时不看节奏，当轮补全文（不报分数、不引工具）", () => {

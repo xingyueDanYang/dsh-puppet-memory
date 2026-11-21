@@ -16,11 +16,15 @@ t("everyN 夹在 5–100", () => {
 });
 
 console.log("注入节奏");
-t("2026-11-21：完整时一个字都不注入（不再报完整度）", () => {
-  assert.equal(personaHintLine({ mode: "score", everyN: 25 }, 25), "");
+t("显眼点：首轮和每 N 轮各给一次，只给数字", () => {
+  const at25 = personaHintLine({ mode: "score", everyN: 25 }, 25);
+  const at1 = personaHintLine({ mode: "score", everyN: 25 }, 1);
+  assert.equal(/^\d+\/\d+$/.test(at25), true, at25);
+  assert.equal(/^\d+\/\d+$/.test(at1), true, at1);
+  assert.equal(at25.includes("完整度"), false);
   assert.equal(personaHintLine({ mode: "score", everyN: 25 }, 24), "");
 });
-t("破损重载不带自造分数", () => {
+t("破损重载补全文，不夹分数、不报完整度", () => {
   const line = personaHintLine({ mode: "score", everyN: 25 }, 25, { integrity: "broken", coreText: "我是雪风" });
   assert.equal(line.includes("完整度"), false);
   assert.equal(line.includes("我是雪风"), true);
