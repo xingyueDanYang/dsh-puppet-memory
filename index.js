@@ -2280,7 +2280,7 @@ function blockText(msg) {
   return "";
 }
 
-function dedupeBlocks(sessionId, blocks) {
+export function dedupeBlocks(sessionId, blocks) {
   const sid = String(sessionId || "");
   let set = sentBlockHashes.get(sid);
   if (!set) { set = new Set(); sentBlockHashes.set(sid, set); }
