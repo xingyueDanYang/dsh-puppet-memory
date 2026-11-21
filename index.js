@@ -1645,11 +1645,20 @@ function buildRecallInjection(cfg, userText, { nowMs = Date.now(), collect } = {
       );
     } catch {}
   };
-  if (!hits.length) {
-    if (dayBlock) {
-      logRecall({ n: 0, strong: 0, weak: 0, matched: [], day: 1, dayN: dayStats.n, days: dayStats.days });
+  // A-145：记录册命中——主词/副词/别名任一命中就给一行；冲突条目自带「两种说法未确认」
+  const recordLines = (() => {
+    try {
+      return searchRecords(String(userText || ""), 3).map((r) => `· [记录] ${formatRecordRow(r)}`);
+    } catch {
+      return [];
     }
-    return dayBlock;
+  })();
+  if (!hits.length) {
+    if (dayBlock || recordLines.length) {
+      logRecall({ n: 0, strong: 0, weak: 0, matched: [], day: dayBlock ? 1 : 0, dayN: dayStats.n, days: dayStats.days, records: recordLines.length });
+    }
+    const recBlock = recordLines.length ? ["以下是记录册里对得上的条目（主词/副词命中）：", ...recordLines] : [];
+    return [dayBlock, ...recBlock].filter(Boolean).join("\n");
   }
   const seen = new Set();
   const picked = [];
@@ -1698,6 +1707,7 @@ function buildRecallInjection(cfg, userText, { nowMs = Date.now(), collect } = {
     knowLines = [];
   }
   const body = [clip(shown.slice(0, maxLines).map(lineOf).join("\n"), 300), ...knowLines];
+  if (recordLines.length) body.push(...recordLines);
   if (weak.length && rec.showWeak !== false) body.push(`· 另有 ${weak.length} 条只擦到一点（${[...new Set(weak.flatMap((h) => h.matched || []))].slice(0, 3).join("、")}），需要时再查`);
   // v0.42（B-102）：埋点——只记"注入了什么、强/弱各几条"，供一周后判断提示有没有促成真查询
   logRecall({
@@ -9754,7 +9764,7 @@ ${selfText}
 
       name: "memory_search",
       description:
-        "跨层检索：behavior 人设/关系/笔记/日记（日常先用）、deep 常言/树状日记/引导、array 会话索引、user 档案、memo 便签、all。多词取交集，全不中退回部分命中；结果 #hash 用 memory_locate 取原文。只给 layer=memo/user 时直接列出该层。",
+        "跨层检索：behavior 人设/关系/笔记/日记（日常先用）、deep 常言/树状日记/引导、array 会话索引、user 档案、memo 便签、records 记录册（主词/副词/状态）、all。多词取交集，全不中退回部分命中；结果 #hash 用 memory_locate 取原文。只给 layer=memo/user 时直接列出该层。",
       parameters: {
         type: "object",
         properties: {
