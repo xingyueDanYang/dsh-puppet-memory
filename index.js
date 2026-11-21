@@ -8213,8 +8213,6 @@ function apply(ctx) {
   const seenEventTypes = new Set();
   // v0.15.1：每个会话只打一次「压缩引擎挂没挂上」的自检，省得非得靠人敲 /compact 才知道
   const compactionProbeDone = new Set();
-  // v0.22：核心卡上次注入的指纹（内容没变就不重复往上下文里塞同一条）
-  const lastCoreInjected = new Map();
   // v1.4（2026-11-17）四张卡各有自己的节奏：turn 计数、上次检查的轮次
   const cardPlan = new Map(); // sessionId -> { turn, core, rules, state, self }
   // 卡内容指纹（2026-11-21）：用来判断「卡被改过」→ 立即强注入一次。
@@ -8225,8 +8223,6 @@ function apply(ctx) {
   const supLayerPlan = new Map(); // sessionId -> { turn, check }：补充层每 8 轮查一次
   const recentRelInjected = new Map(); // sessionId -> Map(hash -> turn)：5 轮内别重复注入同一条关系
   const recentNoteInjected = new Map(); // 同上，针对笔记（取词器已按标签命中过的不再当"最近笔记"重来）
-  const lastRulesInjected = new Map();
-  const lastCoreStateInjected = new Map();
   // v0.33（B-47）：一句话复位的一次性临时约束，按会话存、注入一次即删，不落任何文件
   const sessionResetNotes = new Map();
   // v0.23：三线状态上次注入的指纹（取向没变就不重复）
@@ -8252,9 +8248,6 @@ function apply(ctx) {
     // v0.22：压缩会把之前的注入消息一起压掉，清掉指纹让核心记忆/摘要重新补进来
     lastInjected.delete(sessionId);
     injectedOnce.delete(sessionId);
-    lastCoreInjected.delete(sessionId);
-    lastRulesInjected.delete(sessionId);
-    lastCoreStateInjected.delete(sessionId);
     lastStateInjected.delete(sessionId);
     // 压缩后位置在上下文开头、注意力最足——下一次做一次强补充，之后回到弱补充
     pendingStrong.set(sessionId, true);
@@ -8520,11 +8513,6 @@ function apply(ctx) {
             return "";
           }
         })();
-        const weakHintOf = (label, raw, target) => {
-          const chars = String(raw || "").replace(/\s+/g, "").length;
-          if (!chars) return "";
-          return `（${label} ${chars} 字，这轮只给提示；要用细节就 memory_core action=get target=${target}。）`;
-        };
         const fullOf = (raw, budget) => {
           const t = String(raw || "");
           return t.length > budget ? t.slice(0, budget).trimEnd() : t;
@@ -8620,15 +8608,10 @@ function apply(ctx) {
         const modeState = decide("state", core.rawState);
         cardPlan.set(sessionId, plan);
         diag(`卡片节奏 turn=${plan.turn} core=${modeCore} rules=${modeRules} state=${modeState}${justCompressed ? "（压缩后强补充）" : ""}`);
-        const rulesForInject = filterBoundRules(!coreAllowed ? "" : modeRules === "strong"
-          ? fullOf(core.rawRules, core.rulesBudget)
-          : modeRules === "weak" ? weakHintOf("规则卡", core.rawRules, "rules") : "", activeBinder());
-        const coreText = !coreAllowed ? "" : modeCore === "strong"
-          ? fullOf(core.rawCore, core.budget)
-          : modeCore === "weak" ? weakHintOf("核心卡", core.rawCore, "core") : "";
-        const coreStateForInject = !coreAllowed ? "" : modeState === "strong"
-          ? fullOf(core.rawState, core.stateBudget)
-          : modeState === "weak" ? weakHintOf("状态卡", core.rawState, "state") : "";
+        // 2026-11-21：decide() 只返回 strong / skip（弱提示已取消），不再有 weak 分支
+        const rulesForInject = filterBoundRules(!coreAllowed || modeRules !== "strong" ? "" : fullOf(core.rawRules, core.rulesBudget), activeBinder());
+        const coreText = !coreAllowed || modeCore !== "strong" ? "" : fullOf(core.rawCore, core.budget);
+        const coreStateForInject = !coreAllowed || modeState !== "strong" ? "" : fullOf(core.rawState, core.stateBudget);
         // B-47：复位时若带了一句临时约束，这一步跟着三张卡一起注入，之后删除（只生效一次）
         const resetNote = sessionResetNotes.get(sessionId) || "";
         // v0.23 三线状态：先吃这条用户发言的信号（衰减/锚点/工作日志都在里面），再决定取向
@@ -9063,9 +9046,6 @@ function apply(ctx) {
         }
         lastInjected.set(sessionId, digest);
         if (userKey) lastUserInjected.set(sessionId, userKey);
-        if (rulesForInject) lastRulesInjected.set(sessionId, sha1(rulesForInject));
-        if (coreText) lastCoreInjected.set(sessionId, sha1(coreText));
-        if (coreStateForInject) lastCoreStateInjected.set(sessionId, sha1(coreStateForInject));
         if (stateForInject) lastStateInjected.set(sessionId, stateDigest);
         if (injectMode === "first-step") injectedOnce.add(sessionId);
         // B-47：复位带的临时约束注入一次就删——不能每轮念，也不许写进任何文件
@@ -9362,9 +9342,6 @@ ${selfText}
           // v0.22：压缩后下一轮把核心记忆重新注入（否则核心卡会随被压掉的消息一起消失）
           lastInjected.delete(sid);
           injectedOnce.delete(sid);
-          lastCoreInjected.delete(sid);
-          lastRulesInjected.delete(sid);
-          lastCoreStateInjected.delete(sid);
           lastStateInjected.delete(sid);
           // 2026-11-21：注入相位归零（下一轮 = 首轮全量）；人设分 −随机(1–10)
           try {
@@ -9412,9 +9389,6 @@ ${selfText}
     }
     lastInjected.delete(sessionId);
     injectedOnce.delete(sessionId);
-    lastCoreInjected.delete(sessionId);
-    lastRulesInjected.delete(sessionId);
-    lastCoreStateInjected.delete(sessionId);
     lastStateInjected.delete(sessionId);
     seenEvents.delete(sessionId);
     lastSizes.delete(sessionId);
@@ -10097,9 +10071,6 @@ ${selfText}
           if (action === "reset") {
             const sid = String(exec?.agent?.session?.header?.id || "");
             if (!sid) return "复位需要在会话里调用（拿不到会话 id，本轮不生效）。";
-            lastCoreInjected.delete(sid);
-            lastRulesInjected.delete(sid);
-            lastCoreStateInjected.delete(sid);
             lastStateInjected.delete(sid);
             lastInjected.delete(sid);
             // 2026-11-21：注入决策现在看「相位 + 卡内容指纹」，这两样不清掉的话，复位后下一轮 decide() 全是 skip，
