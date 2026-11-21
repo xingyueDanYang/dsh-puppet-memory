@@ -7111,9 +7111,32 @@ function rawRecordRows() {
   return readJsonl(PATHS.records).filter((r) => r && r.sub && r.attr && r.state);
 }
 
+// 单条标废（黑名单）：与主词停用互补——主词是整组退出，标废是这一条退出。
+// 标废不删行，retrieval 过滤掉，将来能 unvoid 回来。
 function recordRows() {
   const map = subjectMap();
-  return rawRecordRows().filter((r) => isSubEnabled(r.sub, map));
+  return rawRecordRows().filter((r) => !r.voided && isSubEnabled(r.sub, map));
+}
+
+function voidRecord(target, reason = "") {
+  const want = String(target || "").trim();
+  if (!want) return "要标废哪条？给 hash（前 8 位）或「主词｜副词」。";
+  const parts = want.split(/[|｜]/).map((x) => x.trim()).filter(Boolean);
+  const rows = rawRecordRows();
+  let hit = null;
+  const next = rows.map((r) => {
+    if (hit) return r;
+    const byHash = r.hash && String(r.hash).startsWith(want);
+    const byKey = parts.length === 2 && recordKey(r.sub, r.attr) === recordKey(parts[0], parts[1]);
+    if (byHash || byKey) {
+      hit = r;
+      return { ...r, voided: true, voidReason: clip(String(reason || "未说明"), 120), voidAt: nowISO() };
+    }
+    return r;
+  });
+  if (!hit) return `记录册里没有「${want}」。`;
+  writeJsonl(PATHS.records, next);
+  return `已标废：${hit.sub} ｜ ${hit.attr}（不再参与检索；要恢复用 unvoid）`;
 }
 
 function recordKey(sub, attr) {
@@ -7166,7 +7189,7 @@ function addRecord(line, opts = {}) {
 // searchRecords：主词/副词/状态任一命中即算；主词权重最高（问「我爸」要能带出「父亲」）
 function searchRecords(query, limit = 8) {
   const map = subjectMap();
-  const rows = rawRecordRows().filter((r) => isSubEnabled(r.sub, map));
+  const rows = rawRecordRows().filter((r) => !r.voided && isSubEnabled(r.sub, map));
   if (!rows.length) return [];
   const max = Math.max(1, Math.min(50, Number(limit) || 8));
   const q = String(query || "").trim();
@@ -7253,6 +7276,25 @@ function searchRecordsGrouped(query, { hitLimit = 3, groupLimit = 8, charBudget 
   return kept;
 }
 
+function unvoidRecord(target) {
+  const want = String(target || "").trim();
+  if (!want) return "要恢复哪条？给 hash（前 8 位）或「主词｜副词」。";
+  const parts = want.split(/[|｜]/).map((x) => x.trim()).filter(Boolean);
+  let hit = null;
+  const next = rawRecordRows().map((r) => {
+    if (hit) return r;
+    const byHash = r.hash && String(r.hash).startsWith(want);
+    const byKey = parts.length === 2 && recordKey(r.sub, r.attr) === recordKey(parts[0], parts[1]);
+    if (!byHash && !byKey) return r;
+    hit = r;
+    const { voided, voidReason, voidAt, ...rest } = r;
+    return rest;
+  });
+  if (!hit) return `记录册里没有「${want}」。`;
+  writeJsonl(PATHS.records, next);
+  return `已恢复：${hit.sub} ｜ ${hit.attr}（重新参与检索）`;
+}
+
 function removeRecord(target) {
   const want = String(target || "").trim();
   if (!want) return "要给 hash（前 8 位即可）或「主词｜副词」。";
@@ -7301,6 +7343,12 @@ function writeRecordsOf(args) {
   const list = Array.isArray(raw) ? raw : [raw];
   const out = [];
   for (const item of list) {
+    // 标记标废：{sub, attr, void: true} → 该条退出检索（黑名单，可恢复）
+    if (item && typeof item === "object" && item.sub && item.attr && item.void === true) {
+      const r = voidRecord(`${item.sub}｜${item.attr}`, item.reason || item.voidReason || item.note);
+      if (r) out.push(r);
+      continue;
+    }
     // 只有主词、没有副词/状态 → 这是一次「主词登记/启停」，不是一条记录
     if (item && typeof item === "object" && item.sub && !item.attr && !item.state) {
       const r = addSubject(item.sub, { aliases: item.aliases, enabled: item.enabled, cls: item.cls });
@@ -9907,6 +9955,7 @@ ${selfText}
                 aliases: { type: "array", items: { type: "string" }, description: "主词的其他说法，如 我爸/爸爸" },
                 cls: { type: "string", description: "类别：食物/身体/习惯/出行/时间/物品/关系/情绪/钱/工作。取的时候按类别联想——「芹菜」是食物，问「准备吃的」才带得出来" },
                 enabled: { type: "boolean", description: "只给 sub、不给 attr/state 时：这是主词启停。false=该主词下所有记录退出检索（不必逐条标废），true=恢复" },
+                void: { type: "boolean", description: "给 sub+attr 且 void=true：把这一条标废（黑名单），不再参与检索，数据保留，可恢复" },
                 note: { type: "string", description: "备注，不参与检索主键" },
               },
             },
@@ -11566,7 +11615,7 @@ const plugin = {
   apply,
 };
 
-export { copyWorkDir, measureDir, humanBytes, apply, loadState, saveState, STATE_PATH, filterMsgsBySeq, searchEngineOf, searchIndexStatus, closeSearchIndex, buildInjectionText, buildStateInjection, buildHandoffInjection, buildRecallInjection, buildDueInjection, buildOpeningInjection, ensureOpeningLunarRows, addOpeningRow, removeOpeningRow, readOpeningRows, pruneOpeningRows, formatNowLine, ageLabelOf, modelRouteOf, sessionMemory, createSessionMemory, sessionMemoryPaths, normalizeSessionId, isSpecialKey, doctorReport, renderDoctor, resolveBackupDir, probeWritable, coreInjection, coreOptions, createLines, lexicalScore, linesConfigDefaults, linesPaths, qualitativeOf, topicTokens, behaviorHint, createSocial, detectScene, normalizeName, personIdOf, registerSocialTools, sceneLabel, socialConfigDefaults, socialPaths, searchSocialContext, backupPolicySummary, compactionStats, compactionStatusLine, noteCompaction, noteAutoSummary, compressCallsIn, nativeCompactionsIn, compressToolCallsIn, compressionKindOf, readCompactionLog, appendCompactionRecord, ingestCompactionEvent, compactionRecords, compactionSelfCheck, dutyBoardData, sendHandoff, pullHandoff, listHandoffs, compactionSuiteDetected, listAutoSummaries, deleteAutoSummary, setFactCaller, factOptions, readFactCandidates, writeFactCandidates, pendingFactCandidates, factCandidateStats, factStatusLine, parseFactCandidates, buildFactPrompt, factInventory, isDuplicateFact, extractFactCandidates, acceptFactCandidate, rejectFactCandidate, updateBackupPolicy, updateAutoSummaryPolicy, featuresView, setFeature, memoryOverview, openingUpdate, openingDelete, nowView, updateNowMode, cuepromptView, updateCuePrompt, autoSummaryConfigView, registerBackupApi, hostIsLoopback, readRequestBody, searchMemory, searchMemoryKeyword, searchTokensOf, ensureSearchIndex, bm25ScoreOf, searchTargets, writeMemory, voidMemory, exportArchive, readQqWatchSettings, writeQqWatchSettings, qqWatchView, briefOf, aliasesOf, mergeAliases, writeGuardOf, writeGuardCheck, similarityOf, backupNow, pruneOldSnapshots, shouldSkipBackup, backupStampOf, writeTurnDiary, isCompressionEvent, renameAssetImage, listAssetImages, assetDetail, arrayIndexFiles, arrayIndexFileForMonth, migrateArrayIndexIfNeeded, AUDIO_SOURCE, AUDIO_KIND, AUDIO_USE, audioClassTag, buildStats, tagsOf, validateTags, checkedTags, TAG_VOCAB, clearMemos, tagCard, isVocabTag, normalizeTag, CUSTOM_TAG_MAX, CUSTOM_TAG_LEN, RARE_TAG_MAX_COUNT, recallSession, decodeSessionFile, findSessionFile, archiveSessions, scanSessionOriginals, sessionHeaderOf, findArchivedSession, rawArchiveRows, rawSessionFileName, cwdOfSlug, sha256OfFile, roundsOfSessionFile, relationInjectionLines, archiveRelationOverflow, locateMemory, jsonlHasHash, rebuildGuide, guideStats, guideLinks, guideNodes, addSource, listSources, findSources, sourceStats, loadSources, sourceTag, entryProvenance, sourceIndex, runAutoSummary, pendingTurns, autoSummaryOptions, buildAutoSummaryEntry, buildSummaryPrompt, summaryStyleLine, parseSummaryText, summaryInputOf, callWithThinkingRetry, setAutoSummaryCaller, defaultConfig, loadConfig, AUTO_SUMMARY_PREFIX, createRules, parseRulesMarkdown, formatRuleRow, rulesForSearch, parseTimeBound, handleRecord, searchRecords, searchRecordsGrouped, addSubject, subjectRows, addRecord, removeRecord, recordRows };
+export { copyWorkDir, measureDir, humanBytes, apply, loadState, saveState, STATE_PATH, filterMsgsBySeq, searchEngineOf, searchIndexStatus, closeSearchIndex, buildInjectionText, buildStateInjection, buildHandoffInjection, buildRecallInjection, buildDueInjection, buildOpeningInjection, ensureOpeningLunarRows, addOpeningRow, removeOpeningRow, readOpeningRows, pruneOpeningRows, formatNowLine, ageLabelOf, modelRouteOf, sessionMemory, createSessionMemory, sessionMemoryPaths, normalizeSessionId, isSpecialKey, doctorReport, renderDoctor, resolveBackupDir, probeWritable, coreInjection, coreOptions, createLines, lexicalScore, linesConfigDefaults, linesPaths, qualitativeOf, topicTokens, behaviorHint, createSocial, detectScene, normalizeName, personIdOf, registerSocialTools, sceneLabel, socialConfigDefaults, socialPaths, searchSocialContext, backupPolicySummary, compactionStats, compactionStatusLine, noteCompaction, noteAutoSummary, compressCallsIn, nativeCompactionsIn, compressToolCallsIn, compressionKindOf, readCompactionLog, appendCompactionRecord, ingestCompactionEvent, compactionRecords, compactionSelfCheck, dutyBoardData, sendHandoff, pullHandoff, listHandoffs, compactionSuiteDetected, listAutoSummaries, deleteAutoSummary, setFactCaller, factOptions, readFactCandidates, writeFactCandidates, pendingFactCandidates, factCandidateStats, factStatusLine, parseFactCandidates, buildFactPrompt, factInventory, isDuplicateFact, extractFactCandidates, acceptFactCandidate, rejectFactCandidate, updateBackupPolicy, updateAutoSummaryPolicy, featuresView, setFeature, memoryOverview, openingUpdate, openingDelete, nowView, updateNowMode, cuepromptView, updateCuePrompt, autoSummaryConfigView, registerBackupApi, hostIsLoopback, readRequestBody, searchMemory, searchMemoryKeyword, searchTokensOf, ensureSearchIndex, bm25ScoreOf, searchTargets, writeMemory, voidMemory, exportArchive, readQqWatchSettings, writeQqWatchSettings, qqWatchView, briefOf, aliasesOf, mergeAliases, writeGuardOf, writeGuardCheck, similarityOf, backupNow, pruneOldSnapshots, shouldSkipBackup, backupStampOf, writeTurnDiary, isCompressionEvent, renameAssetImage, listAssetImages, assetDetail, arrayIndexFiles, arrayIndexFileForMonth, migrateArrayIndexIfNeeded, AUDIO_SOURCE, AUDIO_KIND, AUDIO_USE, audioClassTag, buildStats, tagsOf, validateTags, checkedTags, TAG_VOCAB, clearMemos, tagCard, isVocabTag, normalizeTag, CUSTOM_TAG_MAX, CUSTOM_TAG_LEN, RARE_TAG_MAX_COUNT, recallSession, decodeSessionFile, findSessionFile, archiveSessions, scanSessionOriginals, sessionHeaderOf, findArchivedSession, rawArchiveRows, rawSessionFileName, cwdOfSlug, sha256OfFile, roundsOfSessionFile, relationInjectionLines, archiveRelationOverflow, locateMemory, jsonlHasHash, rebuildGuide, guideStats, guideLinks, guideNodes, addSource, listSources, findSources, sourceStats, loadSources, sourceTag, entryProvenance, sourceIndex, runAutoSummary, pendingTurns, autoSummaryOptions, buildAutoSummaryEntry, buildSummaryPrompt, summaryStyleLine, parseSummaryText, summaryInputOf, callWithThinkingRetry, setAutoSummaryCaller, defaultConfig, loadConfig, AUTO_SUMMARY_PREFIX, createRules, parseRulesMarkdown, formatRuleRow, rulesForSearch, parseTimeBound, handleRecord, searchRecords, searchRecordsGrouped, addSubject, subjectRows, voidRecord, unvoidRecord, addRecord, removeRecord, recordRows };
 export default plugin;
 
 
