@@ -2350,9 +2350,16 @@ export function dedupeBlocks(sessionId, blocks) {
 // 2026-11-21 丹阳：注入块越堆越多（占上下文七成）——每次注入前先把**上一轮注入的**
 // <puppet_*> 消息从历史里摘掉，只留最新一份。判据严格：整条消息以 <puppet_ 开头才算
 // 注入块；真正的用户发言（哪怕里面提到 puppet_）不会被误删。
+function textOfMessage(msg) {
+  if (!msg) return "";
+  if (typeof msg.content === "string") return msg.content;
+  if (typeof msg.text === "string") return msg.text;
+  const parts = Array.isArray(msg.content) ? msg.content : [];
+  return parts.filter((p) => p && typeof p.text === "string").map((p) => String(p.text)).join("\n");
+}
+
 function isStaleInjection(msg) {
-  const parts = Array.isArray(msg && msg.content) ? msg.content : [];
-  const texts = parts.filter((p) => p && (p.type === "text" || typeof p.text === "string")).map((p) => String(p.text || ""));
+  const texts = [textOfMessage(msg)];
   if (!texts.length) return false;
   const joined = texts.join("\n").trim();
   if (!joined.startsWith("<puppet_")) return false;
@@ -2367,7 +2374,9 @@ function stripStaleInjections(messages) {
     if (isStaleInjection(m)) { dropped += 1; continue; }
     kept.push(m);
   }
-  if (dropped) diag(`注入去重：摘掉历史里 ${dropped} 个旧注入块`);
+  // 每次注入都留一行扫描回执：历史多少条、有几条是注入块、摘了几条。
+  // 没有这行就分不清「没摘」和「摘了 0 条」——排错时最费时间的就是这种。
+  diag(`注入去重扫描：历史 ${messages.length} 条，其中注入块 ${dropped} 条${dropped ? "（已摘掉）" : ""}`);
   return kept;
 }
 
