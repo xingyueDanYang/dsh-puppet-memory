@@ -9991,11 +9991,16 @@ ${selfText}
           const limit = Math.max(1, Math.min(100, Number(args?.limit) || 20));
           const needle = String(args?.keyword || "").trim();
           const hashNeedle = String(args?.hash || "").trim();
+          // 2026-11-21 修：原来 hash 那段把「refs 命中」和「row.hash 命中」用 && 连起来，
+          // 结果只要 row 没有 hash 字段就一律放行——给一个库里不存在的 hash，promote 会把整库当命中全量恢复。
           const match = (row) => {
             const topic = String(row.topic || "");
-            if (needle && !topic.includes(needle) && !(row.refs || []).some((h) => String(h).includes(needle))) return false;
-            if (hashNeedle && !(row.refs || []).some((h) => String(h).startsWith(hashNeedle)) && String(row.hash || "").startsWith(hashNeedle)) return false;
-            return Boolean(needle || hashNeedle) || true;
+            const refs = Array.isArray(row.refs) ? row.refs : [];
+            const ids = [row.id, row.hash].map((x) => String(x || "")).filter(Boolean);
+            if (!needle && !hashNeedle) return true; // list 用：不筛就是全要
+            if (needle && !topic.includes(needle) && !refs.some((h) => String(h).includes(needle))) return false;
+            if (hashNeedle && !refs.some((h) => String(h).startsWith(hashNeedle)) && !ids.some((x) => x.startsWith(hashNeedle))) return false;
+            return true;
           };
           if (action === "stats") {
             const st = cp.stats();
@@ -10050,10 +10055,16 @@ ${selfText}
             if (!needle && !hashNeedle) return `action=${action} 需要 keyword 或 hash。`;
             const rows = readJsonl(cp.paths.important);
             const hits = rows.filter((r) => match(r));
-            if (!hits.length) return "重要库里没找到匹配的那条。";
-            for (const r of hits) r.state = action === "promote" ? "active" : "demoted";
+            if (!hits.length) return `重要库里没找到匹配的那条（${hashNeedle ? `hash=${hashNeedle}` : `keyword=${needle}`}）——重要库是取词时自动攒的，不是手动加；要给某条挂钩子请用 memory_write 的 aliases。`;
+            const want = action === "promote" ? "active" : "demoted";
+            let changed = 0;
+            for (const r of hits) {
+              if (String(r.state || "active") !== want) changed += 1;
+              r.state = want;
+            }
             writeJsonl(cp.paths.important, rows);
-            return `${action === "promote" ? "已恢复" : "已降级"} ${hits.length} 条：${hits.map((r) => r.topic || r.id).join("、")}`;
+            const names = hits.map((r) => r.topic || r.id || "(无主题)").join("、");
+            return `${action === "promote" ? "已恢复" : "已降级"} ${hits.length} 条（状态实际变化 ${changed} 条）：${names}`;
           }
           const rows = cp.importantAll().filter((r) => match(r)).slice(-limit).reverse();
           if (!rows.length) return "重要库还是空的（还没被确认过的回忆）。";
