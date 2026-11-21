@@ -7026,6 +7026,30 @@ function mergeIntoEntry(old, incoming, ts, tags) {
 // ---------------------------------------------------------------------------
 const RECORD_STATE_MAX = 60;
 
+// 记录册类别（2026-11-21 丹阳提的「芹菜是食物」）：主词说明是谁，类别说明这条是关于什么的。
+// 问「准备吃的」时靠「吃 → 食物」把『父亲｜芹菜』带出来——纯字面匹配救不了它。
+const RECORD_CLASSES = ["食物", "身体", "习惯", "出行", "时间", "物品", "关系", "情绪", "钱", "工作"];
+const RECORD_CLASS_HINTS = {
+  食物: ["吃", "喝", "饭", "菜", "口味", "忌口", "零食", "餐", "辣", "甜", "咸", "饿", "食物"],
+  身体: ["腰", "坐", "站", "走", "累", "疼", "酸", "睡", "觉", "身体", "病", "药", "医", "体检"],
+  习惯: ["听", "看", "玩", "习惯", "平时", "每天", "总爱", "老是", "评书", "外放", "喜欢"],
+  出行: ["出门", "路上", "坐车", "飞机", "火车", "远门", "行李", "出发", "旅行", "带"],
+  时间: ["几点", "时候", "日期", "生日", "提醒", "那天", "多久", "明天", "下周"],
+  物品: ["买", "东西", "准备", "送", "礼物", "用品"],
+  关系: ["朋友", "同事", "家里", "妈", "姐", "孩子"],
+  情绪: ["烦", "气", "高兴", "难受", "压力", "担心"],
+  钱: ["钱", "贵", "便宜", "花", "工资", "借"],
+  工作: ["上班", "班", "加班", "请假", "排班"],
+};
+function classesOfText(text) {
+  const s = String(text || "");
+  const out = [];
+  for (const c of RECORD_CLASSES) {
+    if ((RECORD_CLASS_HINTS[c] || []).some((h) => s.includes(h))) out.push(c);
+  }
+  return out;
+}
+
 function recordRows() {
   return readJsonl(PATHS.records).filter((r) => r && r.sub && r.attr && r.state);
 }
@@ -7036,7 +7060,8 @@ function recordKey(sub, attr) {
 
 function formatRecordRow(r) {
   const star = r.conflict ? "（两种说法未确认）" : "";
-  return `${r.sub} ｜ ${r.attr} ｜ ${r.state}${star}${r.note ? `（${r.note}）` : ""}  #${String(r.hash || "").slice(0, 8)}`;
+  const cls = r.cls ? `〔${r.cls}〕` : "";
+  return `${r.sub} ｜ ${r.attr} ｜ ${r.state}${star}${r.note ? `（${r.note}）` : ""}${cls}  #${String(r.hash || "").slice(0, 8)}`;
 }
 
 // addRecord：一行「主词｜副词｜状态」；同 (主词,副词) 改值 → 不覆盖，返回冲突回执
@@ -7059,9 +7084,11 @@ function addRecord(line, opts = {}) {
     return `记录册冲突（未覆盖）：${sub}｜${attr} 已有「${current.state}」，新值「${state}」。两条都在，先跟用户确认再改。旧值 #${String(current.hash || "").slice(0, 8)}`;
   }
   if (current) return `记录册无变化：${formatRecordRow(current)}`;
+  const cls = clip(String((opts && opts.cls) || "").trim(), 8);
   const row = {
     kind: "record",
     ts: nowISO(),
+    ...(cls ? { cls } : {}),
     sub: clip(sub, 40),
     attr: clip(attr, 40),
     state: clip(state, RECORD_STATE_MAX),
@@ -7117,6 +7144,7 @@ function searchRecordsGrouped(query, { hitLimit = 3, groupLimit = 8, charBudget 
   });
   const hits = searchRecords(q, hitLimit);
   const subs = new Set(hits.filter(hitSub).map((r) => subOf(r)));
+  const qCls = classesOfText(q);
   const out = [];
   const seen = new Set();
   const push = (r) => {
@@ -7127,9 +7155,10 @@ function searchRecordsGrouped(query, { hitLimit = 3, groupLimit = 8, charBudget 
     return true;
   };
   for (const r of hits) push(r);
-  // 命中的主词：整组补齐（组内顺序按写入先后，后来的在前）
-  for (const r of [...rows].reverse()) {
-    if (!subs.has(subOf(r))) continue;
+  // 命中的主词：整组补齐。类别对得上的排前面（问「准备吃的」，食物类先出）
+  const group = [...rows].reverse().filter((r) => subs.has(subOf(r)));
+  group.sort((x, y) => (qCls.includes(x.cls) ? 0 : 1) - (qCls.includes(y.cls) ? 0 : 1));
+  for (const r of group) {
     if (out.length >= groupLimit + hitLimit) break;
     push(r);
   }
@@ -7197,7 +7226,7 @@ function writeRecordsOf(args) {
       : [item && item.sub, item && item.attr, item && item.state].filter(Boolean).join("｜");
     if (!line) continue;
     const obj = item && typeof item === "object" ? item : {};
-    const r = addRecord(line, { note: obj.note || args.recordNote, aliases: obj.aliases || args.recordAliases });
+    const r = addRecord(line, { note: obj.note || args.recordNote, aliases: obj.aliases || args.recordAliases, cls: obj.cls || obj.class || args.recordClass });
     if (r) out.push(r);
   }
   return out.length ? `记录册：${out.join("；")}` : "";
@@ -9790,6 +9819,7 @@ ${selfText}
                 attr: { type: "string", description: "副词（哪件事/哪个属性），如 芹菜" },
                 state: { type: "string", description: "状态（自由文本），如 不喜欢" },
                 aliases: { type: "array", items: { type: "string" }, description: "主词的其他说法，如 我爸/爸爸" },
+                cls: { type: "string", description: "类别：食物/身体/习惯/出行/时间/物品/关系/情绪/钱/工作。取的时候按类别联想——「芹菜」是食物，问「准备吃的」才带得出来" },
                 note: { type: "string", description: "备注，不参与检索主键" },
               },
             },
