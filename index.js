@@ -7041,6 +7041,14 @@ const RECORD_CLASS_HINTS = {
   钱: ["钱", "贵", "便宜", "花", "工资", "借"],
   工作: ["上班", "班", "加班", "请假", "排班"],
 };
+// 虚词归一：中文没有空格，"重启了但没生效" 和记录里的 "重启没生效" 差的是几个虚字，
+// 不是意思。比对前两边都剥掉虚词，能救一大批"意思对、字面差一个字"的落空。
+// 注意只剥虚词，不剥实词（不剥名词/动词），所以不会把 "吃" "坐" 这类信息抹掉。
+const RECORD_FUNC_CHARS = /[了的但就是也都还又很把被给让在吗呢啊吧哦么呀嘛]/g;
+function recNorm(s) {
+  return String(s || "").replace(RECORD_FUNC_CHARS, "");
+}
+
 function classesOfText(text) {
   const s = String(text || "");
   const out = [];
@@ -7066,7 +7074,8 @@ function formatRecordRow(r) {
 
 // addRecord：一行「主词｜副词｜状态」；同 (主词,副词) 改值 → 不覆盖，返回冲突回执
 function addRecord(line, opts = {}) {
-  const parts = String(line || "").split(/[|｜/／]+/).map((x) => x.trim()).filter(Boolean);
+  // 只认 ｜ 和 | 当分隔符：状态是自由文本，"测星步骤/会议议程/…" 这种斜杠不能当栏位切
+  const parts = String(line || "").split(/[|｜]+/).map((x) => x.trim()).filter(Boolean);
   if (parts.length < 3) {
     return `记录册要三栏：主词｜副词｜状态（如 父亲｜芹菜｜不喜欢）。收到：「${String(line || "")}」`;
   }
@@ -7113,10 +7122,18 @@ function searchRecords(query, limit = 8) {
       let score = 0;
       for (const t of tokens) {
         if (!t) continue;
-        const aliasHit = (r.aliases || []).some((a) => String(a).includes(t) || t.includes(String(a)));
-        if (String(r.sub).includes(t) || t.includes(String(r.sub)) || aliasHit) score += 3;
-        if (String(r.attr).includes(t) || t.includes(String(r.attr))) score += 2;
-        if (String(r.state).includes(t)) score += 1;
+        const nt = recNorm(t);
+        const hit = (field) => {
+          const f = String(field || "");
+          if (!f) return false;
+          if (f.includes(t) || t.includes(f)) return true;
+          const nf = recNorm(f);
+          return !!nt && !!nf && (nf.includes(nt) || nt.includes(nf));
+        };
+        const aliasHit = (r.aliases || []).some((a) => hit(a));
+        if (hit(r.sub) || aliasHit) score += 3;
+        if (hit(r.attr)) score += 2;
+        if (hit(r.state)) score += 1;
       }
       return { r, score };
     })
@@ -7138,9 +7155,16 @@ function searchRecordsGrouped(query, { hitLimit = 3, groupLimit = 8, charBudget 
   const subOf = (r) => String(r.sub || "").trim();
   const hitSub = (r) => tokens.some((t) => {
     if (!t) return false;
-    const sub = subOf(r);
-    if (sub && (sub.includes(t) || t.includes(sub))) return true;
-    return (r.aliases || []).some((a) => String(a).includes(t) || t.includes(String(a)));
+    const nt = recNorm(t);
+    const hit = (field) => {
+      const f = String(field || "");
+      if (!f) return false;
+      if (f.includes(t) || t.includes(f)) return true;
+      const nf = recNorm(f);
+      return !!nt && !!nf && (nf.includes(nt) || nt.includes(nf));
+    };
+    if (hit(subOf(r))) return true;
+    return (r.aliases || []).some((a) => hit(a));
   });
   const hits = searchRecords(q, hitLimit);
   const subs = new Set(hits.filter(hitSub).map((r) => subOf(r)));
