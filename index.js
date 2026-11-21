@@ -6387,7 +6387,7 @@ function doctorReport(options = {}) {
   }
   try {
     const linesCfg = cfg.lines || {};
-    add("ok", "三线状态", linesCfg.enabled === false ? "关闭" : "开启");
+    add("ok", "三线状态", linesCfg.enabled === false ? "关闭" : linesCfg.inject === true ? "开启（注入）" : "开启（不注入）");
   } catch {
     /* 忽略 */
   }
@@ -9083,7 +9083,10 @@ function apply(ctx) {
         try {
           lineSignal = linesEngine.updateFromMessages(decision.messages, { sessionId });
           linesView = linesEngine.view(undefined, { sessionId });
-          if (cfg.lines?.enabled !== false) stateText = buildStateInjection(linesView, lineSignal?.result || null);
+          // 2026-11-21 丹阳定：三线状态**不再注入**。它是从别的 agent 记忆产品搬来的设计，
+        // 跟状态卡说的是一件事（当前取向），属于重复内容。数据照常算，要看用 memory_state。
+        // 想要回注入：把配置 lines.inject 设成 true（默认关）。
+        if (cfg.lines?.enabled !== false && cfg.lines?.inject === true) stateText = buildStateInjection(linesView, lineSignal?.result || null);
         } catch (err) {
           diag(`三线状态更新失败：${err?.message || err}`);
         }
