@@ -65,14 +65,15 @@ export function personaHintLine(hint, turn, opts) {
     // 强注入 = 状态刷新：给完整人设卡 + 扣分后的新起点。
     // 带 coreText 就重载全文（深度印象），不带就退化成一句指路。
     const card = String((opts && opts.coreText) || "").trim();
-    const head = "【人设卡重载】上下文里的人设部分不完整（压缩或截断）。下面是完整的卡，按它说话：";
-    const tail = "完整度记为 " + h.score.value + "/" + h.score.max + "，这是重载后的新起点。";
-    return card ? head + String.fromCharCode(10) + card + String.fromCharCode(10) + tail : head.replace("下面是完整的卡，按它说话：", "") + "先读一次 memory_core action=get target=core。" + tail;
+    // 2026-11-21 丹阳定：删掉「完整度 X/100」和「先读一次 memory_core」这类自造指标的提醒。
+    // 那个分数只是「注入字数 ÷ 应写字数」，不是质量，也不影响说话；留着纯占字数、还引一次工具调用。
+    // 现在只剩一个动作：人设丢了就把全文补上，别的一概不说。
+    const head = "【人设卡重载】上下文里的人设不完整（压缩或截断），下面是完整的人设，按它说话：";
+    return card ? head + String.fromCharCode(10) + card : "";
   }
-  const lines = []; // 不再有分数：完整就给一句在场确认，不完整就重载全文
-  if (h.mode === "roleplay" && h.encourage) lines.push(h.encourage);
-  lines.push("人设完整度 " + h.score.value + "/" + h.score.max + "（每 " + n + " 轮体检一次；这只反映人设卡在上下文里是否完整，跟演得好不好无关）");
-  return lines.join(String.fromCharCode(10));
+  // 2026-11-21：平时不再注入任何「完整度」提示——完整就不用说，不完整走上面的重载。
+  if (h.mode === "roleplay" && h.encourage) return h.encourage;
+  return "";
 }
 
 // 压缩后：分数减一个随机数（1–10），计数由调用方清零

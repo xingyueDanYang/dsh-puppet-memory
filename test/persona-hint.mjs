@@ -16,13 +16,14 @@ t("everyN 夹在 5–100", () => {
 });
 
 console.log("注入节奏");
-t("score 模式只在倍数轮注入", () => {
-  assert.equal(personaHintLine({ mode: "score", everyN: 25 }, 25).includes("人设完整度"), true);
+t("2026-11-21：完整时一个字都不注入（不再报完整度）", () => {
+  assert.equal(personaHintLine({ mode: "score", everyN: 25 }, 25), "");
   assert.equal(personaHintLine({ mode: "score", everyN: 25 }, 24), "");
 });
-t("注入行里不含完整台词（防被抄）", () => {
-  const line = personaHintLine({ mode: "score", everyN: 25 }, 25);
-  assert.equal(/[。！？]$/.test(line.trim()), false);
+t("破损重载不带自造分数", () => {
+  const line = personaHintLine({ mode: "score", everyN: 25 }, 25, { integrity: "broken", coreText: "我是雪风" });
+  assert.equal(line.includes("完整度"), false);
+  assert.equal(line.includes("我是雪风"), true);
 });
 t("roleplay 才带 encourage，且只在倍数轮", () => {
   const h = { mode: "roleplay", everyN: 10, encourage: "唔，别撑着。" };
