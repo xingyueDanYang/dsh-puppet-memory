@@ -75,7 +75,7 @@ export function createLorebook({ dir } = {}) {
   // 同一事件只有一个条目（name 就是事件名），状态变了用 update 改 state，不新开一条。
   // locked（2026-11-21 丹阳定）：被锁定的书签**不计入条数上限**，相当于白名单——
   // 长期要守的约定锁上，就不会把 30 条名额吃掉，也不会因为"到上限了"被逼着合并。
-  function add({ name, keywords, content, priority, always, state, stateAt, locked } = {}) {
+  function add({ name, keywords, content, priority, always, state, stateAt, locked, source } = {}) {
     const n = String(name || "").trim();
     const c = String(content || "").trim();
     if (!n) return { ok: false, error: "name 必填（这条书签叫什么）" };
@@ -105,13 +105,14 @@ export function createLorebook({ dir } = {}) {
       row.state = String(state).trim();
       row.stateAt = String(stateAt || "").trim() || new Date().toISOString().slice(0, 10);
     }
+    if (source !== undefined && String(source).trim()) row.source = String(source).trim();
     if (locked) row.locked = true;
     list.push(row);
     writeJsonl(files.lore, list);
     return { ok: true, row };
   }
 
-  function update({ id, name, keywords, content, priority, always, enabled, state, stateAt, locked } = {}) {
+  function update({ id, name, keywords, content, priority, always, enabled, state, stateAt, locked, source } = {}) {
     const key = String(id || "").trim();
     const list = rows();
     const i = list.findIndex((r) => r.id === key || r.id.startsWith(key));
@@ -130,6 +131,11 @@ export function createLorebook({ dir } = {}) {
         delete r.state;
         delete r.stateAt;
       }
+    }
+    if (source !== undefined) {
+      const v = String(source).trim();
+      if (v) r.source = v;
+      else delete r.source;
     }
     if (always !== undefined) r.always = Boolean(always);
     if (enabled !== undefined) r.enabled = Boolean(enabled);
@@ -206,14 +212,15 @@ export function createLorebook({ dir } = {}) {
     if (!picked || !picked.length) return "";
     const lines = picked.map((h) => {
       const st = h.r.state ? `｜状态：${h.r.state}${h.r.stateAt ? `（${h.r.stateAt}）` : ""}` : "";
-      // 2026-11-21：每条书签压到 200 字（两条约 600 字/轮太重），要点仍在，长文请另存笔记
+      const src = h.r.source ? `｜来源：${String(h.r.source).slice(0, 60)}` : "";
+      // 2026-11-21 丹阳：正文给足——原来压 200 字太少，头又太长；头压短、每条放到 320 字
       const body = String(h.r.content || "");
-      const clipped = body.length > 200 ? body.slice(0, 200) + `…〔原 ${body.length} 字，全文用 memory_lorebook list 看〕` : body;
-      return `- 「${h.r.name}」${clipped}${st}`;
+      const clipped = body.length > 320 ? body.slice(0, 320) + `…〔原 ${body.length} 字，全文用 memory_lorebook list 看〕` : body;
+      return `- 「${h.r.name}」${clipped}${st}${src}`;
     });
     return [
       "<puppet_lore>",
-      "约定书签（世界书）：命中就按它来（不是规则册——规则册 R 编号才是唯一源）。带「状态」的是事件当前值，你说的和它不一样先纠一句。",
+      "书签：命中即按它来（规则以规则册为准）。带「状态」的是当前值，口述不一致先纠。",
       ...lines,
       "</puppet_lore>",
     ].join("\n");

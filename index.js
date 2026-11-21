@@ -10694,6 +10694,7 @@ function apply(ctx) {
           content: { type: "string", description: "add 必填：**次**——要触发的约定/口径内容（一两句话说清；不写规则全文）" },
           state: { type: "string", description: "事件当前值；给了它，命中时会提示「书签里是 X」，口述不一致先纠" },
           stateAt: { type: "string", description: "state 的更新日期（YYYY-MM-DD，可省）" },
+          source: { type: "string", description: "来源/出处：谁定的、依据哪条原文或哪个链接（注入时带一行「来源：…」）" },
           priority: { type: "number", description: "0-100，默认 50；预算不够时高优先级先留" },
           always: { type: "boolean", description: "常驻（每轮都带）；只给全书级常识用，别滥用" },
           enabled: { type: "boolean", description: "update 用：true 恢复 / false 停用" },
@@ -10710,13 +10711,13 @@ function apply(ctx) {
           const lb = loreLayer();
           const action = String(args?.action || "list");
           if (action === "add") {
-            const r = lb.add({ name: args?.name, keywords: args?.keywords, content: args?.content, priority: args?.priority, state: args?.state, stateAt: args?.stateAt, always: args?.always, locked: args?.locked });
+            const r = lb.add({ name: args?.name, keywords: args?.keywords, content: args?.content, priority: args?.priority, state: args?.state, stateAt: args?.stateAt, always: args?.always, locked: args?.locked, source: args?.source });
             if (!r.ok) return `加不了：${r.error}`;
             const c0 = lb.counts();
             return `已加书签 ${r.row.id}「${r.row.name}」${r.row.always ? "（常驻）" : `（关键词：${r.row.keywords.join("、")}）`}${r.row.state ? `，状态：${r.row.state}` : ""}${r.row.locked ? "，已锁定（不占名额）" : ""}，优先级 ${r.row.priority}。\n当前占名额 ${c0.counted}/${c0.cap}（锁定 ${c0.locked} 条不计）。\n文件：${lb.files.lore}`;
           }
           if (action === "update") {
-            const r = lb.update({ id: args?.id, name: args?.name, keywords: args?.keywords, content: args?.content, state: args?.state, stateAt: args?.stateAt, priority: args?.priority, always: args?.always, enabled: args?.enabled, locked: args?.locked });
+            const r = lb.update({ id: args?.id, name: args?.name, keywords: args?.keywords, content: args?.content, state: args?.state, stateAt: args?.stateAt, priority: args?.priority, always: args?.always, enabled: args?.enabled, locked: args?.locked, source: args?.source });
             if (!r.ok) return `改不了：${r.error}`;
             const c1 = lb.counts();
             return `已更新「${r.row.name}」：${r.row.enabled === false ? "已停用" : "生效中"}${r.row.always ? "／常驻" : ""}${r.row.locked ? "／已锁定" : ""}。占名额 ${c1.counted}/${c1.cap}（锁定 ${c1.locked} 条不计）。`;
@@ -10739,7 +10740,7 @@ function apply(ctx) {
           const c = lb.counts();
           return [
             `世界书 ${list.length} 条（占名额 ${c.counted}/${c.cap}，锁定 ${c.locked} 条不计，剩 ${c.left} 个名额）：`,
-            ...list.map((r) => `${r.id}「${r.name}」${r.always ? "常驻" : `关键词：${(r.keywords || []).join("、")}`}｜优先级 ${r.priority}${r.enabled === false ? "｜已停用" : ""}${r.locked ? "｜🔒锁定" : ""}`),
+            ...list.map((r) => `${r.id}「${r.name}」${r.always ? "常驻" : `关键词：${(r.keywords || []).join("、")}`}｜优先级 ${r.priority}${r.enabled === false ? "｜已停用" : ""}${r.locked ? "｜🔒锁定" : ""}${r.source ? `｜来源：${clip(r.source, 30)}` : "｜来源：未记"}`),
           ].join("\n");
         } catch (err) {
           return `世界书操作失败：${err?.message || err}`;
