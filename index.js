@@ -8954,6 +8954,9 @@ function apply(ctx) {
         if (justCompressed) pendingStrong.delete(sessionId);
         // v1.9.1：**新会话第一轮也要强补充**——否则只给弱提示，模型要等到第 5 轮才看得见核心卡
         const justStarted = plan.turn === 1;
+        // 2026-11-21 丹阳定：**会话首轮只给三张卡**——人设/关系/自我/书签/取回/交接/回忆/自我层
+        // 都从第二轮起才注入。首轮 2960 字里，真正必需的只有三张卡。
+        const cardsOnly = justStarted;
         // offset：错开检查轮次，避免几张卡挤在同一轮一起补（丹阳 2026-11-17）
         const cardPolicy = {
           core: { every: 5, off: 0, thr: 0.2 },
@@ -9109,7 +9112,8 @@ function apply(ctx) {
           // 之前 cfg 是启动时加载的，改 recall 阈值/条数必须重启，正是这一点被吐槽"太别扭"。
           let cfgLive = cfg;
           try { cfgLive = loadConfig() || cfg; } catch {}
-          if (!suppressed.has("handoff")) handoffText = buildHandoffInjection(cfgLive);
+          // 首轮不取交接纸条：它是一次性的（取走即消费），不能被"生成了但不显示"白白吃掉
+          if (!cardsOnly && !suppressed.has("handoff")) handoffText = buildHandoffInjection(cfgLive);
           if (!suppressed.has("recall")) {
             // 他发的话前面常挂着 <system-reminder>（注入块不是他说的），取词/召回前先剥掉
             const userText = stripInjected(lastUserText(decision.messages || []).text);
@@ -9436,6 +9440,12 @@ function apply(ctx) {
         } catch (err) {
           diag("熟人名片注入失败：" + (err && err.message || err));
         }
+        if (cardsOnly) {
+          text = ""; socialText = ""; recallText = ""; conflictText = ""; loreText = "";
+          circleText = ""; sayingText = ""; dueText = ""; openingText = ""; cueText = "";
+          peopleText = ""; lostDetailText = ""; nowText = ""; stateText = "";
+          diag("首轮只注入三张卡（其余块从第二轮起）");
+        }
         // 第 2 轮只补人设全文：这时候三张卡和其它注入都没得给，早退会让这一条永远轮不到
         if (!personaDue && !text && !socialText && !handoffText && !recallText && !conflictText && !loreText && !circleText && !lostDetailText && !dueText && !openingText && !cueText && !nowText && !rulesForInject && !habitsForInject && !coreText && !coreStateForInject && !stateForInject && !resetNote) return decision;
         const digest = sha1(`${text}\u0000${socialText}\u0000${handoffText}\u0000${recallText}\u0000${dueText}${openingText}\u0000${cueText}\u0000${nowText}\u0000${conflictText}\u0000${loreText}\u0000${circleText}\u0000${lostDetailText}\u0000${rulesForInject}\u0000${habitsForInject}\u0000${coreText}\u0000${coreStateForInject}\u0000${stateForInject}\u0000${resetNote}`);
@@ -9614,7 +9624,9 @@ function apply(ctx) {
             const planNow = cardPlan.get(sessionId) || { turn: 0, self: 0 };
             const selfDue = planNow.turn % 5 === 2;
             const selfCtx = contextTextOf(decision.messages || []);
-            if (justCompressed || planNow.turn <= 1) {
+            if (cardsOnly) {
+              // 首轮只三卡，自我层等下一轮
+            } else if (justCompressed || planNow.turn <= 1) {
               selfText = selfFull;
             } else if (selfDue) {
               planNow.self = planNow.turn;
