@@ -1493,16 +1493,32 @@ function buildHandoffInjection(cfg, { nowMs = Date.now() } = {}) {
   } catch {
     return "";
   }
-  const fresh = [];
+  // 2026-11-21 丹阳：「提示只有一次，过期自动删」——
+  // ① 过期的 open 纸条直接从盘上删掉（不再只是跳过）；
+  // ② 注入过的立刻标 injected，同一张纸条不会再出现第二次。
+  const kept = [];
+  let pruned = 0;
   for (const r of rows) {
-    if (!r || r.status !== "open") continue;
+    if (!r) continue;
     const at = Date.parse(String(r.at || ""));
     if (Number.isNaN(at)) continue;
-    if (nowMs - at > HANDOFF_STALE_MS) continue;
-    fresh.push(r);
+    if (r.status === "open" && nowMs - at > HANDOFF_STALE_MS) { pruned++; continue; }
+    kept.push(r);
   }
+  if (pruned) {
+    try { writeHandoffs(kept); } catch { /* 删失败不影响注入 */ }
+  }
+  const fresh = kept.filter((r) => r.status === "open");
   if (!fresh.length) return "";
-  const lines = fresh.slice(-3).map((r) => `· ${clip(String(r.summary || "").replace(/\s+/g, " ").trim(), 80)}`);
+  const picks = fresh.slice(-3);
+  const lines = picks.map((r) => `· ${clip(String(r.summary || "").replace(/\s+/g, " ").trim(), 80)}`);
+  // 注入即消费：标 injected（pull 只认 open，所以不会再被取走，也不会再出现）
+  try {
+    const ids = new Set(picks.map((r) => r.id));
+    writeHandoffs(kept.map((r) => (ids.has(r.id) ? { ...r, status: "injected", injectedAt: nowISO() } : r)));
+  } catch {
+    /* 标记失败也不影响这一轮显示 */
+  }
   return [
     "<puppet_handoff>",
     "以下是留给这个工作台的交接纸条（上一个会话/另一张桌子留下的「下一步该做什么」，取走后不再出现，别当长期记忆用）：",
