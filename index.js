@@ -8984,11 +8984,12 @@ function apply(ctx) {
           }
         })();
         const plan = cardPlan.get(sessionId) || { turn: 0, core: 0, rules: 0, state: 0, self: 0 };
-        plan.turn += 1;
         const justCompressed = pendingStrong.get(sessionId) === true;
         if (justCompressed) pendingStrong.delete(sessionId);
-        // v1.9.1：**新会话第一轮也要强补充**——否则只给弱提示，模型要等到第 5 轮才看得见核心卡
-        const justStarted = plan.turn === 1;
+        // 0.49.5（2026-11-21 丹阳提）：**轮次指针按「用户发一次言」计**。
+        // 之前 plan.turn 在 pre-step 里无脑 +1，而 pre-step 每走一步（含工具往返）都会跑，
+        // 结果「我说了 50 句、计数器已经 147」——首轮判定、自我层节奏、缺口检查全被带偏。
+        // 真正的新用户发言只有一个判据：phaseNext.isNew（用户消息 key 变了）。
         // 2026-11-21 丹阳定：**会话首轮只给三张卡**——人设/关系/自我/书签/取回/交接/回忆/自我层
         // 都从第二轮起才注入。首轮 2960 字里，真正必需的只有三张卡。
         // 注意（0.49.2 修）：cardsOnly 不能只看 justStarted——plan.turn 是内存计数，重启即归 1，
@@ -9014,6 +9015,9 @@ function apply(ctx) {
         phPhase.turn = phaseNext.turn;
         phPhase.lastUserKey = phaseNext.lastUserKey;
         const isNewUserTurn = phaseNext.isNew;
+        if (isNewUserTurn) plan.turn += 1;
+        // v1.9.1：**新会话第一轮也要强补充**——否则只给弱提示，模型要等到第 5 轮才看得见核心卡
+        const justStarted = plan.turn === 1;
         if (sessionId) { phaseAll[sessionId] = phPhase; writeJson(phaseFile, phaseAll); }
         const phaseTurn = Number(phPhase.turn) || 0;
         // 人设全文待补（2026-11-21 第二次修正）：判据用「>= 2 + 一次性标记」，不用「=== 2」。
@@ -9111,7 +9115,7 @@ function apply(ctx) {
         const queryForLayers = [userTextNow, ...linkTriggersOf(userTextNow)].join(" ");
         try {
           const supPlan = supLayerPlan.get(sessionId) || { turn: 0, check: 0 };
-          supPlan.turn += 1;
+          if (isNewUserTurn) supPlan.turn += 1;
           const supLayers = ["persona", "relations", "notes", "diary"];
           const ctxForSup = contextTextOf(decision.messages || []);
           let chosen = [];
