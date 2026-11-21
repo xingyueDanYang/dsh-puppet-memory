@@ -231,7 +231,10 @@ try {
   const t4b = await run4("顺手把手册补完");
   const diagTxt = fs.readFileSync(path.join(TMP, "diag.log"), "utf8");
   ok("上一段没表态 → 作废（不挂到过期）", diagTxt.includes("上一段的待判作废"), diagTxt.slice(-120));
-  ok("待判没挡住这回合重新取词", t4b.includes("<puppet_cue>"), t4b.slice(0, 80));
+  // 2026-11-21：注入加了「块内容去重」——同一句引文第二轮会被去重挡掉（这正是要的：不重复抛同一段）。
+  // 断言改成验「取词这条路确实又跑了一趟」：要么块进来了，要么 diag 里记了去重。
+  const cueRanAgain = t4b.includes("<puppet_cue>") || diagTxt.includes("注入去重：cue");
+  ok("待判没挡住这回合重新取词（被去重也算跑过）", cueRanAgain, t4b.slice(0, 80));
 
   // ---- 借 dsh-memory-gate 的三个模式：shadow 只审计不注入 / enforce 低置信不注入
   const writeCueConfig = (mode) => {

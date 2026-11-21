@@ -2266,6 +2266,48 @@ function mergeInjectionMessages(list) {
   return [injectionMessage(texts.join("\n\n"))];
 }
 
+// 2026-11-21（丹阳：「鱼饵够用就行，不用重复」）：注入前按「块内容」去重。
+// 同一个会话里，同样的块内容只发一次；卡类（规则/核心/状态/人设）必须放行——它们是锚点，省不得。
+// 压缩、复位、会话结束时清空：那些内容已经从上下文里消失，得允许重发。
+const sentBlockHashes = new Map(); // sessionId -> Set(sha1)
+const dedupeLogged = new Map(); // sessionId -> Set(块名)：同一个块只报一次「去重」回执
+const ALWAYS_SEND_BLOCKS = new Set(["reset", "rules", "core", "core_state", "persona", "persona_full"]);
+
+function blockText(msg) {
+  const c = msg && msg.content;
+  if (typeof c === "string") return c;
+  if (Array.isArray(c)) return c.map((x) => (x && typeof x.text === "string" ? x.text : "")).join("");
+  return "";
+}
+
+function dedupeBlocks(sessionId, blocks) {
+  const sid = String(sessionId || "");
+  let set = sentBlockHashes.get(sid);
+  if (!set) { set = new Set(); sentBlockHashes.set(sid, set); }
+  let logged = dedupeLogged.get(sid);
+  if (!logged) { logged = new Set(); dedupeLogged.set(sid, logged); }
+  const out = [];
+  for (const item of blocks || []) {
+    const name = String((item && item[0]) || "");
+    const msg = item && item[1];
+    if (!msg) continue;
+    if (ALWAYS_SEND_BLOCKS.has(name)) { out.push(msg); continue; }
+    const text = blockText(msg).trim();
+    if (!text) continue;
+    const h = sha1(text);
+    if (set.has(h)) {
+      if (!logged.has(name)) {
+        logged.add(name);
+        try { diag(`注入去重：${name} 与之前发过的某块内容相同，这次不发（同名的只记这一次）`); } catch {}
+      }
+      continue;
+    }
+    set.add(h);
+    out.push(msg);
+  }
+  return out;
+}
+
 function injectionMessage(text) {
   return {
     id: randomUUID(),
@@ -8249,6 +8291,8 @@ function apply(ctx) {
     lastInjected.delete(sessionId);
     injectedOnce.delete(sessionId);
     lastStateInjected.delete(sessionId);
+    sentBlockHashes.delete(sessionId);
+    dedupeLogged.delete(sessionId);
     // 压缩后位置在上下文开头、注意力最足——下一次做一次强补充，之后回到弱补充
     pendingStrong.set(sessionId, true);
     cardPlan.delete(sessionId);
@@ -9221,7 +9265,30 @@ ${selfText}
           : null;
         return {
           kind: "enter",
-          messages: [...(decision.messages || []), ...mergeInjectionMessages([...(resetMessage ? [resetMessage] : []), ...(rulesMessage ? [rulesMessage] : []), ...(coreMessage ? [coreMessage] : []), ...(coreStateMessage ? [coreStateMessage] : []), ...(personaMsg ? [personaMsg] : []), ...(personaRestMessage ? [personaRestMessage] : []), ...(selfMessage ? [selfMessage] : []), ...(stateMessage ? [stateMessage] : []), ...(handoffMessage ? [handoffMessage] : []), ...(recallMessage ? [recallMessage] : []), ...(dueMessage ? [dueMessage] : []), ...(openingMessage ? [openingMessage] : []), ...(cueMessage ? [cueMessage] : []), ...(nowMessage ? [nowMessage] : []), ...(conflictMessage ? [conflictMessage] : []), ...(loreMessage ? [loreMessage] : []), ...(sayingMessage ? [sayingMessage] : []), ...(circleMessage ? [circleMessage] : []), ...(lostDetailMessage ? [lostDetailMessage] : []), ...(text ? [injectionMessage(text)] : []), ...(peopleText ? [injectionMessage(peopleText)] : []), ...(socialMessage ? [socialMessage] : [])])],
+          messages: [...(decision.messages || []), ...mergeInjectionMessages(dedupeBlocks(sessionId, [
+            ["reset", resetMessage],
+            ["rules", rulesMessage],
+            ["core", coreMessage],
+            ["core_state", coreStateMessage],
+            ["persona", personaMsg],
+            ["persona_full", personaRestMessage],
+            ["self", selfMessage],
+            ["state", stateMessage],
+            ["handoff", handoffMessage],
+            ["recall", recallMessage],
+            ["due", dueMessage],
+            ["opening", openingMessage],
+            ["cue", cueMessage],
+            ["now", nowMessage],
+            ["conflict", conflictMessage],
+            ["lore", loreMessage],
+            ["saying", sayingMessage],
+            ["circle", circleMessage],
+            ["lost_detail", lostDetailMessage],
+            ["text", text ? injectionMessage(text) : null],
+            ["people", peopleText ? injectionMessage(peopleText) : null],
+            ["social", socialMessage],
+          ]))],
         };
       } catch (err) {
         log("warn", `pre-step 注入失败：${err?.message || err}`);
@@ -9343,6 +9410,8 @@ ${selfText}
           lastInjected.delete(sid);
           injectedOnce.delete(sid);
           lastStateInjected.delete(sid);
+          sentBlockHashes.delete(sid);
+          dedupeLogged.delete(sid);
           // 2026-11-21：注入相位归零（下一轮 = 首轮全量）；人设分 −随机(1–10)
           try {
             const pf = path.join(MEM_DIR, "state", "inject-phase.json");
@@ -9390,6 +9459,8 @@ ${selfText}
     lastInjected.delete(sessionId);
     injectedOnce.delete(sessionId);
     lastStateInjected.delete(sessionId);
+    sentBlockHashes.delete(sessionId);
+    dedupeLogged.delete(sessionId);
     seenEvents.delete(sessionId);
     lastSizes.delete(sessionId);
     lastCompressBackup.delete(sessionId);
@@ -10073,6 +10144,8 @@ ${selfText}
             if (!sid) return "复位需要在会话里调用（拿不到会话 id，本轮不生效）。";
             lastStateInjected.delete(sid);
             lastInjected.delete(sid);
+            sentBlockHashes.delete(sid);
+            dedupeLogged.delete(sid);
             // 2026-11-21：注入决策现在看「相位 + 卡内容指纹」，这两样不清掉的话，复位后下一轮 decide() 全是 skip，
             // 而回执还写着「重新注入一次」——实现和回执就对不上（测试子代理发现的第 1 号 bug）。
             lastRawCardHashes.delete(sid);
