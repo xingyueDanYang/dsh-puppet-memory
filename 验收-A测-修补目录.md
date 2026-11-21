@@ -213,6 +213,8 @@
 |---|---|---|---|---|---|
 | A-139 | 2026-11-21：**「自我候选」整套删除**——零模型规则捞句实测 90 条里只有 3 条可用（3.3%），候选池成噪声池（56% 是「要不要我…」） | 〔接口〕〔数据〕〔无破坏性变更〕 | 删 `harvestSelfCandidates()` / `pendingSelfCandidates()` / 调用点 / 注入块那句「自我候选 N 条待确认」/ `harvestCandidates` 的 import；`deep/self-candidates.jsonl` 改名 `.removed-20261121` 留档 | `node --check` 通过；残留检查 `SelfCandidates｜pendLine` 为 0；重启后注入块不再出现候选提示 | 从 `index.js.bak-20261121-1640` 恢复；数据文件改回原名 |
 | A-140 | 2026-11-21：知识层结论 **≤300 字也被截到 200**（只有超 300 才提醒外置），200–300 字的结论看不全 | 〔接口〕〔无破坏性变更〕 | `shownConcl = concl.length > 300 ? clip(concl, 200) : concl` | 300 字内整条出现；超 300 才压 200 并带〔原文 N 字·建议外置〕 | 回退该行（恢复 `clip(concl, 200)`） |
+| A-142 | 2026-11-21：`memory_guide action=rebuild` **不修剪陈旧索引**——重建只重算 `kind:"link"` 那一层，其余索引行原样保留（`index.js:5897` 的 `keep`），源记录被删/被清之后索引里仍留着 → 巡检报 25 条指向不存在的 hash（memo 19 / relation 2 / saying 4） | 〔工具〕〔数据〕〔无破坏性变更〕 | ①当日已手工删掉这 25 条陈旧行（备份 `guide.jsonl.bak-before-prune-20261121175205`）；②待 0.50：rebuild 时按源数据核对，剔除源记录已不存在的索引行（`kind:overflow` 转存除外） | 巡检脚本「guide 索引」段不再报孤立；重建后条目数 = 可解析源记录数 + overflow | 回退 `guide.jsonl` 备份；代码回退该 commit |
+
 ## 回滚通用规则
 
 1. 代码回滚优先用 `git revert <commit>`，不要手改回去（手改会漏）。
