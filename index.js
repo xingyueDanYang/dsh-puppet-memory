@@ -2250,7 +2250,9 @@ function buildStateInjection(view, result = null) {
   }
   const recent = [...new Set(signals)].slice(0, 4).join("、") || "无";
   return [
-    `【当前取向】${view.label}（最近信号（只是参考，不是指令）：${recent}）`,
+    // 2026-11-21 丹阳：信号明细不再注入——它每轮都在变、对决策没帮助，只占字数。
+    // 数据仍照常记录，需要看走势时用 memory_state action=history。
+    `【当前取向】${view.label}`,
     `说话方式：${view.hint}`,
     view.worklogIdleMinutes !== null && view.worklogIdleMinutes >= 300
       ? "提醒：上一段工作已经空闲很久，需要时先问一句要不要把它收个尾。"
@@ -9005,7 +9007,9 @@ function apply(ctx) {
         const phaseTurn = Number(phPhase.turn) || 0;
         // 人设全文待补（2026-11-21 第二次修正）：判据用「>= 2 + 一次性标记」，不用「=== 2」。
         // 等于 2 太脆：轮次一旦跳过去（同一个回话多步、重启、手动重置）就永远不再触发。
-        const personaDue = isNewUserTurn && phaseTurn >= 2 && phPhase.personaDone !== true;
+        // 2026-11-21 修：压缩会把相位归零（turn=1），原来「>=2」的判据让压缩后的人设全文永远轮不到。
+        // 现在压缩当轮也认（justCompressed），一次性标记 personaDone 仍然防重复。
+        const personaDue = isNewUserTurn && (justCompressed || phaseTurn >= 2) && phPhase.personaDone !== true;
         try { diag(`注入入口 phaseTurn=${phaseTurn} isNew=${isNewUserTurn} personaDue=${personaDue} done=${phPhase.personaDone === true}`); } catch {}
         // 每轮记账（2026-11-21）：人设分只按用户消息 +1。
         // 必须紧贴相位计算——后面有若干早退分支（没东西可注入、PTC 后续步骤等），
