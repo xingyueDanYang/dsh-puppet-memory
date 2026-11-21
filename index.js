@@ -9586,6 +9586,10 @@ function apply(ctx) {
             });
             if (!personaIntact) phState.turn = 0; // 状态刷新：计数归零，扣分当新起点
             writeJson(phFile, phState);
+            // 2026-11-21 丹阳定：**纯数字块不再注入**——<puppet_persona>97/100</puppet_persona>
+            // 没有正文、只有数字和符号，是空白注入。缺卡/被截断时 personaHintLine 返回的是
+            // 「重载＋完整人设」，那种仍然要发；只要分数不要。
+            if (personaIntact) return null;
             return line ? injectionMessage("<puppet_persona>" + String.fromCharCode(10) + line + String.fromCharCode(10) + "</puppet_persona>") : null;
           } catch (err) {
             return null;
@@ -9683,11 +9687,9 @@ function apply(ctx) {
             } else if (selfDue) {
               planNow.self = planNow.turn;
               cardPlan.set(sessionId, planNow);
-              selfText = missingRatioOf(selfFull, selfCtx) >= 0.2
-                ? selfFull
-                : "（自我层按弱补充：只提醒到这里，需要时用 memory_self action=list 看具体条目。）";
+              selfText = missingRatioOf(selfFull, selfCtx) >= 0.2 ? selfFull : "";
             } else {
-              selfText = "（自我层按弱补充：只提醒到这里，需要时用 memory_self action=list 看具体条目。）";
+              selfText = "";
             }
           }
         } catch (err) {
