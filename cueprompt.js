@@ -89,6 +89,13 @@ export function stripInjected(text) {
   if (!t) return "";
   t = t.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, " ");
   t = t.replace(/<puppet_[a-z][a-z_]*>[\s\S]*?<\/puppet_[a-z][a-z_]*>/gi, " ");
+  // 工具目录不是他说的话（2026-11-21 实测：目录里带 memory_write/profile 这些词，
+  // 被当成检索词，把两条无关记录拽进了「顺手取回」）
+  t = t.replace(/#\s*Tools Activator[\s\S]*?(?=<available_tools|<activated_tool|$)/gi, " ");
+  t = t.replace(/<available_tools[\s\S]*?<\/available_tools>/gi, " ");
+  t = t.replace(/<activated_tool[\s\S]*?<\/activated_tool>/gi, " ");
+  t = t.replace(/<available_skills[\s\S]*?<\/available_skills>/gi, " ");
+  t = t.replace(/<mcp_catalog[\s\S]*?<\/mcp_catalog>/gi, " ");
   // 压缩截断时可能只剩半个块，尾巴一并去掉
   t = t.replace(/<system-reminder>[\s\S]*$/i, " ");
   t = t.replace(/<puppet_[a-z][a-z_]*>[\s\S]*$/i, " ");
