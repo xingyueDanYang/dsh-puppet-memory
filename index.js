@@ -2189,28 +2189,19 @@ function buildInjectionText(cfg, coreUsed = 0, lines = null, opts = {}) {
     parts.push(`【最近日记】${clip(line, 420)}`);
   }
 
-  // v0.49.0：非工作原文（压缩后归档）还有没整理的，提一句指路——我只读那个文件，不翻会话原文。
+  // 2026-11-21 丹阳：「没小模型应该自动提示给你」——不再报「待整理 N 条」，
+  // 直接把候选原文交给模型判：是长期约定就提议记书签，不是就放过，不攒垃圾。
   try {
-    const txt = fs.readFileSync(path.join(MEM_DIR, "deep", "agreement-inbox.md"), "utf8");
-    const n = (txt.match(/\n\- /g) || []).length;
-    // 2026-11-20 丹阳：「约定待整理 也可以删了」——小模型能整理时这条对我没用，只占上下文。
-    // 改成异常兜底：积压到 20 条（正常在压缩后就被小模型清掉了）才提醒我接手。
-    if (n >= 20) parts.push(`【约定积压】活日记积到 ${n} 条没整理——小模型引擎大概没跑，我手动读 deep/agreement-inbox.md 整理成书签（主=事件，次=约定+状态），处理完的句子挪进 agreement-inbox-done.md`);
+    const rows = readInboxRows().filter((t) => String(t).length <= 200);
+    const picks = rows.slice(0, 3).map((t) => clip(String(t).replace(/\s+/g, " ").trim(), 56));
+    if (picks.length) {
+      parts.push(`【活日记·待判 ${rows.length}】${picks.join("；")}｜判断是不是长期约定/口径：是就提议记成书签，不是就放过`);
+    }
   } catch {
     /* 没有归档就不提 */
   }
 
-  // v0.49.0（2026-11-20）：约定书签巡检反馈——最近 30 分钟内有记录才提一句，平时不占上下文。
-  try {
-    const rows = readJsonl(PATHS.agreementLog).slice(-3);
-    const recent = rows.filter((r) => Date.now() - Date.parse(String(r.ts || "")) < 30 * 60 * 1000);
-    if (recent.length) {
-      const line = recent.map((r) => String(r.summary || "").slice(0, 120)).filter(Boolean).join("；");
-      if (line) parts.push(`【约定巡检】${clip(line, 220)}`);
-    }
-  } catch {
-    /* 没记录就不提 */
-  }
+
 
 
   if (!parts.length) return "";
@@ -3592,6 +3583,9 @@ function queueNonWork(sessionId, userText, tools = []) {
   if (classifyTurn(tools) !== "leisure") return;
   const rows = inboxPending.get(sessionId) || [];
   for (const text of collectNonWorkTurns(userText)) {
+    // 2026-11-21 丹阳：「太长的超过 200 字，不算约定记录」——整段粘贴（小说、相声、资料）
+    // 塞进来只会变成一堆永远判不完的垃圾，采集这一步就挡掉。
+    if (String(text).length > 200) continue;
     if (!rows.some((r) => r.text === text)) rows.push({ at: new Date().toISOString(), text });
   }
   if (rows.length) inboxPending.set(sessionId, rows.slice(-80));
