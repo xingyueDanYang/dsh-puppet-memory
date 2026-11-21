@@ -394,20 +394,23 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function MemorySettingsPanel() {
+    function MemorySettingsPanel(props) {
       const { useState } = React
-      const [tab, setTab] = useState('features')
+      // initialTab 只给测试用（宿主不传）；页面仍按点 tab 切换
+      const [tab, setTab] = useState((props && props.initialTab) || 'features')
       const tabs = [
         ['overview', '记忆'],
         ['features', '功能开关'],
         ['backup', '备份'],
         ['summary', '自动摘要'],
         ['session', '会话记忆'],
+        ['update', '插件更新'],
       ]
       const body = tab === 'overview' ? h(OverviewPanel)
         : tab === 'features' ? h(FeaturesPanel)
         : tab === 'backup' ? h(BackupPanel)
         : tab === 'summary' ? h(AutoSummaryPanel)
+        : tab === 'update' ? h(UpdatePanel)
         : h(SessionMemoryPanel)
       return h('div', { className: 'pmb' },
         h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', borderBottom: '1px solid var(--dsw-alias-border-l1)', paddingBottom: 8 } },
@@ -1732,14 +1735,10 @@ window.__ModuleLoader__.load({
         // v1.1：四个页面合并成一页（顶部 tab 切换），设置列表里只占一行
         slots.register(
           { name: 'settings.section', id: 'puppet-memory', order: 25, label: '记忆设置' },
-          () => h(MemorySettingsPanel),
+          (props) => h(MemorySettingsPanel, props),
         )
 
-        // v0.46.0：插件更新单独一页——它跟记忆数据无关，不该挤进「记忆设置」
-        slots.register(
-          { name: 'settings.section', id: 'puppet-update', order: 28, label: '插件更新' },
-          () => h(UpdatePanel),
-        )
+        // v0.49.x（2026-11-21 丹阳定）：插件更新并进「记忆设置」的第五个 tab，不再单独占侧栏一行
 
         // 值班台：侧栏面板行（sidebar.panellist 才进侧栏列表、才有固定状态）
         slots.inject('sidebar.panellist', () => slots.register(

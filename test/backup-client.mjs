@@ -118,8 +118,8 @@ check("注入了 settings.section", injected.includes("settings.section"), JSON.
 const regs = registered.filter((r) => r.spec && r.spec.name === "settings.section");
 // 2026-11-18：v1.1 起四个设置页合并成一页（顶部 tab 切换），设置列表里只占一行；
 // 老断言（三个独立 settings.section + order 26/27/28）对的是合并前的结构，行为已不存在。
-// 2026-11-19：0.46.0 起「插件更新」单独一页（order 28），所以是两页，不是一页
-check("登记两页：记忆设置 + 插件更新", regs.length === 2 && regs.some((r) => r.spec.id === "puppet-update"), String(regs.length));
+// 2026-11-21 丹阳定：插件更新并进「记忆设置」第五个 tab，设置列表只留一页（order 25）
+check("登记一页：记忆设置（插件更新是它的 tab）", regs.length === 1 && regs[0].spec.id === "puppet-memory", String(regs.length));
 const settingsReg = regs.find((r) => r.spec.id === "puppet-memory");
 check("设置页 id = puppet-memory", settingsReg?.spec?.id === "puppet-memory", settingsReg?.spec?.id);
 check("设置页 label = 记忆设置", settingsReg?.spec?.label === "记忆设置", settingsReg?.spec?.label);

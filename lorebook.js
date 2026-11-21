@@ -73,7 +73,9 @@ export function createLorebook({ dir } = {}) {
 
   // 2026-11-20 丹阳定：条目是「主 = 一个事件，次 = 要触发的约定内容 + 状态」。
   // 同一事件只有一个条目（name 就是事件名），状态变了用 update 改 state，不新开一条。
-  function add({ name, keywords, content, priority, always, state, stateAt } = {}) {
+  // locked（2026-11-21 丹阳定）：被锁定的书签**不计入条数上限**，相当于白名单——
+  // 长期要守的约定锁上，就不会把 30 条名额吃掉，也不会因为"到上限了"被逼着合并。
+  function add({ name, keywords, content, priority, always, state, stateAt, locked } = {}) {
     const n = String(name || "").trim();
     const c = String(content || "").trim();
     if (!n) return { ok: false, error: "name 必填（这条书签叫什么）" };
@@ -84,10 +86,10 @@ export function createLorebook({ dir } = {}) {
     const list = rows();
     const dup = list.find((r) => r.enabled !== false && r.name === n);
     if (dup) return { ok: false, error: `已有同名条目：${dup.id}（用 update 改它）` };
-    const active = list.filter((r) => r.enabled !== false).length;
+    const active = list.filter((r) => r.enabled !== false && !r.locked).length;
     const cap = Math.max(1, Number(loreDefaults.maxTotal) || 30);
     if (active >= cap) {
-      return { ok: false, error: `已有 ${active} 条，到上限 ${cap} 了：先 update 合并旧条目（enabled=false 停用不占名额）或 remove 掉不要的` };
+      return { ok: false, error: `已有 ${active} 条占名额，到上限 ${cap} 了：先 update 合并旧条目（enabled=false 停用不占名额），或给长期要守的那几条 locked=true 移出统计，或 remove 掉不要的` };
     }
     const row = {
       id: sha1(`${n}|${Date.now()}`).slice(0, 12),
@@ -103,12 +105,13 @@ export function createLorebook({ dir } = {}) {
       row.state = String(state).trim();
       row.stateAt = String(stateAt || "").trim() || new Date().toISOString().slice(0, 10);
     }
+    if (locked) row.locked = true;
     list.push(row);
     writeJsonl(files.lore, list);
     return { ok: true, row };
   }
 
-  function update({ id, name, keywords, content, priority, always, enabled, state, stateAt } = {}) {
+  function update({ id, name, keywords, content, priority, always, enabled, state, stateAt, locked } = {}) {
     const key = String(id || "").trim();
     const list = rows();
     const i = list.findIndex((r) => r.id === key || r.id.startsWith(key));
@@ -130,6 +133,10 @@ export function createLorebook({ dir } = {}) {
     }
     if (always !== undefined) r.always = Boolean(always);
     if (enabled !== undefined) r.enabled = Boolean(enabled);
+    if (locked !== undefined) {
+      if (locked) r.locked = true;
+      else delete r.locked;
+    }
     r.updatedAt = new Date().toISOString();
     list[i] = r;
     writeJsonl(files.lore, list);
@@ -147,6 +154,22 @@ export function createLorebook({ dir } = {}) {
 
   function list({ includeDisabled = false } = {}) {
     return rows().filter((r) => includeDisabled || r.enabled !== false);
+  }
+
+  /** 条数口径（2026-11-21）：locked 的条目不算「占名额」，只算总数；停用的也不算。 */
+  function counts() {
+    const all = rows();
+    const enabled = all.filter((r) => r.enabled !== false);
+    const locked = enabled.filter((r) => r.locked === true);
+    const cap = Math.max(1, Number(loreDefaults.maxTotal) || 30);
+    return {
+      rows: all.length,
+      active: enabled.length,
+      locked: locked.length,
+      counted: enabled.length - locked.length,
+      cap,
+      left: Math.max(0, cap - (enabled.length - locked.length)),
+    };
   }
 
   /** 命中：返回要注入的条目（常驻 + 关键词命中），按优先级排，超预算截断。 */
@@ -230,5 +253,5 @@ export function createLorebook({ dir } = {}) {
     return best;
   }
 
-  return { files, add, update, remove, list, pick, render, normKeywords, findSimilar, similarity };
+  return { files, add, update, remove, list, counts, pick, render, normKeywords, findSimilar, similarity };
 }

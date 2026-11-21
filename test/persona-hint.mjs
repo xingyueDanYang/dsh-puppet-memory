@@ -32,16 +32,18 @@ t("roleplay 才带 encourage，且只在倍数轮", () => {
 });
 
 console.log("分数");
-t("弱注入 +1 封顶", () => {
-  assert.equal(tickScore({ ...personaHintDefaults.score, value: 100 }, "weak").value, 100);
-  assert.equal(tickScore({ ...personaHintDefaults.score, value: 96 }, "weak").value, 97);
+t("弱注入 +1，不封顶（2026-11-21 丹阳：可以一直加）", () => {
+  assert.equal(tickScore({ ...personaHintDefaults.score, value: 100 }, "weak").value, 101);
+  assert.equal(tickScore({ ...personaHintDefaults.score, value: 60 }, "weak").value, 61);
 });
 t("强注入扣 20 或清零", () => {
   assert.equal(tickScore({ ...personaHintDefaults.score, value: 96 }, "strong").value, 76);
   assert.equal(tickScore({ ...personaHintDefaults.score, value: 96, strongZero: true }, "strong").value, 0);
 });
-t("压缩后状态刷新回 96", () => {
+t("压缩后分数减 1–10，且不为负（2026-11-21 起不再重置回 96）", () => {
   const h = resetOnCompaction({ mode: "score", score: { value: 12 } });
-  assert.equal(h.score.value, 96);
+  assert.ok(h.score.value >= 2 && h.score.value <= 11, String(h.score.value));
+  const z = resetOnCompaction({ mode: "score", score: { value: 0 } });
+  assert.equal(z.score.value, 0);
 });
 console.log("\npersona-hint：" + n + " 项全部通过");

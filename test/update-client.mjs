@@ -35,7 +35,9 @@ function harness(reply) {
   const mod = entry.factory((name) => { if (name === "react") return React; throw new Error("optional dependency"); });
   const slots = { inject(_, fn) { fn(); }, register(spec, comp) { regs.push({ spec, comp }); } };
   mod.apply({ get: (name) => name === "slots" ? slots : undefined, effect() {} });
-  const comp = regs.find((r) => r.spec.id === "puppet-update").comp;
+  // 2026-11-21：插件更新并进「记忆设置」的 tab，不再有独立 settings.section
+  const panel = regs.find((r) => r.spec.id === "puppet-memory").comp;
+  const comp = () => panel({ initialTab: "update" });
   function render() { at = 0; effects = []; tree = comp(); for (const fn of effects) fn(); return tree; }
   function nodes(node = tree, out = []) {
     if (Array.isArray(node)) { for (const x of node) nodes(x, out); }
@@ -87,7 +89,11 @@ await t("重复手动点击只检查一次，忙时禁止改设置", async () =>
   const a = click(), b = click(); h.render();
   assert.equal(h.calls.filter((x) => x.action === "update-check").length, 1);
   assert.equal(h.calls[1].body.force, true);
-  assert.ok(h.nodes().filter((n) => n.type === "button" || n.type === "select").every((n) => n.props.disabled));
+  // 面板现在挂在「记忆设置」里，顶部 tab 切换按钮常驻可点，不算被禁用的控件
+  const TAB_LABELS = ["记忆", "功能开关", "备份", "自动摘要", "会话记忆", "插件更新"];
+  assert.ok(h.nodes()
+    .filter((n) => (n.type === "button" || n.type === "select") && !TAB_LABELS.includes(h.text(n)))
+    .every((n) => n.props.disabled));
   resolve({ ...base, enabled: false, due: false }); await Promise.all([a, b]); await h.settle();
   assert.equal(h.button("立即检查").props.disabled, false);
 });

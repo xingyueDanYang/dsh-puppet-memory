@@ -11,7 +11,8 @@
 export const personaHintDefaults = {
   mode: "off", // off | score | roleplay
   everyN: 25,
-  score: { value: 96, max: 100, weakStep: 1, strongPenalty: 20, strongZero: false },
+  // 2026-11-21 丹阳定：60 起，每轮 +1，压缩 −随机(1–10)；100 轮全量卡时 −20；不封顶（max 只作显示用）
+  score: { value: 60, max: 999, weakStep: 1, strongPenalty: 20, strongZero: false },
   encourage: "", // roleplay 模式下由「扮演总结」写入，每次覆盖
 };
 
@@ -74,8 +75,9 @@ export function personaHintLine(hint, turn, opts) {
   return lines.join(String.fromCharCode(10));
 }
 
-// 压缩后：状态刷新（分数回默认，计数由调用方清零）
+// 压缩后：分数减一个随机数（1–10），计数由调用方清零
 export function resetOnCompaction(hint) {
   const h = normalizePersonaHint(hint);
-  return Object.assign({}, h, { score: Object.assign({}, h.score, { value: 96 }) });
+  const drop = 1 + Math.floor(Math.random() * 10);
+  return Object.assign({}, h, { score: Object.assign({}, h.score, { value: Math.max(0, Number(h.score.value) - drop) }) });
 }

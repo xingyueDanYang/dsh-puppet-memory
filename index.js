@@ -40,6 +40,27 @@ import { behaviorHint, createLines, lastAssistantTextId, lastUserText, lexicalSc
 import { createPeopleStore } from "./people.js";
 import { createUpdateChecker, UPDATE_REPO } from "./update-check.js";
 import { integrityScore, normalizePersonaHint, personaHintLine, tickScore } from "./persona-hint.js";
+
+// 注入相位（2026-11-21）：会话首轮 / 压缩后首轮 / 每 100 轮 = 强注入；2–5 轮固定弱注入。
+// 抽成纯函数是为了可测——节奏不该只靠跑真实会话看。
+export function phaseOf(turn) {
+  const t = Number(turn) || 0;
+  return { full: t === 1 || t % 100 === 0, weak: t >= 2 && t <= 5, turn: t };
+}
+
+// 相位推进（2026-11-21 修正）：轮次按「用户消息」算，不按模型步骤算。
+// 一个回话里模型要跑很多步（每次工具调用一步），按步计的话「压缩后第 2 轮」在第一次
+// 回话内部就走完了，人设全文永远等不到。同一条用户消息视为同一轮，不递增。
+export function nextPhaseTurn(prev, userKey) {
+  const turn = Number(prev && prev.turn) || 0;
+  const key = String(userKey || "");
+  const isNew = !!key && key !== (prev && prev.lastUserKey);
+  return {
+    turn: isNew ? turn + 1 : turn,
+    lastUserKey: key || ((prev && prev.lastUserKey) || undefined),
+    isNew,
+  };
+}
 import { harvestCandidates, harvestTodo } from "./self-promote.js";
 import { pickCandidates } from "./session-digest.js";
 import { appendCandidates } from "./session-pool.js";
@@ -2806,7 +2827,7 @@ function updateCuePrompt(body = {}) {
 // ---- 功能开关（v1.0，2026-11-16）：面板上能看见、能点，不让默认关的功能被忘掉 ----
 const FEATURE_TOGGLES = [
   { id: "circle", label: "圈子印象", desc: "按网站记住各地怎么说话；命中才注入", group: "circle", def: true },
-  { id: "lore", label: "世界书 / 书签", desc: "关键词命中才带的背景条目（≤30 条）", group: "lore", def: true },
+  { id: "lore", label: "约定书签", desc: "跨会话说好的约定/口径：命中关键词才注入；不记设定、不当规则（≤30 条）", group: "lore", def: true },
   { id: "lines", label: "三线状态", desc: "工作 / 陪伴 / 学习 的取向", group: "lines", def: true },
   { id: "conflict", label: "冲突核对", desc: "本地小模型核对事实矛盾；没配 endpoint 就自动跳过", group: "conflict", def: false },
   { id: "cueprompt", label: "取词器", desc: "每回合按话题取词（可能多一次模型调用）", group: "cueprompt", def: false },
@@ -8196,6 +8217,10 @@ function apply(ctx) {
   const lastCoreInjected = new Map();
   // v1.4（2026-11-17）四张卡各有自己的节奏：turn 计数、上次检查的轮次
   const cardPlan = new Map(); // sessionId -> { turn, core, rules, state, self }
+  // 卡内容指纹（2026-11-21）：用来判断「卡被改过」→ 立即强注入一次。
+  // ⚠️ 这个 Map 之前只被读写、从来没声明过：每次注入都抛 ReferenceError 被外层 catch 静默吃掉，
+  // 结果整段注入链（三张卡 / 人设全文 / 分数 / 探针）全都不执行，日志里一点痕迹都没有。
+  const lastRawCardHashes = new Map(); // sessionId -> { rules, core, state } sha1
   const pendingStrong = new Map(); // sessionId -> true：刚压缩过，下一步做一次强补充
   const supLayerPlan = new Map(); // sessionId -> { turn, check }：补充层每 8 轮查一次
   const recentRelInjected = new Map(); // sessionId -> Map(hash -> turn)：5 轮内别重复注入同一条关系
@@ -8525,16 +8550,70 @@ function apply(ctx) {
           rules: { every: 10, off: 5, thr: 0.1 },
           state: { every: 20, off: 10, thr: 0.1, weakOnly: true, toolTrigger: true },
         };
+        // v0.49.2 注入相位（丹阳 2026-11-21 定）：
+        //   1     = 压缩后首轮 / 会话首轮：三卡全量，三句说明合并成一句
+        //   2–5   = 静默：三张卡都不注入
+        //   ≥6    = 常规；每 100 轮再来一次全量（人设锚点刷新），并给人设分 −20
+        // 压缩时由 compaction 事件把 turn 归零（见 session/event 处理）
+        const phaseFile = path.join(MEM_DIR, "state", "inject-phase.json");
+        const phaseAll = readJson(phaseFile, {}) || {};
+        const phPhase = sessionId && phaseAll[sessionId] && typeof phaseAll[sessionId].turn === "number"
+          ? phaseAll[sessionId] : { turn: 0 };
+        const phaseUserKey = (() => { try { return lastUserText(decision.messages || []).key || ""; } catch { return ""; } })();
+        const phaseNext = nextPhaseTurn(phPhase, phaseUserKey);
+        phPhase.turn = phaseNext.turn;
+        phPhase.lastUserKey = phaseNext.lastUserKey;
+        const isNewUserTurn = phaseNext.isNew;
+        if (sessionId) { phaseAll[sessionId] = phPhase; writeJson(phaseFile, phaseAll); }
+        const phaseTurn = Number(phPhase.turn) || 0;
+        // 人设全文待补（2026-11-21 第二次修正）：判据用「>= 2 + 一次性标记」，不用「=== 2」。
+        // 等于 2 太脆：轮次一旦跳过去（同一个回话多步、重启、手动重置）就永远不再触发。
+        const personaDue = isNewUserTurn && phaseTurn >= 2 && phPhase.personaDone !== true;
+        try { diag(`注入入口 phaseTurn=${phaseTurn} isNew=${isNewUserTurn} personaDue=${personaDue} done=${phPhase.personaDone === true}`); } catch {}
+        // 每轮记账（2026-11-21）：人设分只按用户消息 +1。
+        // 必须紧贴相位计算——后面有若干早退分支（没东西可注入、PTC 后续步骤等），
+        // 放在它们后面等于永远不执行：分数冻在初始值上。
+        try {
+          const phCfg0 = normalizePersonaHint((loadConfig() || {}).personaHint || null);
+          if (phCfg0.mode !== "off" && isNewUserTurn) {
+            const phFile0 = path.join(MEM_DIR, "state", "persona-hint.json");
+            const ph0 = readJson(phFile0, null) || { turn: 0, value: phCfg0.score.value };
+            ph0.turn = (Number(ph0.turn) || 0) + 1;
+            if (typeof ph0.value !== "number") ph0.value = Number(phCfg0.score.value) || 60;
+            ph0.value = Math.min(Number(phCfg0.score.max) || 999, Number(ph0.value) + (Number(phCfg0.score.weakStep) || 1));
+            if (phaseTurn % 100 === 0) ph0.value = Math.max(0, ph0.value - 20);
+            writeJson(phFile0, ph0);
+            diag(`每轮记账 phaseTurn=${phaseTurn} 人设分=${ph0.value} 分数轮=${ph0.turn}`);
+          }
+        } catch {}
+        // 节奏（2026-11-21 丹阳定）：第 1 轮与 100 的倍数强注入，其余弱注入
+        const phase = phaseOf(phaseTurn);
+        const fullTurn = phase.full;
+        const silent = false;
+        const MERGED_HEAD = "以下是三张常驻卡（行为规则 / 核心记忆 / 当前状态）：压缩后首轮或每 100 轮全量给一次；已经遵守的不必重复念叨，按它做就行。";
+        // 2026-11-21 丹阳定（第三版）：取消三卡错开、取消弱提示。
+        //   全量轮（1、100、200…）三卡全量；内容改过立即全量；其余轮一张都不注入。
+        //   保留「内容变了必注入」，否则改了卡模型也看不见。
+        const rawHashes = {
+          rules: sha1(String(core.rawRules || "")),
+          core: sha1(String(core.rawCore || "")),
+          state: sha1(String(core.rawState || "")),
+        };
+        const lastRaw = lastRawCardHashes.get(sessionId) || {};
+        const changedNow = {
+          rules: Boolean(lastRaw.rules) && lastRaw.rules !== rawHashes.rules,
+          core: Boolean(lastRaw.core) && lastRaw.core !== rawHashes.core,
+          state: Boolean(lastRaw.state) && lastRaw.state !== rawHashes.state,
+        };
+        lastRawCardHashes.set(sessionId, rawHashes);
         const decide = (id, raw) => {
-          const p = cardPolicy[id];
           if (!raw) return "skip";
-          if (justCompressed || justStarted) return id === "state" ? "weak" : "strong";
-          const due = (plan.turn % p.every === (p.off || 0)) || (p.toolTrigger && hasToolCall);
-          if (!due) return "weak";
-          plan[id] = plan.turn;
-          const miss = missingRatioOf(raw, ctxNow);
-          if (p.weakOnly) return "weak";
-          return miss >= p.thr ? "strong" : "weak";
+          // 压缩兜底（2026-11-21 补回）：官方 compaction 事件会把相位归零，但「消息量骤降又没收到事件」
+          // 这条老路只设了 pendingStrong；不认它，三卡就再也回不来。
+          if (justCompressed) return "strong";
+          if (fullTurn) return "strong";
+          if (changedNow[id]) return "strong";
+          return "skip";
         };
         const modeCore = decide("core", core.rawCore);
         const modeRules = decide("rules", core.rawRules);
@@ -8952,7 +9031,8 @@ function apply(ctx) {
         } catch (err) {
           diag("熟人名片注入失败：" + (err && err.message || err));
         }
-        if (!text && !socialText && !handoffText && !recallText && !conflictText && !loreText && !circleText && !lostDetailText && !dueText && !openingText && !cueText && !nowText && !rulesForInject && !habitsForInject && !coreText && !coreStateForInject && !stateForInject && !resetNote) return decision;
+        // 第 2 轮只补人设全文：这时候三张卡和其它注入都没得给，早退会让这一条永远轮不到
+        if (!personaDue && !text && !socialText && !handoffText && !recallText && !conflictText && !loreText && !circleText && !lostDetailText && !dueText && !openingText && !cueText && !nowText && !rulesForInject && !habitsForInject && !coreText && !coreStateForInject && !stateForInject && !resetNote) return decision;
         const digest = sha1(`${text}\u0000${socialText}\u0000${handoffText}\u0000${recallText}\u0000${dueText}${openingText}\u0000${cueText}\u0000${nowText}\u0000${conflictText}\u0000${loreText}\u0000${circleText}\u0000${lostDetailText}\u0000${rulesForInject}\u0000${habitsForInject}\u0000${coreText}\u0000${coreStateForInject}\u0000${stateForInject}\u0000${resetNote}`);
         // v0.44.1：注入只跟着「用户说话」走——一条新用户消息只注入一次。
         // 触发源在外部（用户消息），注入本身不会再触发注入，也就不会自激循环。
@@ -8998,19 +9078,19 @@ function apply(ctx) {
         const stateMessage = stateForInject
           ? injectionMessage(`<puppet_state>\n${stateForInject}\n（这是当前互动取向，用自然语言体现，不要说出「权重/百分比/取向」这些词。）\n</puppet_state>`)
           : null;
-        const rulesMessage = rulesForInject
+        const rulesMessage = (!silent && rulesForInject)
           ? injectionMessage(
-              `<puppet_rules>\n以下是行为规则（behavior/core-rules.md：说话方式 / 红线 / 约定）。只在规则改过或上下文压缩后补一次；已经遵守的规则不必每轮重复念叨，按它做就行。\n${rulesForInject}${core.rulesClipped ? `\n（规则超 ${core.rulesBudget} 字预算，已截断；用 memory_core action=get target=rules 看全文）` : ""}${habitsForInject ? `\n【正在养的习惯】${habitsForInject}\n（做到就好，别僵硬；用 memory_learn 管）` : ""}\n</puppet_rules>`,
+              (fullTurn ? `<puppet_rules>\n${MERGED_HEAD}\n` : `<puppet_rules>\n以下是行为规则（behavior/core-rules.md：说话方式 / 红线 / 约定）。只在规则改过或上下文压缩后补一次；已经遵守的规则不必每轮重复念叨，按它做就行。\n`) + `${rulesForInject}${core.rulesClipped ? `\n（规则超 ${core.rulesBudget} 字预算，已截断；用 memory_core action=get target=rules 看全文）` : ""}${habitsForInject ? `\n【正在养的习惯】${habitsForInject}\n（做到就好，别僵硬；用 memory_learn 管）` : ""}\n</puppet_rules>`,
             )
           : null;
-        const coreMessage = coreText
+        const coreMessage = (!silent && coreText)
           ? injectionMessage(
-              `<puppet_core>\n以下是核心记忆（behavior/core.md：称呼约定 / 用户 / 能力这些不会经常变的内容；和其它记忆冲突时以它为准）：\n${coreText}${core.clipped ? `\n（核心记忆超 ${core.budget} 字预算，已截断；用 memory_core action=get 看全文，精简后 action=set 覆盖）` : ""}\n</puppet_core>`,
+              `<puppet_core>\n${fullTurn ? "" : "以下是核心记忆（behavior/core.md：称呼约定 / 用户 / 能力这些不会经常变的内容；和其它记忆冲突时以它为准）：\n"}${coreText}${core.clipped ? `\n（核心记忆超 ${core.budget} 字预算，已截断；用 memory_core action=get 看全文，精简后 action=set 覆盖）` : ""}\n</puppet_core>`,
             )
           : null;
-        const coreStateMessage = coreStateForInject
+        const coreStateMessage = (!silent && coreStateForInject)
           ? injectionMessage(
-              `<puppet_core_state>\n以下是当前状态（behavior/core-state.md：当前主线 / 进度 / 待办，会变的那部分）。变了才补，不变就不重复：\n${coreStateForInject}${core.stateClipped ? `\n（当前状态超 ${core.stateBudget} 字预算，已截断；用 memory_core action=get target=state 看全文）` : ""}\n</puppet_core_state>`,
+              `<puppet_core_state>\n${fullTurn ? "" : "以下是当前状态（behavior/core-state.md：当前主线 / 进度 / 待办，会变的那部分）。变了才补，不变就不重复：\n"}${coreStateForInject}${core.stateClipped ? `\n（当前状态超 ${core.stateBudget} 字预算，已截断；用 memory_core action=get target=state 看全文）` : ""}\n</puppet_core_state>`,
             )
           : null;
         // v0.47.0：人设弱注入（默认 off；实验模块，通用记忆插件不依赖它）
@@ -9020,7 +9100,7 @@ function apply(ctx) {
             if (phCfg.mode === "off") return null;
             const phFile = path.join(MEM_DIR, "state", "persona-hint.json");
             const phState = readJson(phFile, null) || { turn: 0, value: phCfg.score.value };
-            phState.turn = (Number(phState.turn) || 0) + 1;
+            // 轮次与分数由上面的「每轮记账」写好了，这里只读（别重复 +1）
             // 分数跟「上下文里人设部分是否完整」走，不跟扮演好坏走：
             // 缺卡 / 被截断 = 强注入（扣分或清零）；完整 = 弱注入（+1）
             // 联动①：核心卡**内容改过**也算一次状态刷新（不只是缺卡/截断）
@@ -9029,11 +9109,9 @@ function apply(ctx) {
             // 提示级注入（弱补充）是设计如此，不是"人设不全"——不能因此扣分，也不触发重载
             const coreHinted = Boolean(core && core.hinted);
             const personaIntact = coreHinted ? Boolean(coreText) : (Boolean(coreText) && !(core && core.clipped) && !coreChanged);
-            // A：数字＝实测完整度＝注入字数 ÷ 未裁剪原文长度（306 字的卡正常时是 100）
-            const fullChars = (core && core.rawCore ? String(core.rawCore).length : String(coreText || "").length);
-            // 只在「全量注入」那轮量完整度；提示级那轮沿用上次的值，不量
-            if (!coreHinted) phState.value = integrityScore(String(coreText || "").length, fullChars);
-            else if (typeof phState.value !== "number") phState.value = 100;
+            // 2026-11-21 丹阳定：分数改成累积锚点——60 起、每轮 +1、不封顶；
+            // 压缩 −随机(1–10)（见 compaction 事件）；每 100 轮全量卡 −20。
+            if (typeof phState.value !== "number") phState.value = Number(phCfg.score.value) || 60;
             const ticked = { ...phCfg.score, value: phState.value };
             phState.lastIntegrity = personaIntact ? "intact" : (coreChanged ? "core-changed" : "missing-or-clipped");
             phState.coreHash = coreHash;
@@ -9046,6 +9124,35 @@ function apply(ctx) {
             writeJson(phFile, phState);
             return line ? injectionMessage("<puppet_persona>" + String.fromCharCode(10) + line + String.fromCharCode(10) + "</puppet_persona>") : null;
           } catch (err) {
+            return null;
+          }
+        })();
+        // 2026-11-21 丹阳定：人设卡只写了「怎么做」，完整人设另存一份，
+        // 平时不注入——只在压缩后第 2 轮自动塞一次，之后靠那次建立的印象继续聊。
+        // 文件：behavior/persona-full.md
+        const personaRestMessage = (() => {
+          // 全链路回执（2026-11-21）：这几行是排障用的，别再让「没发生」和「发生了但没痕迹」混在一起
+          try { diag(`人设全文·入口 personaDue=${personaDue} phaseTurn=${phaseTurn}`); } catch {}
+          if (!personaDue) return null;
+          try {
+            const pfPath = path.join(MEM_DIR, "behavior", "persona-full.md");
+            const exists = fs.existsSync(pfPath);
+            const raw = exists ? String(fs.readFileSync(pfPath, "utf8")).trim() : "";
+            try { diag(`人设全文·读文件 exists=${exists} 字数=${raw.length} 路径=${pfPath}`); } catch {}
+            if (!raw) return null;
+            const BUDGET = 6400;
+            const text = raw.length > BUDGET
+              ? raw.slice(0, BUDGET) + `\n（人设全文超 ${BUDGET} 字，已截断；要看全直接读 behavior/persona-full.md）`
+              : raw;
+            // 记一次性标记 + 留回执：下次直接从 diag.log 就能证明「这一轮到底注没注」
+            try {
+              phPhase.personaDone = true;
+              if (sessionId) { phaseAll[sessionId] = phPhase; writeJson(phaseFile, phaseAll); }
+              diag(`人设全文注入 phaseTurn=${phaseTurn} 字数=${raw.length} 预算=${BUDGET} 截断=${raw.length > BUDGET}`);
+            } catch {}
+            return injectionMessage(`<puppet_persona_full>\n（以下是完整人设，压缩后只补这一次；后面凭这次建立的印象说话，不必逐条复述）\n${text}\n</puppet_persona_full>`);
+          } catch (e) {
+            try { diag("人设全文·异常：" + (e && e.message || e)); } catch {}
             return null;
           }
         })();
@@ -9134,7 +9241,7 @@ ${selfText}
           : null;
         return {
           kind: "enter",
-          messages: [...(decision.messages || []), ...mergeInjectionMessages([...(resetMessage ? [resetMessage] : []), ...(rulesMessage ? [rulesMessage] : []), ...(coreMessage ? [coreMessage] : []), ...(coreStateMessage ? [coreStateMessage] : []), ...(personaMsg ? [personaMsg] : []), ...(selfMessage ? [selfMessage] : []), ...(stateMessage ? [stateMessage] : []), ...(handoffMessage ? [handoffMessage] : []), ...(recallMessage ? [recallMessage] : []), ...(dueMessage ? [dueMessage] : []), ...(openingMessage ? [openingMessage] : []), ...(cueMessage ? [cueMessage] : []), ...(nowMessage ? [nowMessage] : []), ...(conflictMessage ? [conflictMessage] : []), ...(loreMessage ? [loreMessage] : []), ...(sayingMessage ? [sayingMessage] : []), ...(circleMessage ? [circleMessage] : []), ...(lostDetailMessage ? [lostDetailMessage] : []), ...(text ? [injectionMessage(text)] : []), ...(peopleText ? [injectionMessage(peopleText)] : []), ...(socialMessage ? [socialMessage] : [])])],
+          messages: [...(decision.messages || []), ...mergeInjectionMessages([...(resetMessage ? [resetMessage] : []), ...(rulesMessage ? [rulesMessage] : []), ...(coreMessage ? [coreMessage] : []), ...(coreStateMessage ? [coreStateMessage] : []), ...(personaMsg ? [personaMsg] : []), ...(personaRestMessage ? [personaRestMessage] : []), ...(selfMessage ? [selfMessage] : []), ...(stateMessage ? [stateMessage] : []), ...(handoffMessage ? [handoffMessage] : []), ...(recallMessage ? [recallMessage] : []), ...(dueMessage ? [dueMessage] : []), ...(openingMessage ? [openingMessage] : []), ...(cueMessage ? [cueMessage] : []), ...(nowMessage ? [nowMessage] : []), ...(conflictMessage ? [conflictMessage] : []), ...(loreMessage ? [loreMessage] : []), ...(sayingMessage ? [sayingMessage] : []), ...(circleMessage ? [circleMessage] : []), ...(lostDetailMessage ? [lostDetailMessage] : []), ...(text ? [injectionMessage(text)] : []), ...(peopleText ? [injectionMessage(peopleText)] : []), ...(socialMessage ? [socialMessage] : [])])],
         };
       } catch (err) {
         log("warn", `pre-step 注入失败：${err?.message || err}`);
@@ -9259,6 +9366,16 @@ ${selfText}
           lastRulesInjected.delete(sid);
           lastCoreStateInjected.delete(sid);
           lastStateInjected.delete(sid);
+          // 2026-11-21：注入相位归零（下一轮 = 首轮全量）；人设分 −随机(1–10)
+          try {
+            const pf = path.join(MEM_DIR, "state", "inject-phase.json");
+            const pall = readJson(pf, {}) || {};
+            pall[sid] = { turn: 0 };
+            writeJson(pf, pall);
+            const hpf = path.join(MEM_DIR, "state", "persona-hint.json");
+            const hps = readJson(hpf, null);
+            if (hps) { hps.turn = 0; hps.value = Math.max(0, Number(hps.value || 0) - (1 + Math.floor(Math.random() * 10))); writeJson(hpf, hps); }
+          } catch {}
           const r = res.record;
           diag(`压缩记录：${r.id} ${r.trigger === "command" ? "手动 /compact" : "自动"}，压掉 ${r.items} 条 / 省 ${r.savedTokens} tokens（${r.provider || "?"}/${r.model || "?"}）session=${sid}`);
           noteCompaction(sid, 1, r.model ? `官方 compaction 引擎（${r.provider}/${r.model}）` : "官方 compaction 引擎（dsh-compaction-basic）");
@@ -9985,6 +10102,15 @@ ${selfText}
             lastCoreStateInjected.delete(sid);
             lastStateInjected.delete(sid);
             lastInjected.delete(sid);
+            // 2026-11-21：注入决策现在看「相位 + 卡内容指纹」，这两样不清掉的话，复位后下一轮 decide() 全是 skip，
+            // 而回执还写着「重新注入一次」——实现和回执就对不上（测试子代理发现的第 1 号 bug）。
+            lastRawCardHashes.delete(sid);
+            try {
+              const pf = path.join(MEM_DIR, "state", "inject-phase.json");
+              const pall = readJson(pf, {}) || {};
+              pall[sid] = { turn: 0 };
+              writeJson(pf, pall);
+            } catch {}
             const note = String(args?.text || "").trim().slice(0, 200);
             if (note) sessionResetNotes.set(sid, note);
             else sessionResetNotes.delete(sid);
@@ -10128,7 +10254,7 @@ ${selfText}
     register({
       name: "memory_lorebook",
       description:
-        "约定书签（世界书）：把「跨会话要守的约定/口径/禁令」挂在关键词上，命中才注入，不命中一条都不带。**不是规则册**（R 编号是唯一源，书签不能覆盖规则），也不放背景设定/名词解释。**一条=一个事件**（name 是事件名，同一事件只存一条；换值用 update 改 state，不新开）。action=add（name+content+keywords，或 always=true）| update（按 id）| remove（按 id）| list | check（试命中）。",
+        "约定书签（世界书）：把「跨会话要守的约定/口径/禁令」挂在关键词上，命中才注入，不命中一条都不带。**不是规则册**（R 编号是唯一源，书签不能覆盖规则），也不放背景设定/名词解释。**一条=一个事件**（name 是事件名，同一事件只存一条；换值用 update 改 state，不新开）。action=add（name+content+keywords，或 always=true）| update（按 id）| remove（按 id）| list | check（试命中）。**locked=true 的书签不计入 30 条上限**（白名单）：长期要守的约定锁上就不占名额，也不会因为「到上限了」被逼着合并。",
       parameters: {
         type: "object",
         properties: {
@@ -10142,6 +10268,7 @@ ${selfText}
           priority: { type: "number", description: "0-100，默认 50；预算不够时高优先级先留" },
           always: { type: "boolean", description: "常驻（每轮都带）；只给全书级常识用，别滥用" },
           enabled: { type: "boolean", description: "update 用：true 恢复 / false 停用" },
+          locked: { type: "boolean", description: "锁定（白名单）：锁定的书签**不计入 30 条上限**，也不影响注入；传 false 解锁" },
           text: { type: "string", description: "check 用：拿一段话试命中" },
           includeDisabled: { type: "boolean", description: "list 用：连停用的也列" },
         },
@@ -10154,14 +10281,16 @@ ${selfText}
           const lb = loreLayer();
           const action = String(args?.action || "list");
           if (action === "add") {
-            const r = lb.add({ name: args?.name, keywords: args?.keywords, content: args?.content, priority: args?.priority, state: args?.state, stateAt: args?.stateAt, always: args?.always });
+            const r = lb.add({ name: args?.name, keywords: args?.keywords, content: args?.content, priority: args?.priority, state: args?.state, stateAt: args?.stateAt, always: args?.always, locked: args?.locked });
             if (!r.ok) return `加不了：${r.error}`;
-            return `已加书签 ${r.row.id}「${r.row.name}」${r.row.always ? "（常驻）" : `（关键词：${r.row.keywords.join("、")}）`}${r.row.state ? `，状态：${r.row.state}` : ""}，优先级 ${r.row.priority}。\n文件：${lb.files.lore}`;
+            const c0 = lb.counts();
+            return `已加书签 ${r.row.id}「${r.row.name}」${r.row.always ? "（常驻）" : `（关键词：${r.row.keywords.join("、")}）`}${r.row.state ? `，状态：${r.row.state}` : ""}${r.row.locked ? "，已锁定（不占名额）" : ""}，优先级 ${r.row.priority}。\n当前占名额 ${c0.counted}/${c0.cap}（锁定 ${c0.locked} 条不计）。\n文件：${lb.files.lore}`;
           }
           if (action === "update") {
-            const r = lb.update({ id: args?.id, name: args?.name, keywords: args?.keywords, content: args?.content, state: args?.state, stateAt: args?.stateAt, priority: args?.priority, always: args?.always, enabled: args?.enabled });
+            const r = lb.update({ id: args?.id, name: args?.name, keywords: args?.keywords, content: args?.content, state: args?.state, stateAt: args?.stateAt, priority: args?.priority, always: args?.always, enabled: args?.enabled, locked: args?.locked });
             if (!r.ok) return `改不了：${r.error}`;
-            return `已更新「${r.row.name}」：${r.row.enabled === false ? "已停用" : "生效中"}${r.row.always ? "／常驻" : ""}。`;
+            const c1 = lb.counts();
+            return `已更新「${r.row.name}」：${r.row.enabled === false ? "已停用" : "生效中"}${r.row.always ? "／常驻" : ""}${r.row.locked ? "／已锁定" : ""}。占名额 ${c1.counted}/${c1.cap}（锁定 ${c1.locked} 条不计）。`;
           }
           if (action === "remove") {
             const r = lb.remove({ id: args?.id });
@@ -10178,9 +10307,10 @@ ${selfText}
           }
           const list = lb.list({ includeDisabled: args?.includeDisabled });
           if (!list.length) return "世界书是空的（用 action=add 加一条）。";
+          const c = lb.counts();
           return [
-            `世界书 ${list.length} 条：`,
-            ...list.map((r) => `${r.id}「${r.name}」${r.always ? "常驻" : `关键词：${(r.keywords || []).join("、")}`}｜优先级 ${r.priority}${r.enabled === false ? "｜已停用" : ""}`),
+            `世界书 ${list.length} 条（占名额 ${c.counted}/${c.cap}，锁定 ${c.locked} 条不计，剩 ${c.left} 个名额）：`,
+            ...list.map((r) => `${r.id}「${r.name}」${r.always ? "常驻" : `关键词：${(r.keywords || []).join("、")}`}｜优先级 ${r.priority}${r.enabled === false ? "｜已停用" : ""}${r.locked ? "｜🔒锁定" : ""}`),
           ].join("\n");
         } catch (err) {
           return `世界书操作失败：${err?.message || err}`;
