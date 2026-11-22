@@ -25,14 +25,12 @@ t("显眼点：首轮必有，之后按间隔给，固定 100/100", () => {
 });
 t("不再有任何加减：首轮与第 100 轮都是 100/100", () => {
   assert.equal(personaHintLine({ mode: "score" }, 1), personaHintLine({ mode: "score" }, 100));
-  assert.equal(personaHintLine({ mode: "score" }, 25), "100/100");
 });
-t("前 300 轮每 25 轮给数字，300 之后按 100", () => {
-  assert.equal(personaHintLine({ mode: "score" }, 50), "100/100");
-  assert.equal(personaHintLine({ mode: "score" }, 51), "");
+t("单一间隔，不做分段（重启会重算轮次）", () => {
+  assert.equal(personaHintLine({ mode: "score" }, 25), "");
+  assert.equal(personaHintLine({ mode: "score" }, 50), "");
+  assert.equal(personaHintLine({ mode: "score" }, 100), "100/100");
   assert.equal(personaHintLine({ mode: "score" }, 300), "100/100");
-  assert.equal(personaHintLine({ mode: "score" }, 325), "");
-  assert.equal(personaHintLine({ mode: "score" }, 400), "100/100");
 });
 t("破损重载补全文，不夹分数、不报完整度", () => {
   const line = personaHintLine({ mode: "score" }, 7, { integrity: "broken", coreText: "我是雪风" });
