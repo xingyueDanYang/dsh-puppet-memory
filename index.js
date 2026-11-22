@@ -41,11 +41,12 @@ import { createPeopleStore } from "./people.js";
 import { createUpdateChecker, UPDATE_REPO } from "./update-check.js";
 import { integrityScore, normalizePersonaHint, personaHintLine, tickScore } from "./persona-hint.js";
 
-// 注入相位（2026-11-21）：会话首轮 / 压缩后首轮 / 每 100 轮 = 强注入；2–5 轮固定弱注入。
+// 注入相位（2026-11-21 定，2026-11-22 清理）：会话首轮 / 压缩后首轮 / 每 100 轮 = 全量注入，其余不注入。
+// 原来还有个 "2–5 轮固定弱注入" 的档位，11-21 起 decide() 只返回 strong/skip，那条分支再没走过，已删。
 // 抽成纯函数是为了可测——节奏不该只靠跑真实会话看。
 export function phaseOf(turn) {
   const t = Number(turn) || 0;
-  return { full: t === 1 || t % 100 === 0, weak: t >= 2 && t <= 5, turn: t };
+  return { full: t === 1 || t % 100 === 0, turn: t };
 }
 
 // 相位推进（2026-11-21 修正）：轮次按「用户消息」算，不按模型步骤算。

@@ -20,13 +20,13 @@ const ok = (name, cond, extra = "") => { if (cond) pass += 1; else fails.push(na
 // 1 = 强
 ok("第 1 轮强注入", phaseOf(1).full === true);
 // 2–5 = 固定弱
-for (let t = 2; t <= 5; t++) ok(`第 ${t} 轮弱注入`, phaseOf(t).weak === true && phaseOf(t).full === false);
+for (let t = 2; t <= 5; t++) ok(`第 ${t} 轮不注入（弱档已删）`, phaseOf(t).full === false && !("weak" in phaseOf(t)));
 // 6–99 = 非强非固定弱（走常规 due 节奏）
 for (let t = 6; t <= 99; t++) ok(`第 ${t} 轮走常规`, phaseOf(t).full === false);
 // 100 的倍数 = 强
 for (const t of [100, 200, 300, 1000]) ok(`第 ${t} 轮强注入`, phaseOf(t).full === true);
 // 101 起回到常规
-for (const t of [101, 150, 199, 201]) ok(`第 ${t} 轮走常规`, phaseOf(t).full === false && phaseOf(t).weak === false);
+for (const t of [101, 150, 199, 201]) ok(`第 ${t} 轮走常规`, phaseOf(t).full === false);
 // 分数起点
 ok("人设分从 60 起", personaHintDefaults.score.value === 60, String(personaHintDefaults.score.value));
 ok("分数上限足够高（不封顶）", personaHintDefaults.score.max >= 999, String(personaHintDefaults.score.max));
