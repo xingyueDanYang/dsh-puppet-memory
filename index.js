@@ -2186,32 +2186,31 @@ function buildDueInjection(cfg, { nowMs = Date.now(), persist = true } = {}) {
   ].join("\n");
 }
 
-// 2026-11-22 丹阳：关系层不再整层注入，但主词（keyword）出现在他的话里时要给一条提示。
-// 只做本地字符串匹配，零模型成本；命中最多 3 个词，一行说完，细节让他自己查。
-function buildRelationCue(userText) {
+// 2026-11-22 丹阳：关系层不整层注入；只有**人名和代称**出现在他的话里时才给一行提示。
+// 话题类主词（插件名、规则名、事件名）一律不触发——那些不叫「关系里的主词」。
+// 名单可在 config.relationCue.persons 里改，写法 "丹阳|丹阳哥|他"＝主名|别名|别名。
+const RELATION_CUE_PERSONS = ["丹阳", "雪风", "克劳德", "大肥鱼", "千问", "豆包", "龙娘", "MOSS", "Grok", "主人"];
+function relationCuePersons(cfg) {
+  const rc = (cfg && cfg.relationCue) || {};
+  const list = Array.isArray(rc.persons) && rc.persons.length ? rc.persons : RELATION_CUE_PERSONS;
+  const out = [];
+  for (const raw of list) {
+    const parts = String(raw || "").split("|").map((s) => s.trim()).filter(Boolean);
+    if (!parts.length) continue;
+    out.push({ name: parts[0], words: parts });
+  }
+  return out;
+}
+function buildRelationCue(userText, cfg) {
   const t = String(userText || "");
   if (t.length < 2) return "";
-  let rows = [];
-  try { rows = readJsonl(path.join(MEM_DIR, "behavior", "relations.jsonl")); } catch { return ""; }
   const hits = [];
-  for (const r of rows) {
-    if (!r || r.voided) continue;
-    const kw = String(r.keyword || "").trim();
-    if (kw.length < 2) continue;
-    // 关键词常写成「克劳德（Claude）」「小黑盒评论区回复规矩」这种整句：
-    // 先按分隔符切词；长词再加 3/4 字前缀（主词一般在开头），任一处命中即算。
-    const tokens = kw.split(/[·、,，/｜|（）()\s]+/).map((x) => x.trim()).filter((x) => x.length >= 2);
-    const cands = [];
-    for (const tok of tokens) {
-      cands.push(tok);
-      if (tok.length > 6) cands.push(tok.slice(0, 4), tok.slice(0, 3));
-    }
-    const hit = cands.find((x) => x.length >= 2 && t.includes(x));
-    if (hit) hits.push(hit);
+  for (const p of relationCuePersons(cfg)) {
+    if (p.words.some((w) => w.length >= 2 && t.includes(w))) hits.push(p.name);
   }
   const uniq = [...new Set(hits)].slice(0, 3);
   if (!uniq.length) return "";
-  return "【记忆·关系提示】这轮提到了：" + uniq.join("、") + "。要细节用 memory_search 查这些词（关系层不整层注入）。";
+  return "【记忆·关系提示】这轮提到了：" + uniq.join("、") + "。关系层里有相关条目，要细节用 memory_search 查人名（不整层注入）。";
 }
 
 function buildInjectionText(cfg, coreUsed = 0, lines = null, opts = {}) {
@@ -9159,7 +9158,7 @@ function apply(ctx) {
         // 关系主词提示：命中就一行（不注入整层）
         let relCueText = "";
         try {
-          if (!cardsOnly && !suppressed.has("relations")) relCueText = buildRelationCue(userTextNow);
+          if (!cardsOnly && !suppressed.has("relations")) relCueText = buildRelationCue(userTextNow, cfg);
         } catch {}
         try {
           const supPlan = supLayerPlan.get(sessionId) || { turn: 0, check: 0 };
