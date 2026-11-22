@@ -28,8 +28,8 @@ for (const t of [100, 200, 300, 1000]) ok(`第 ${t} 轮强注入`, phaseOf(t).fu
 // 101 起回到常规
 for (const t of [101, 150, 199, 201]) ok(`第 ${t} 轮走常规`, phaseOf(t).full === false);
 // 分数起点
-ok("人设分从 60 起", personaHintDefaults.score.value === 60, String(personaHintDefaults.score.value));
-ok("分数上限足够高（不封顶）", personaHintDefaults.score.max >= 999, String(personaHintDefaults.score.max));
+ok("数字节奏默认 100 轮", personaHintDefaults.everyN === 100, String(personaHintDefaults.everyN));
+ok("不再有分数配置（加减已删）", personaHintDefaults.score === undefined, JSON.stringify(personaHintDefaults.score));
 
 // 相位推进只认「用户消息」（2026-11-21 修正）：一个回话里多个工具步骤不能把轮次走完
 const step = (prev, key) => nextPhaseTurn(prev, key);
