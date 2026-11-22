@@ -57,11 +57,13 @@ export function phaseOf(turn) {
 // 首轮跑 3 步就等于把 ~1800 字的三卡发 3 遍（去重白名单又放行）。
 // 顺序有讲究：内容改过 / 压缩后 / 首轮 都优先，之后才看「这一轮是不是已经发过」。
 export function cardInjectMode({ justStarted = false, justCompressed = false, fullTurn = false, changed = false, sameTurnDone = false } = {}) {
-  if (justStarted) return "strong";
-  if (justCompressed) return "strong";
-  if (changed) return "strong";
-  if (sameTurnDone) return "skip";
-  if (fullTurn) return "strong";
+  // 顺序很重要（2026-11-22 实测修）：justStarted 是「plan.turn===1」，同一轮的所有工具步骤都为真，
+  // 放在 sameTurnDone 前面就永远跳过不了——pid 16680 的 turn=1 连发 4 次就是这么来的。
+  if (changed) return "strong";       // 卡内容改过：同轮也要发
+  if (justCompressed) return "strong"; // 压缩后补一次
+  if (sameTurnDone) return "skip";    // 这一轮已经发过
+  if (justStarted) return "strong";   // 首轮第一步
+  if (fullTurn) return "strong";      // 第 100 轮第一步
   return "skip";
 }
 

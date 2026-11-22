@@ -9,6 +9,8 @@ const ok = (name, cond, extra = "") => { if (cond) pass += 1; else fails.push(na
 // 首轮：第一步全量，后续步骤跳过
 ok("首轮第一步：全量", cardInjectMode({ justStarted: true }) === "strong");
 ok("首轮第二步：跳过", cardInjectMode({ fullTurn: true, sameTurnDone: true }) === "skip");
+ok("首轮第二步（justStarted 仍为真）：跳过", cardInjectMode({ justStarted: true, fullTurn: true, sameTurnDone: true }) === "skip");
+ok("首轮内容改过：仍发", cardInjectMode({ justStarted: true, sameTurnDone: true, changed: true }) === "strong");
 
 // 第 100 轮同理
 const p100 = phaseOf(100);
