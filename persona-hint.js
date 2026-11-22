@@ -33,7 +33,11 @@ export function personaHintLine(hint, turn, opts) {
     const headLine = "【人设卡重载】上下文里的人设不完整（压缩或截断），下面是完整的人设，按它说话：";
     return card ? headLine + String.fromCharCode(10) + card : "";
   }
-  // 每轮都给：数字锚 + （可选）鼓励词。不带说明、不带标记。
-  const anchor = "100/100";
-  return h.encourage ? anchor + String.fromCharCode(10) + h.encourage : anchor;
+  // 数字锚：首轮 + 每 25 轮一次（2026-11-21 定下的机制，不改；我刚才把它改成"每轮"是改错了，已回退）。
+  // 鼓励词：每轮都给（方向锚）；到数字轮时两者一起给。
+  const n = 25;
+  const numDue = turn === 1 || turn % n === 0;
+  const anchor = numDue ? "100/100" : "";
+  if (h.encourage) return anchor ? anchor + String.fromCharCode(10) + h.encourage : h.encourage;
+  return anchor;
 }
