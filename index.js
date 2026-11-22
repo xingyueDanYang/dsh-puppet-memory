@@ -52,6 +52,19 @@ export function phaseOf(turn) {
 // 相位推进（2026-11-21 修正）：轮次按「用户消息」算，不按模型步骤算。
 // 一个回话里模型要跑很多步（每次工具调用一步），按步计的话「压缩后第 2 轮」在第一次
 // 回话内部就走完了，人设全文永远等不到。同一条用户消息视为同一轮，不递增。
+// 2026-11-22：三卡「同一轮只发一次」的判据（纯函数，便于测）。
+// 起因：decide() 只要 fullTurn 就 strong，而 phase.turn 在同一条用户消息的所有工具步骤里不变，
+// 首轮跑 3 步就等于把 ~1800 字的三卡发 3 遍（去重白名单又放行）。
+// 顺序有讲究：内容改过 / 压缩后 / 首轮 都优先，之后才看「这一轮是不是已经发过」。
+export function cardInjectMode({ justStarted = false, justCompressed = false, fullTurn = false, changed = false, sameTurnDone = false } = {}) {
+  if (justStarted) return "strong";
+  if (justCompressed) return "strong";
+  if (changed) return "strong";
+  if (sameTurnDone) return "skip";
+  if (fullTurn) return "strong";
+  return "skip";
+}
+
 export function nextPhaseTurn(prev, userKey) {
   const turn = Number(prev && prev.turn) || 0;
   const key = String(userKey || "");
@@ -8656,6 +8669,7 @@ function apply(ctx) {
   // ⚠️ 这个 Map 之前只被读写、从来没声明过：每次注入都抛 ReferenceError 被外层 catch 静默吃掉，
   // 结果整段注入链（三张卡 / 人设全文 / 分数 / 探针）全都不执行，日志里一点痕迹都没有。
   const lastRawCardHashes = new Map(); // sessionId -> { rules, core, state } sha1
+  const lastCardsTurn = new Map(); // sessionId -> 上一次全量注入三卡时的 phaseTurn（同一轮不重复发）
   const pendingStrong = new Map(); // sessionId -> true：刚压缩过，下一步做一次强补充
   const supLayerPlan = new Map(); // sessionId -> { turn, check }：补充层每 8 轮查一次
   const recentRelInjected = new Map(); // sessionId -> Map(hash -> turn)：5 轮内别重复注入同一条关系
@@ -9037,20 +9051,23 @@ function apply(ctx) {
           state: Boolean(lastRaw.state) && lastRaw.state !== rawHashes.state,
         };
         lastRawCardHashes.set(sessionId, rawHashes);
+        // 2026-11-22：同一轮只发一次——按 (会话, phaseTurn) 记守位；内容改过仍然立刻发。
+        const sameTurnDone = Number(lastCardsTurn.get(sessionId)) === phaseTurn && phaseTurn > 0;
         const decide = (id, raw) => {
           if (!raw) return "skip";
-          // 首轮（新会话 / 重启后的第一轮）永远全量：模型刚起来，三卡必须先立住
-          if (justStarted) return "strong";
-          // 压缩兜底（2026-11-21 补回）：官方 compaction 事件会把相位归零，但「消息量骤降又没收到事件」
-          // 这条老路只设了 pendingStrong；不认它，三卡就再也回不来。
-          if (justCompressed) return "strong";
-          if (fullTurn) return "strong";
-          if (changedNow[id]) return "strong";
-          return "skip";
+          return cardInjectMode({
+            justStarted,
+            justCompressed,
+            fullTurn,
+            changed: Boolean(changedNow[id]),
+            sameTurnDone,
+          });
         };
         const modeCore = decide("core", core.rawCore);
         const modeRules = decide("rules", core.rawRules);
         const modeState = decide("state", core.rawState);
+        // 这一轮发过就记下：同一条用户消息的后续工具步骤不再重复发三卡
+        if (modeCore === "strong" || modeRules === "strong" || modeState === "strong") lastCardsTurn.set(sessionId, phaseTurn);
         cardPlan.set(sessionId, plan);
         diag(`卡片节奏 turn=${plan.turn} core=${modeCore} rules=${modeRules} state=${modeState}${justCompressed ? "（压缩后强补充）" : ""}`);
         // 2026-11-21：decide() 只返回 strong / skip（弱提示已取消），不再有 weak 分支
@@ -10535,6 +10552,7 @@ function apply(ctx) {
             // 2026-11-21：注入决策现在看「相位 + 卡内容指纹」，这两样不清掉的话，复位后下一轮 decide() 全是 skip，
             // 而回执还写着「重新注入一次」——实现和回执就对不上（测试子代理发现的第 1 号 bug）。
             lastRawCardHashes.delete(sid);
+            lastCardsTurn.delete(sid);
             try {
               const pf = path.join(MEM_DIR, "state", "inject-phase.json");
               const pall = readJson(pf, {}) || {};
