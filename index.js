@@ -2214,7 +2214,8 @@ function buildRelationCue(userText) {
   if (t.length < 2) return "";
   const hits = [];
   for (const p of relationCuePersons()) {
-    const w = p.words.find((x) => t.includes(x));
+    // 同一人可能同时命中「雪风」和「雪风大人」——报最长的那个，才像在叫他
+    const w = p.words.slice().sort((x, y) => y.length - x.length).find((x) => t.includes(x));
     if (w) hits.push(w);
   }
   const uniq = [...new Set(hits)].slice(0, 3);
