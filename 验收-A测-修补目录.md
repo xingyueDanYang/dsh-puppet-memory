@@ -383,3 +383,20 @@
 | 〔成本〕补充层「每 8 轮按缺失比例查一层」是忘删的旧设计；且首轮 cardsOnly 会清空，首轮那遍白算 | 整段删除；触发点收敛成**第 2 轮 + 压缩后**；首轮不再计算 | test/session-memory 28 项（第 2 轮补人设 / 第 3 轮起不再补）；diag 首轮无「补充层注入」 | 回到 0.50.1 |
 | 〔默认〕关系层整层注入（每轮带关系正文），信息密度低、占预算 | 关系不进补充层；改成**主词命中给一行提示**：只认关系文件里 tags 带「称呼 / 身份」的条目，别名算代称，报命中的最长词，一次最多 3 个 | test/relation-cue 6 项；实测「雪风大人在吗」→ 提了雪风大人、「记忆插件又出问题了」→ 空 | 删 buildRelationCue 调用即回旧形态 |
 | 〔无〕persona-hint 头部注释写「every 轮给数字」，与代码（首轮 + 每 25 轮）不符 | 注释改成与实现一致 | 读文件 line 9-10 | git 恢复 |
+
+
+## 0.51.0-dev（未发版：幕表补写侧）
+
+| 现象 | 修法 | 怎么验 | 回滚 |
+|---|---|---|---|
+| 〔缺口〕「到期主动提起」只有读侧（每天首次 + 提前 7 天），写侧只有三条入口——活日记整理要配本地端点且小模型判 event、opening_add 要用户明说、面板手改。普通对话里的「快递后天到驿站」「下周三还钱」没有任何入口，幕表永远是空的（2.2 基准 27 道到期题实测 0/27） | 新增 `opening-autorecord.js`：每轮原文（活日记 leisure 轮）与笔记落盘时，用 `parseWhen` 抽「未来日期 + 具体事项」→ `addOpeningRow(once:true, source:"…·自动登记")`；假设句 / 正反问 / 解析不出 / 同天同事项重复一律不记 | `node test/opening-autorecord.mjs` 11 项；`opening-table` 31 项、`due` 26 项、`agreement-watch` 53 项全过；隔离库实测两条连写只登记 1 行、假设句 0 行 | 删 `autoRegisterOpening` 两处调用（`queueNonWork` 与 note 分支）即回 0.50.2 |
+| 〔范围〕只在 note 与活日记两个入口挂，relation/user/memo/saying/diary/persona 的写入进不来（关系层常写「说明天还我钱」这类） | 挂到 `writeMemory` 总入口：所有层写入都过一遍，文本取 text/meaning/keyword/note | 隔离库实测 memo / relation / user 三种写入都能登记；relation 用 keyword 当主词 | 删 writeMemory 里那一段即回 |
+| 〔语义〕只有时间词，不知道「这是谁的事」，换个说法就重复登记 | 主词/副词**借**记录册（sub+aliases）与关系层（keyword+aliases），取最长词匹配；句子内没有就沿用整段的主词。判重升级成「同一天 + 同主词 + 同动作（还/到/取/交…）」 | 单测「霜姐说明天还我一百二」→ sub=霜霜；同主词同天换说法只 1 行；不同主词不误判 | 去掉 entities 参数与 sub/attr 字段即回 |
+| 〔打包〕新增 opening-autorecord.js 后 package.json 的 files 白名单没加——npm 发出去会缺文件、装上就崩（预检「打包白名单」抓到） | files 加一行；同步副本 | `node /e/dshf/gz/release/preflight.mjs` → 20/20 通过、4 跳过 | 删那一行 |
+| 〔噪音〕读侧提前 7 天预告：同一件事从一周前开始每天提一次，到当天反而没了区别 | `opening.lookaheadDays` 默认 7→1（只提今天+明天），真库 config 同步改；历史「7 天」写法保留在 0.40 变更说明里并加注 | `opening-table` 用例「今天出现 / 明天出现 / 后天不提前提」 | 配置改回 7 |
+| 〔丢提醒〕销账按全量 `hits` 走，但只显示前 `maxItems` 条——第 6 条起没显示却被删（静默丢失） | 显示多少销多少：`shown` 单独切出来，销账只按 `shown` 的 hash；没轮上的留着下次看 | `opening-table` 用例「maxItems=1 只显示一条 / 没轮上显示的还留在表里」；36 项全过 | 改回按 hits 销 |
+| 〔分工〕有具体钟点的事（「明天下午三点取件」）跟没钟点的事混在一条通道里，只能等下一次打开才提 | 两条走法：抽取时存 `time`（HH:mm），带钟点的行**不进开幕表正文**、只报一句「另有 N 条走计划任务」；由每天 07:00 的「幕表排任务」计划任务扫表建一次性 `schedule_create`（DTSTART 当天该时刻 + COUNT=1） | `opening-table` 39 项（含「带钟点不进正文/只报一句/没钟点照常提」）；`opening-autorecord` 11 项（含 time=15:00、无钟点为空） | 删 `time` 传递与注入里的 skip |
+| 〔能力缺口〕插件没有「主动发消息」的入口（只有 ctx.on/inject/tools），所以「到点发」只能靠宿主计划任务；计划任务又只在宿主开着时补投 | B 方案兜底：新增 `buildTimedDueInjection`——到点后的第一轮提一次（今天 + 带 time + 已过点 + 今天没提过），每条每天一次、隔天不补；与开幕表共用入口，首轮不构建（省得白标已提） | `opening-table` 45 项（含没到点不提/到点提一次/同天不重复/隔天不补/关掉不提）；隔离库集成测：写入一行已过点 → 第一次提、第二次空 | 删调用与函数 |
+| 〔能力〕插件不主动推送，「到点发」只能靠宿主计划任务；我先前说「宿主没暴露接口」是没翻宿主包就下的结论 | 翻 `app.asar` 后照抄 `@deepseek-ai/dsh-schedule` 的投递：`agent.followup(createUserMessage(...))` + `ctx.sessions.flush()`。实现 `pushTick`：60 秒轮询、到点往最近活跃会话插一条；开关 `opening.push`（默认关，开着时到点通道让位） | `opening-table` 49 项（含「没到点不推 / 到点选出 1 条 / 推过不再推 / push 开着时到点通道让位」）；真实推送**未实测**（需重启 + 开开关） | 删 pushTick 与定时器 |
+| 〔重复〕活日记整理时，带时间的约定会「转一条幕表 + 再写一条〔幕表〕书签索引并立即标废」；幕表已有自动登记（opening-autorecord），同一件事记两遍，且这条路要本地端点 + 小模型 | 删掉「转幕表」整段分支：约定照旧进书签（关键词命中），时点由自动登记负责；同时去掉 `turned` 计数与未用的 `parseWhen` 导入 | `agreement-watch` 53 项、`agreement-judge` 9 项、`opening-table` 49 项全过；代码里 `转幕表` 0 命中 | 从备份/ git 恢复那段分支 |
+| 〔未实测〕真实记忆库里的登记噪声（每天闲聊里的「明天/下周」会不会灌满幕表） | 未上真机——需要重启宿主后观察一周；已设硬上限 400 行、每条源带「活日记/笔记·自动登记」便于回溯 | 重启后看 `deep/opening-table.jsonl` 新增行的 source 与条数 | 同上 |

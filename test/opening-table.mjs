@@ -130,6 +130,63 @@ try {
   const tLeap2 = String(mod.buildOpeningInjection(cfg, { nowMs: at("2028-02-25") }));
   ok("闰年仍按 2/29", tLeap2.includes("2028-02-29"), tLeap2.slice(0, 200));
 
+  // 16) 超出显示上限的不许被销账（2026-11-22 修：原来按全量 hits 销，第 6 条起静默丢）
+  writeTable([
+    { date: "2026-11-22", label: "今天第一件", once: true },
+    { date: "2026-11-22", label: "今天第二件", once: true },
+  ]);
+  const tCap = String(mod.buildOpeningInjection({ opening: { enabled: true, lookaheadDays: 1, maxItems: 1 } }, { nowMs: at("2026-11-22") }));
+  ok("maxItems=1 只显示一条", tCap.includes("今天第一件") && !tCap.includes("今天第二件"), tCap.slice(0, 160));
+  ok("没轮上显示的还留在表里", readTable().some((r) => r.label === "今天第二件"), JSON.stringify(readTable()).slice(0, 160));
+
+  // 17) 窗口=今天+明天
+  writeTable([
+    { date: "2026-12-01", label: "今天的事", once: true },
+    { date: "2026-12-02", label: "明天的事", once: true },
+    { date: "2026-12-03", label: "后天的事", once: true },
+  ]);
+  const tWin = String(mod.buildOpeningInjection({ opening: { enabled: true, lookaheadDays: 1, maxItems: 5 } }, { nowMs: at("2026-12-01") }));
+  ok("今天出现", tWin.includes("今天的事"), tWin.slice(0, 160));
+  ok("明天也出现", tWin.includes("还有 1 天") && tWin.includes("明天的事"), tWin.slice(0, 220));
+  ok("后天不再提前提", !tWin.includes("后天的事"), tWin.slice(0, 220));
+
+  // 18) 带钟点的行走计划任务，不在开幕表里提（2026-11-22 丹阳定的两种走法）
+  writeTable([
+    { date: "2026-12-05", label: "下午三点的取件", time: "15:00", once: true },
+    { date: "2026-12-05", label: "没钟点的杂事", once: true },
+  ]);
+  const tTimed = String(mod.buildOpeningInjection({ opening: { enabled: true, lookaheadDays: 1, maxItems: 5 } }, { nowMs: at("2026-12-05") }));
+  ok("带钟点的不进开幕表正文", !tTimed.includes("下午三点的取件"), tTimed.slice(0, 200));
+  ok("只报一句「走计划任务」", tTimed.includes("1 条带具体时间的提醒走计划任务"), tTimed.slice(0, 240));
+  ok("没钟点的照常提", tTimed.includes("没钟点的杂事"), tTimed.slice(0, 240));
+
+  // 19) 到点通道（带钟点的条目：到点后第一轮提一次，隔天不补）
+  writeTable([{ date: "2026-12-10", label: "下午三点的取件", time: "15:00", once: true, hash: "hh-timed-1" }]);
+  const atHM = (s) => new Date(s + "+08:00").getTime();
+  const tEarly = String(mod.buildTimedDueInjection({ opening: { enabled: true } }, { nowMs: atHM("2026-12-10T14:00:00") }));
+  ok("没到点不提", tEarly === "", tEarly.slice(0, 120));
+  const tDue = String(mod.buildTimedDueInjection({ opening: { enabled: true } }, { nowMs: atHM("2026-12-10T15:05:00") }));
+  ok("到点提一次", tDue.includes("今天 15:00") && tDue.includes("取件"), tDue.slice(0, 160));
+  ok("抬头是幕表·到点", tDue.includes("幕表·到点"), tDue.slice(0, 60));
+  const tAgain = String(mod.buildTimedDueInjection({ opening: { enabled: true } }, { nowMs: atHM("2026-12-10T18:00:00") }));
+  ok("同一天不重复提", tAgain === "", tAgain.slice(0, 120));
+  const tNext = String(mod.buildTimedDueInjection({ opening: { enabled: true } }, { nowMs: atHM("2026-12-11T09:00:00") }));
+  ok("隔天不再补", tNext === "", tNext.slice(0, 120));
+  const tOff = String(mod.buildTimedDueInjection({ opening: { enabled: false } }, { nowMs: atHM("2026-12-10T16:00:00") }));
+  ok("开关关掉就不提", tOff === "", tOff.slice(0, 120));
+
+  // 20) 主动推送（C）：选行 + 标记 + 到点通道让位
+  writeTable([{ date: "2026-12-12", label: "下午四点的取件", time: "16:00", once: true, hash: "push-1" }]);
+  const pEarly = mod.collectPushDueRows(atHM("2026-12-12T15:00:00"));
+  ok("没到点不推", pEarly.length === 0, JSON.stringify(pEarly));
+  const pDue = mod.collectPushDueRows(atHM("2026-12-12T16:30:00"));
+  ok("到点选出 1 条", pDue.length === 1 && pDue[0].label.includes("取件"), JSON.stringify(pDue).slice(0, 160));
+  mod.markPushDone(pDue, atHM("2026-12-12T16:30:00"));
+  const pAgain = mod.collectPushDueRows(atHM("2026-12-12T18:00:00"));
+  ok("推过不再推", pAgain.length === 0, JSON.stringify(pAgain));
+  const pOff = mod.buildTimedDueInjection({ opening: { enabled: true, push: true } }, { nowMs: atHM("2026-12-12T17:00:00") });
+  ok("push 开着时到点通道让位", String(pOff) === "", String(pOff).slice(0, 120));
+
   // 13) 文件缺失不崩
   fs.unlinkSync(TABLE);
   const t10 = String(mod.buildOpeningInjection(cfg, { nowMs: at("2027-10-15") }));
