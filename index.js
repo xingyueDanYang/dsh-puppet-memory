@@ -269,6 +269,8 @@ function assetTypeOfExt(ext) {
 // 老 index.json 条目没有 type，按扩展名推断（认不出就当图片，保持旧行为）
 function assetTypeOf(file, meta) {
   if (meta && (meta.type === "audio" || meta.type === "image")) return meta.type;
+  // 2026-11-22：.md 是索引/说明文件（如 assets/音频索引.md），不是资产——不能落到「认不出当图片」的旧行为里
+  if (/\.md$/i.test(String(file || ""))) return "";
   return assetTypeOfExt(path.extname(String(file || ""))) || "image";
 }
 
@@ -278,15 +280,13 @@ function assetTypeOf(file, meta) {
 // 三组维度：来源（哪来的）/ 内容（是什么声）/ 用途（拿来干嘛）。
 // 只做**整文件级**分类，不做分段、不做时间轴跳转（丹阳 2026-10-26 定）。
 // ---------------------------------------------------------------------------
-const AUDIO_SOURCE = ["mic", "voice", "track", "music"];
-const AUDIO_KIND = ["dialog", "monolog", "music", "ambient", "mixed"];
-const AUDIO_USE = ["evidence", "material", "reference"];
-const AUDIO_LABEL = {
-  mic: "自己录", voice: "QQ语音", track: "视频音轨", musicFile: "音乐文件",
-  dialog: "人声对话", monolog: "独白", ambient: "环境音", mixed: "混合",
-  evidence: "原话证据", material: "素材", reference: "参考",
-};
-const AUDIO_CLASS_FIELDS = ["source", "kind", "use", "duration", "lang", "from"];
+// 2026-11-22 丹阳定：三组维度（来源/内容/用途 = 12 个值）收成**一维四值**：
+//   对话 / 独白 / 音乐 / 环境（原 ambient + mixed 合并）。
+// 来源不再单列（记在 from 里：文件名/BV 号），用途不再单列（默认都是素材，有转写就算证据）。
+const AUDIO_KIND = ["dialog", "monolog", "music", "ambient"];
+const AUDIO_KIND_LEGACY = { mixed: "ambient" };
+const AUDIO_LABEL = { dialog: "对话", monolog: "独白", music: "音乐", ambient: "环境" };
+const AUDIO_CLASS_FIELDS = ["kind", "duration", "lang", "from"];
 
 function pickAudioEnum(value, allowed) {
   const v = String(value ?? "").trim().toLowerCase();
@@ -297,12 +297,10 @@ function pickAudioEnum(value, allowed) {
 function audioClassOf(item) {
   const out = {};
   if (!item || typeof item !== "object") return out;
-  const source = pickAudioEnum(item.source, AUDIO_SOURCE);
-  if (source) out.source = source;
-  const kind = pickAudioEnum(item.kind, AUDIO_KIND);
+  // 旧值兼容：mixed 归到 ambient；source/use 一律忽略（老数据不报错，只是不再写）
+  const rawKind = String(item.kind ?? "").trim().toLowerCase();
+  const kind = pickAudioEnum(AUDIO_KIND_LEGACY[rawKind] || rawKind, AUDIO_KIND);
   if (kind) out.kind = kind;
-  const use = pickAudioEnum(item.use, AUDIO_USE);
-  if (use) out.use = use;
   const dur = Number(item.duration);
   if (Number.isFinite(dur) && dur > 0) out.duration = Math.round(dur);
   if (item.lang) out.lang = clip(String(item.lang), 12);
@@ -313,11 +311,7 @@ function audioClassOf(item) {
 // 一行展示：〔QQ语音·人声对话·原话证据〕
 function audioClassTag(meta) {
   if (!meta) return "";
-  const bits = [
-    meta.source ? AUDIO_LABEL[meta.source] || meta.source : "",
-    meta.kind ? AUDIO_LABEL[meta.kind] || meta.kind : "",
-    meta.use ? AUDIO_LABEL[meta.use] || meta.use : "",
-  ].filter(Boolean);
+  const bits = [meta.kind ? AUDIO_LABEL[meta.kind] || meta.kind : ""].filter(Boolean);
   return bits.length ? `〔${bits.join("·")}〕` : "";
 }
 
@@ -333,6 +327,47 @@ function loadAssetIndex() {
 function saveAssetIndex(idx) {
   idx.version = 2;
   writeJson(ASSET_INDEX, idx);
+}
+
+// 2026-11-22 丹阳定：音频要有一份**人读的索引**（assets/音频索引.md），一行一个音频：
+// 文件 | 分类 | 时长 | 一句话 | 出处。分类只有四值（对话/独白/音乐/环境）；写音频时自动重建。
+function renderAudioIndex() {
+  const idx = loadAssetIndex();
+  const rows = [];
+  try {
+    for (const f of fs.readdirSync(PATHS.assets)) {
+      if (f === "index.json" || f === "音频索引.md") continue;
+      let st;
+      try { st = fs.statSync(path.join(PATHS.assets, f)); } catch { continue; }
+      if (!st.isFile()) continue;
+      const meta = idx.images[f] || {};
+      if (assetTypeOf(f, meta) !== "audio") continue;
+      const kind = meta.kind ? AUDIO_LABEL[meta.kind] || meta.kind : "未分类";
+      const dur = meta.duration ? meta.duration + " 秒" : "—";
+      const one = meta.transcript ? clip(String(meta.transcript).replace(/\s+/g, " "), 40)
+        : (meta.note ? clip(String(meta.note).replace(/\s+/g, " "), 40) : "—");
+      rows.push("| " + f + " | " + kind + " | " + dur + " | " + one + " | " + (meta.from || "—") + " |");
+    }
+  } catch {}
+  return [
+    "# 音频索引（自动生成，别手改）",
+    "",
+    "共 " + rows.length + " 个音频。分类只有四值：对话 / 独白 / 音乐 / 环境。",
+    "",
+    "| 文件 | 分类 | 时长 | 一句话 | 出处 |",
+    "|---|---|---|---|---|",
+    ...rows,
+  ].join("\n") + "\n";
+}
+
+function writeAudioIndex() {
+  try {
+    fs.mkdirSync(PATHS.assets, { recursive: true });
+    fs.writeFileSync(path.join(PATHS.assets, "音频索引.md"), renderAudioIndex(), "utf8");
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function safeAssetName(name, fallback) {
@@ -494,6 +529,7 @@ function mediaRefsOf(args) {
   add(args.images, args.imageNames, []);
   add(args.audios, args.audioNames, args.transcripts);
   const stored = storeAssets(list);
+  if (list.some((x) => /audio/i.test(String(x.type || ""))) || args?.audios) writeAudioIndex();
   const ok = stored.filter((r) => r.ref);
   return {
     images: ok.filter((r) => r.type !== "audio"),
@@ -885,9 +921,6 @@ function loadConfig() {
   merged.cueprompt = { ...defaultConfig().cueprompt, ...(cfg.cueprompt || {}) };
   merged.social = { ...defaultConfig().social, ...(cfg.social || {}) };
   merged.social.sceneKeys = { ...defaultConfig().social.sceneKeys, ...((cfg.social && cfg.social.sceneKeys) || {}) };
-
-
-;
   if (!Array.isArray(merged.sessions.disabled)) merged.sessions.disabled = [];
   return merged;
 }
@@ -2211,9 +2244,6 @@ function buildInjectionText(cfg, coreUsed = 0, lines = null, opts = {}) {
   } catch {
     /* 没有归档就不提 */
   }
-
-
-
 
   if (!parts.length) return "";
 
@@ -6813,7 +6843,7 @@ function listAssetImages(filter = {}) {
   if (!fs.existsSync(PATHS.assets)) return "媒体资产库为空。";
   const names = fs
     .readdirSync(PATHS.assets)
-    .filter((f) => f !== "index.json")
+    .filter((f) => f !== "index.json" && f !== "音频索引.md")
     .filter((f) => {
       try {
         return fs.statSync(path.join(PATHS.assets, f)).isFile();
@@ -6824,9 +6854,7 @@ function listAssetImages(filter = {}) {
     .sort();
   if (!names.length) return "媒体资产库为空。";
   const srcIdx = sourceIndex();
-  const wantSource = pickAudioEnum(filter.source, AUDIO_SOURCE);
   const wantKind = pickAudioEnum(filter.kind, AUDIO_KIND);
-  const wantUse = pickAudioEnum(filter.use, AUDIO_USE);
   const rowOf = (f, type) => {
     const meta = idx.images[f] || {};
     const kb = ((meta.bytes || fs.statSync(path.join(PATHS.assets, f)).size) / 1024).toFixed(0);
@@ -6841,15 +6869,12 @@ function listAssetImages(filter = {}) {
   const images = names.filter((f) => assetTypeOf(f, idx.images[f]) === "image");
   const allAudios = names.filter((f) => assetTypeOf(f, idx.images[f]) === "audio");
   const audios = allAudios.filter((f) => {
-    if (!wantSource && !wantKind && !wantUse) return true;
+    if (!wantKind) return true;
     const m = idx.images[f] || {};
-    if (wantSource && m.source !== wantSource) return false;
-    if (wantKind && m.kind !== wantKind) return false;
-    if (wantUse && m.use !== wantUse) return false;
-    return true;
+    return m.kind === wantKind;
   });
   const parts = [];
-  const filtering = Boolean(wantSource || wantKind || wantUse);
+  const filtering = Boolean(wantKind);
   if (!filtering && images.length) {
     parts.push(`图片资产（${images.length} 张）：\n${images.map((f) => rowOf(f, "image")).join("\n")}`);
   }
@@ -6859,7 +6884,7 @@ function listAssetImages(filter = {}) {
       : `音频资产（${audios.length} 段）`;
     parts.push(`${head}：\n${audios.map((f) => rowOf(f, "audio")).join("\n")}`);
   } else if (filtering) {
-    parts.push(`没有符合筛选的音频（共 ${allAudios.length} 段）。可选值：source=${AUDIO_SOURCE.join("/")}、kind=${AUDIO_KIND.join("/")}、use=${AUDIO_USE.join("/")}`);
+    parts.push(`没有符合筛选的音频（共 ${allAudios.length} 段）。可选值：kind=${AUDIO_KIND.join("/")}`);
   }
   if (!parts.length) return "媒体资产库为空。";
   return `${parts.join("\n\n")}\n\n改名：memory_image action=rename name=<现文件名> newName=<新名字>\n单条详情：memory_image action=meta name=<文件名>\n出处：memory_source action=add asset=<文件名> author=… id=… quote=verbatim|paraphrase`;
@@ -9903,9 +9928,7 @@ function apply(ctx) {
                   properties: {
                     path: { type: "string" },
                     name: { type: "string" },
-                    source: { type: "string", enum: AUDIO_SOURCE, description: "来源：mic 自己录 / voice QQ语音 / track 视频音轨 / music 音乐文件" },
                     kind: { type: "string", enum: AUDIO_KIND, description: "内容：dialog 人声对话 / monolog 独白 / music / ambient 环境音 / mixed 混合" },
-                    use: { type: "string", enum: AUDIO_USE, description: "用途：evidence 原话证据 / material 素材 / reference 参考" },
                     duration: { type: "number", description: "时长（秒）" },
                     lang: { type: "string", description: "语言，如 zh / en" },
                     from: { type: "string", description: "出处标记：BV 号 / 文件名 / 来源说明" },
@@ -10771,9 +10794,6 @@ function apply(ctx) {
         }
       },
     });
-
-    ;
-
     register({
       name: "memory_forget",
       description:
@@ -11226,16 +11246,14 @@ function apply(ctx) {
 
       name: "memory_image",
       description:
-        "管理记忆资产（图片/音频）：action=list 列出图片与音频（文件名/大小/哈希，音频带分类〔来源·内容·用途〕、时长与转写摘要，出处显示在行尾），可按 source/kind/use 筛选；action=meta 看单个资产的详情（分类、时长、语言、转写、原始路径、出处）；action=rename 给资产改名（会自动同步更新所有引用它的记忆条目和出处表）。音频分类只用固定枚举：source=mic/voice/track/music、kind=dialog/monolog/music/ambient/mixed、use=evidence/material/reference。",
+        "管理记忆资产（图片/音频）：action=list 列出图片与音频（文件名/大小/哈希，音频带分类〔对话/独白/音乐/环境〕、时长与转写摘要，出处显示在行尾），可按 kind 筛选；action=meta 看单个资产的详情；action=index 重建 assets/音频索引.md（人读的引导文件）；action=rename 给资产改名（会自动同步更新所有引用它的记忆条目和出处表）。音频分类只有一维四值：kind=dialog（对话）/ monolog（独白）/ music（音乐）/ ambient（环境，含原 mixed）。",
       parameters: {
         type: "object",
         properties: {
-          action: { type: "string", enum: ["list", "rename", "meta"], description: "操作" },
+          action: { type: "string", enum: ["list", "rename", "meta", "index"], description: "操作；index=重建音频索引（assets/音频索引.md）" },
           name: { type: "string", description: "rename/meta 时：文件名（可先用 list 查看）" },
           newName: { type: "string", description: "rename 时：新名字（可带 png/jpg 或 mp3/wav 等扩展名）" },
-          source: { type: "string", enum: AUDIO_SOURCE, description: "list 时可筛：音频来源" },
           kind: { type: "string", enum: AUDIO_KIND, description: "list 时可筛：音频内容类型" },
-          use: { type: "string", enum: AUDIO_USE, description: "list 时可筛：音频用途" },
         },
         required: ["action"],
       },
@@ -11247,17 +11265,16 @@ function apply(ctx) {
           if (action === "list") return listAssetImages(args || {});
           if (action === "meta") return assetDetail(args?.name);
           if (action === "rename") return renameAssetImage(args?.name, args?.newName);
-          return `未知 action：${action}（可选 list / meta / rename）`;
+          if (action === "index") {
+            const ok = writeAudioIndex();
+            return ok ? `音频索引已重建：assets/音频索引.md（${renderAudioIndex().split("\n").filter((l) => l.startsWith("| ")).length} 个音频）` : "音频索引重建失败：写不了 assets 目录。";
+          }
+          return `未知 action：${action}（可选 list / meta / rename / index）`;
         } catch (err) {
           return `资产操作失败：${err?.message || err}`;
         }
       },
     });
-
-    ;
-
-    ;
-
     register({
 
       name: "memory_recall",
@@ -11283,11 +11300,6 @@ function apply(ctx) {
         }
       },
     });
-
-    ;
-
-    ;
-
     ctx.tools.register({
       name: "memory_handoff",
       description:
@@ -11466,7 +11478,7 @@ const plugin = {
   apply,
 };
 
-export { copyWorkDir, measureDir, humanBytes, apply, loadState, saveState, STATE_PATH, filterMsgsBySeq, searchEngineOf, searchIndexStatus, closeSearchIndex, buildInjectionText, buildHandoffInjection, buildRecallInjection, buildDueInjection, buildOpeningInjection, ensureOpeningLunarRows, addOpeningRow, removeOpeningRow, readOpeningRows, pruneOpeningRows, formatNowLine, ageLabelOf, modelRouteOf, sessionMemory, createSessionMemory, sessionMemoryPaths, normalizeSessionId, isSpecialKey, doctorReport, renderDoctor, resolveBackupDir, probeWritable, coreInjection, coreOptions, createSocial, detectScene, normalizeName, personIdOf, registerSocialTools, sceneLabel, socialConfigDefaults, socialPaths, searchSocialContext, backupPolicySummary, compactionStats, compactionStatusLine, noteCompaction, noteAutoSummary, compressCallsIn, nativeCompactionsIn, compressToolCallsIn, compressionKindOf, readCompactionLog, appendCompactionRecord, ingestCompactionEvent, compactionRecords, compactionSelfCheck, dutyBoardData, sendHandoff, pullHandoff, listHandoffs, compactionSuiteDetected, listAutoSummaries, deleteAutoSummary, setFactCaller, factOptions, readFactCandidates, writeFactCandidates, pendingFactCandidates, factCandidateStats, factStatusLine, parseFactCandidates, buildFactPrompt, factInventory, isDuplicateFact, extractFactCandidates, acceptFactCandidate, rejectFactCandidate, updateBackupPolicy, updateAutoSummaryPolicy, featuresView, setFeature, memoryOverview, openingUpdate, openingDelete, nowView, updateNowMode, cuepromptView, updateCuePrompt, autoSummaryConfigView, registerBackupApi, hostIsLoopback, readRequestBody, searchMemory, searchMemoryKeyword, searchTokensOf, ensureSearchIndex, bm25ScoreOf, searchTargets, writeMemory, voidMemory, exportArchive, readQqWatchSettings, writeQqWatchSettings, qqWatchView, briefOf, aliasesOf, mergeAliases, writeGuardOf, writeGuardCheck, similarityOf, backupNow, pruneOldSnapshots, shouldSkipBackup, backupStampOf, writeTurnDiary, isCompressionEvent, renameAssetImage, listAssetImages, assetDetail, arrayIndexFiles, arrayIndexFileForMonth, migrateArrayIndexIfNeeded, AUDIO_SOURCE, AUDIO_KIND, AUDIO_USE, audioClassTag, buildStats, tagsOf, validateTags, checkedTags, TAG_VOCAB, clearMemos, tagCard, isVocabTag, normalizeTag, CUSTOM_TAG_MAX, CUSTOM_TAG_LEN, RARE_TAG_MAX_COUNT, recallSession, decodeSessionFile, findSessionFile, archiveSessions, scanSessionOriginals, sessionHeaderOf, findArchivedSession, rawArchiveRows, rawSessionFileName, cwdOfSlug, sha256OfFile, roundsOfSessionFile, relationInjectionLines, archiveRelationOverflow, locateMemory, jsonlHasHash, rebuildGuide, guideStats, guideLinks, guideNodes, addSource, listSources, findSources, sourceStats, loadSources, sourceTag, entryProvenance, sourceIndex, runAutoSummary, pendingTurns, autoSummaryOptions, buildAutoSummaryEntry, buildSummaryPrompt, summaryStyleLine, parseSummaryText, summaryInputOf, callWithThinkingRetry, setAutoSummaryCaller, defaultConfig, loadConfig, AUTO_SUMMARY_PREFIX, createRules, parseRulesMarkdown, formatRuleRow, rulesForSearch, parseTimeBound, handleRecord, searchRecords, searchRecordsGrouped, addSubject, subjectRows, voidRecord, unvoidRecord, isStaleInjection, addRecord, removeRecord, recordRows };
+export { writeAudioIndex, renderAudioIndex, copyWorkDir, measureDir, humanBytes, apply, loadState, saveState, STATE_PATH, filterMsgsBySeq, searchEngineOf, searchIndexStatus, closeSearchIndex, buildInjectionText, buildHandoffInjection, buildRecallInjection, buildDueInjection, buildOpeningInjection, ensureOpeningLunarRows, addOpeningRow, removeOpeningRow, readOpeningRows, pruneOpeningRows, formatNowLine, ageLabelOf, modelRouteOf, sessionMemory, createSessionMemory, sessionMemoryPaths, normalizeSessionId, isSpecialKey, doctorReport, renderDoctor, resolveBackupDir, probeWritable, coreInjection, coreOptions, createSocial, detectScene, normalizeName, personIdOf, registerSocialTools, sceneLabel, socialConfigDefaults, socialPaths, searchSocialContext, backupPolicySummary, compactionStats, compactionStatusLine, noteCompaction, noteAutoSummary, compressCallsIn, nativeCompactionsIn, compressToolCallsIn, compressionKindOf, readCompactionLog, appendCompactionRecord, ingestCompactionEvent, compactionRecords, compactionSelfCheck, dutyBoardData, sendHandoff, pullHandoff, listHandoffs, compactionSuiteDetected, listAutoSummaries, deleteAutoSummary, setFactCaller, factOptions, readFactCandidates, writeFactCandidates, pendingFactCandidates, factCandidateStats, factStatusLine, parseFactCandidates, buildFactPrompt, factInventory, isDuplicateFact, extractFactCandidates, acceptFactCandidate, rejectFactCandidate, updateBackupPolicy, updateAutoSummaryPolicy, featuresView, setFeature, memoryOverview, openingUpdate, openingDelete, nowView, updateNowMode, cuepromptView, updateCuePrompt, autoSummaryConfigView, registerBackupApi, hostIsLoopback, readRequestBody, searchMemory, searchMemoryKeyword, searchTokensOf, ensureSearchIndex, bm25ScoreOf, searchTargets, writeMemory, voidMemory, exportArchive, readQqWatchSettings, writeQqWatchSettings, qqWatchView, briefOf, aliasesOf, mergeAliases, writeGuardOf, writeGuardCheck, similarityOf, backupNow, pruneOldSnapshots, shouldSkipBackup, backupStampOf, writeTurnDiary, isCompressionEvent, renameAssetImage, listAssetImages, assetDetail, arrayIndexFiles, arrayIndexFileForMonth, migrateArrayIndexIfNeeded, AUDIO_KIND, audioClassTag, buildStats, tagsOf, validateTags, checkedTags, TAG_VOCAB, clearMemos, tagCard, isVocabTag, normalizeTag, CUSTOM_TAG_MAX, CUSTOM_TAG_LEN, RARE_TAG_MAX_COUNT, recallSession, decodeSessionFile, findSessionFile, archiveSessions, scanSessionOriginals, sessionHeaderOf, findArchivedSession, rawArchiveRows, rawSessionFileName, cwdOfSlug, sha256OfFile, roundsOfSessionFile, relationInjectionLines, archiveRelationOverflow, locateMemory, jsonlHasHash, rebuildGuide, guideStats, guideLinks, guideNodes, addSource, listSources, findSources, sourceStats, loadSources, sourceTag, entryProvenance, sourceIndex, runAutoSummary, pendingTurns, autoSummaryOptions, buildAutoSummaryEntry, buildSummaryPrompt, summaryStyleLine, parseSummaryText, summaryInputOf, callWithThinkingRetry, setAutoSummaryCaller, defaultConfig, loadConfig, AUTO_SUMMARY_PREFIX, createRules, parseRulesMarkdown, formatRuleRow, rulesForSearch, parseTimeBound, handleRecord, searchRecords, searchRecordsGrouped, addSubject, subjectRows, voidRecord, unvoidRecord, isStaleInjection, addRecord, removeRecord, recordRows };
 export default plugin;
 
 

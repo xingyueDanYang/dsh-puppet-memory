@@ -36,15 +36,14 @@ try {
     layer: "relation",
     keyword: "音频分类测试",
     meaning: "带分类写一条音频",
-    audios: [{ path: a1, source: "voice", kind: "dialog", use: "evidence", duration: 42, lang: "zh", from: "QQ 私聊" }],
+    audios: [{ path: a1, kind: "dialog", duration: 42, lang: "zh", from: "QQ 私聊" }],
   });
   ok("写入口返回成功", /已写入/.test(w), w);
   const row = rows(REL).pop();
   const au = (row.audios || [])[0] || {};
   ok("音频进了条目", Boolean(au.ref), JSON.stringify(row.audios));
-  ok("source 落盘", au.source === "voice", String(au.source));
-  ok("kind 落盘", au.kind === "dialog", String(au.kind));
-  ok("use 落盘", au.use === "evidence", String(au.use));
+  ok("kind 落盘（一维四值）", au.kind === "dialog", String(au.kind));
+  ok("旧字段 source/use 不再写", au.source === undefined && au.use === undefined, `${au.source}/${au.use}`);
   ok("duration 落盘", au.duration === 42, String(au.duration));
   ok("lang/from 落盘", au.lang === "zh" && au.from === "QQ 私聊", `${au.lang}/${au.from}`);
 
@@ -53,12 +52,11 @@ try {
     layer: "relation",
     keyword: "音频分类-非法值",
     meaning: "非法枚举应当被丢弃",
-    audios: [{ path: a2, source: "wechat", kind: "DIALOG", use: "随便" }],
+    audios: [{ path: a2, kind: "DIALOG", source: "wechat", use: "随便" }],
   });
   const bad = (rows(REL).pop().audios || [])[0] || {};
-  ok("非法 source 被丢弃", bad.source === undefined, String(bad.source));
   ok("大小写不敏感（DIALOG → dialog）", bad.kind === "dialog", String(bad.kind));
-  ok("非法 use 被丢弃", bad.use === undefined, String(bad.use));
+  ok("来源/用途字段一律不进库", bad.source === undefined && bad.use === undefined, `${bad.source}/${bad.use}`);
 
   // ---- 3. 老写法：纯路径字符串仍可用 ----
   writeMemory({ layer: "relation", keyword: "音频老写法", meaning: "只给路径", audios: [a1] });
@@ -71,7 +69,7 @@ try {
     layer: "relation",
     keyword: "音频分类-补写",
     meaning: "同一文件补分类",
-    audios: [{ path: a2, source: "track", kind: "music", use: "material", duration: 180 }],
+    audios: [{ path: a2, kind: "music", duration: 180 }],
   });
   const idx = JSON.parse(fs.readFileSync(path.join(TMP, "assets", "index.json"), "utf8"));
   const audioMeta = Object.entries(idx.images).filter(([, m]) => m.type === "audio");
@@ -82,12 +80,12 @@ try {
   // ---- 5. list 按分类筛 ----
   const all = listAssetImages({});
   ok("list 能看到音频段", /音频资产/.test(all), all.slice(0, 80));
-  const onlyVoice = listAssetImages({ source: "voice" });
-  ok("按 source=voice 筛出结果", /筛出/.test(onlyVoice) && /QQ语音/.test(onlyVoice), onlyVoice.slice(0, 120));
-  const none = listAssetImages({ source: "mic" });
+  const onlyDialog = listAssetImages({ kind: "dialog" });
+  ok("按 kind=dialog 能筛", /筛出/.test(onlyDialog) && /〔对话〕/.test(onlyDialog), onlyDialog.slice(0, 120));
+  const none = listAssetImages({ kind: "monolog" });
   ok("筛空时给提示而不是崩", /没有符合筛选/.test(none), none.slice(0, 120));
-  const byKind = listAssetImages({ kind: "dialog" });
-  ok("按 kind=dialog 能筛", /人声对话/.test(byKind), byKind.slice(0, 120));
+  const byMusic = listAssetImages({ kind: "music" });
+  ok("按 kind=music 能筛", /〔音乐〕/.test(byMusic), byMusic.slice(0, 120));
 
   // ---- 6. meta 看单条 ----
   const name = audioMeta[0][0];
