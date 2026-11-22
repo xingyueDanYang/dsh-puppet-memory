@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { personaHintLine } from "../persona-hint.js";
 let n = 0; const t = (name, fn) => { fn(); n += 1; console.log("  ✓ " + name); };
-t("完整时每轮都给数字锚", () => {
+t("完整时只在首轮/25 轮给数字锚", () => {
   assert.equal(/^\d+\/\d+$/.test(personaHintLine({ mode: "on" }, 25, { integrity: "intact" })), true);
-  assert.equal(personaHintLine({ mode: "on" }, 7, { integrity: "intact" }), "100/100");
+  assert.equal(personaHintLine({ mode: "on" }, 7, { integrity: "intact" }), "");
 });
 t("不完整时不看开关节奏，当轮补全文（不报分数、不引工具）", () => {
   const line = personaHintLine({ mode: "on" }, 7, { integrity: "broken", coreText: "我是雪风" });
