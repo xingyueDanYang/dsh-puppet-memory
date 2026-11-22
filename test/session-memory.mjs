@@ -110,10 +110,10 @@ try {
   ok("屏蔽后核心卡不注入", !after1.includes("以下是核心记忆"), after1.slice(0, 120));
   // 2026-11-22：「每 8 轮查一次」已删；触发点改成「第 2 轮 + 压缩后」
   const after2 = await run(mkSession("sess-e2e-2"), "第 2 句：这一轮补补充层");
-  ok("第 2 轮补补充层，且屏蔽仍生效", after2.includes("好关系") && !after2.includes("脏关系"), after2.slice(0, 200));
+  ok("第 2 轮补人设（关系层不进补充层）", after2.includes("大肥鱼") && !after2.includes("好关系"), after2.slice(0, 200));
   let after = after2;
   for (let i = 3; i <= 9; i++) after = await run(mkSession("sess-e2e-2"), `第 ${i} 句：之后不再补`);
-  ok("第 3 轮起不再注入补充层", !after.includes("好关系"), after.slice(0, 200));
+  ok("第 3 轮起不再注入补充层", !after.includes("大肥鱼"), after.slice(0, 200));
 
   // ---- 6. 工具 ----
   const tool = tools.find((t) => t.name === "memory_forget");
