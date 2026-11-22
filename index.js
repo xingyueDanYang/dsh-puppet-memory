@@ -2186,31 +2186,40 @@ function buildDueInjection(cfg, { nowMs = Date.now(), persist = true } = {}) {
   ].join("\n");
 }
 
-// 2026-11-22 丹阳：关系层不整层注入；只有**人名和代称**出现在他的话里时才给一行提示。
-// 话题类主词（插件名、规则名、事件名）一律不触发——那些不叫「关系里的主词」。
-// 名单可在 config.relationCue.persons 里改，写法 "丹阳|丹阳哥|他"＝主名|别名|别名。
-const RELATION_CUE_PERSONS = ["丹阳", "雪风", "克劳德", "大肥鱼", "千问", "豆包", "龙娘", "MOSS", "Grok", "主人"];
-function relationCuePersons(cfg) {
-  const rc = (cfg && cfg.relationCue) || {};
-  const list = Array.isArray(rc.persons) && rc.persons.length ? rc.persons : RELATION_CUE_PERSONS;
+// 2026-11-22 丹阳：关系层不整层注入；触发**只来自关系文件本身**，且只认人名/代称。
+// 判据写在关系条目里：tags 带「称呼」或「身份」的条目才算人；触发词＝主词（取到 （ · / 之前的短名）
+// ＋ aliases 里的短别名。话题类主词（插件名、规则名、事件名）没有这两个标签，一律不触发。
+// 其它功能各用各的触发源（书签关键词、常言关键词、记录册主词），这里不串。
+const PERSON_TAGS = ["称呼", "身份"];
+function relationCuePersons() {
+  let rows = [];
+  try { rows = readJsonl(path.join(MEM_DIR, "behavior", "relations.jsonl")); } catch { return []; }
   const out = [];
-  for (const raw of list) {
-    const parts = String(raw || "").split("|").map((s) => s.trim()).filter(Boolean);
-    if (!parts.length) continue;
-    out.push({ name: parts[0], words: parts });
+  for (const r of rows) {
+    if (!r || r.voided) continue;
+    const tags = Array.isArray(r.tags) ? r.tags : [];
+    if (!tags.some((t) => PERSON_TAGS.includes(String(t)))) continue;
+    const core = String(r.keyword || "").split(/[（(·、/｜|]/)[0].trim();
+    const words = [];
+    if (core.length >= 2 && core.length <= 4) words.push(core);
+    for (const a of String(r.aliases || "").split(/[、,，/｜|]/).map((x) => x.trim())) {
+      if (a.length >= 2 && a.length <= 4 && !words.includes(a)) words.push(a);
+    }
+    if (words.length) out.push({ name: core || words[0], words });
   }
   return out;
 }
-function buildRelationCue(userText, cfg) {
+function buildRelationCue(userText) {
   const t = String(userText || "");
   if (t.length < 2) return "";
   const hits = [];
-  for (const p of relationCuePersons(cfg)) {
-    if (p.words.some((w) => w.length >= 2 && t.includes(w))) hits.push(p.name);
+  for (const p of relationCuePersons()) {
+    const w = p.words.find((x) => t.includes(x));
+    if (w) hits.push(w);
   }
   const uniq = [...new Set(hits)].slice(0, 3);
   if (!uniq.length) return "";
-  return "【记忆·关系提示】这轮提到了：" + uniq.join("、") + "。关系层里有相关条目，要细节用 memory_search 查人名（不整层注入）。";
+  return "【记忆·关系提示】这轮提到了：" + uniq.join("、") + "。关系文件里有相关条目，要细节用 memory_search 查（不整层注入）。";
 }
 
 function buildInjectionText(cfg, coreUsed = 0, lines = null, opts = {}) {
@@ -9158,7 +9167,7 @@ function apply(ctx) {
         // 关系主词提示：命中就一行（不注入整层）
         let relCueText = "";
         try {
-          if (!cardsOnly && !suppressed.has("relations")) relCueText = buildRelationCue(userTextNow, cfg);
+          if (!cardsOnly && !suppressed.has("relations")) relCueText = buildRelationCue(userTextNow);
         } catch {}
         try {
           const supPlan = supLayerPlan.get(sessionId) || { turn: 0, check: 0 };
