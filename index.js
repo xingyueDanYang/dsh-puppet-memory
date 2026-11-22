@@ -2186,6 +2186,34 @@ function buildDueInjection(cfg, { nowMs = Date.now(), persist = true } = {}) {
   ].join("\n");
 }
 
+// 2026-11-22 丹阳：关系层不再整层注入，但主词（keyword）出现在他的话里时要给一条提示。
+// 只做本地字符串匹配，零模型成本；命中最多 3 个词，一行说完，细节让他自己查。
+function buildRelationCue(userText) {
+  const t = String(userText || "");
+  if (t.length < 2) return "";
+  let rows = [];
+  try { rows = readJsonl(path.join(MEM_DIR, "behavior", "relations.jsonl")); } catch { return ""; }
+  const hits = [];
+  for (const r of rows) {
+    if (!r || r.voided) continue;
+    const kw = String(r.keyword || "").trim();
+    if (kw.length < 2) continue;
+    // 关键词常写成「克劳德（Claude）」「小黑盒评论区回复规矩」这种整句：
+    // 先按分隔符切词；长词再加 3/4 字前缀（主词一般在开头），任一处命中即算。
+    const tokens = kw.split(/[·、,，/｜|（）()\s]+/).map((x) => x.trim()).filter((x) => x.length >= 2);
+    const cands = [];
+    for (const tok of tokens) {
+      cands.push(tok);
+      if (tok.length > 6) cands.push(tok.slice(0, 4), tok.slice(0, 3));
+    }
+    const hit = cands.find((x) => x.length >= 2 && t.includes(x));
+    if (hit) hits.push(hit);
+  }
+  const uniq = [...new Set(hits)].slice(0, 3);
+  if (!uniq.length) return "";
+  return "【记忆·关系提示】这轮提到了：" + uniq.join("、") + "。要细节用 memory_search 查这些词（关系层不整层注入）。";
+}
+
 function buildInjectionText(cfg, coreUsed = 0, lines = null, opts = {}) {
   const total = Math.max(200, Number(cfg?.inject?.maxChars) || DEFAULT_INJECT_MAX);
   // 核心记忆先占预算，剩下的才给「人设+关系+笔记+日记」——避免开了核心卡，注入总量变长
@@ -9128,6 +9156,11 @@ function apply(ctx) {
         let text = "";
         const userTextNow = stripInjected(lastUserText(decision.messages || []).text);
         const queryForLayers = [userTextNow, ...linkTriggersOf(userTextNow)].join(" ");
+        // 关系主词提示：命中就一行（不注入整层）
+        let relCueText = "";
+        try {
+          if (!cardsOnly && !suppressed.has("relations")) relCueText = buildRelationCue(userTextNow);
+        } catch {}
         try {
           const supPlan = supLayerPlan.get(sessionId) || { turn: 0, check: 0 };
           if (isNewUserTurn) supPlan.turn += 1;
@@ -9502,7 +9535,7 @@ function apply(ctx) {
         if (cardsOnly) {
           text = ""; socialText = ""; recallText = ""; conflictText = ""; loreText = "";
           circleText = ""; sayingText = ""; dueText = ""; openingText = ""; cueText = "";
-          peopleText = ""; lostDetailText = ""; nowText = "";
+          peopleText = ""; lostDetailText = ""; nowText = ""; relCueText = "";
           diag("首轮只注入三张卡（其余块从第二轮起）");
         }
         // 第 2 轮只补人设全文：这时候三张卡和其它注入都没得给，早退会让这一条永远轮不到
@@ -9512,8 +9545,8 @@ function apply(ctx) {
         // 2026-11-22 丹阳定：**人设印象是唯一的主锚**（压缩几百轮后仍要有效），其余都次要、靠本地文件。
         // 所以这一行每轮都必须发：不能被「这一轮没别的东西可注入」的早退挡掉。
         const personaAnchorOn = String(((cfg && cfg.personaHint) || {}).mode || "off") !== "off";
-        if (!personaAnchorOn && !cuePipelineOn && !text && !socialText && !handoffText && !recallText && !conflictText && !loreText && !circleText && !lostDetailText && !dueText && !openingText && !cueText && !nowText && !rulesForInject && !habitsForInject && !coreText && !coreStateForInject && !resetNote) return decision;
-        const digest = sha1(`${text}\u0000${socialText}\u0000${handoffText}\u0000${recallText}\u0000${dueText}${openingText}\u0000${cueText}\u0000${nowText}\u0000${conflictText}\u0000${loreText}\u0000${circleText}\u0000${lostDetailText}\u0000${rulesForInject}\u0000${habitsForInject}\u0000${coreText}\u0000${coreStateForInject}\u0000${resetNote}`);
+        if (!relCueText && !personaAnchorOn && !cuePipelineOn && !text && !socialText && !handoffText && !recallText && !conflictText && !loreText && !circleText && !lostDetailText && !dueText && !openingText && !cueText && !nowText && !rulesForInject && !habitsForInject && !coreText && !coreStateForInject && !resetNote) return decision;
+        const digest = sha1(`${relCueText}\u0000${text}\u0000${socialText}\u0000${handoffText}\u0000${recallText}\u0000${dueText}${openingText}\u0000${cueText}\u0000${nowText}\u0000${conflictText}\u0000${loreText}\u0000${circleText}\u0000${lostDetailText}\u0000${rulesForInject}\u0000${habitsForInject}\u0000${coreText}\u0000${coreStateForInject}\u0000${resetNote}`);
         // v0.44.1：注入只跟着「用户说话」走——一条新用户消息只注入一次。
         // 触发源在外部（用户消息），注入本身不会再触发注入，也就不会自激循环。
         const userKey = lastUserText(decision.messages || []).key || "";
@@ -9713,6 +9746,7 @@ function apply(ctx) {
             ["circle", circleMessage],
             ["lost_detail", lostDetailMessage],
             ["text", text ? injectionMessage(text) : null],
+            ["rel_cue", relCueText ? injectionMessage(relCueText) : null],
             ["people", peopleText ? injectionMessage(peopleText) : null],
             ["social", socialMessage],
           ]))],
@@ -11550,7 +11584,7 @@ const plugin = {
   apply,
 };
 
-export { writeAudioIndex, renderAudioIndex, copyWorkDir, measureDir, humanBytes, apply, loadState, saveState, STATE_PATH, filterMsgsBySeq, searchEngineOf, searchIndexStatus, closeSearchIndex, buildInjectionText, buildHandoffInjection, buildRecallInjection, buildDueInjection, buildOpeningInjection, ensureOpeningLunarRows, addOpeningRow, removeOpeningRow, readOpeningRows, pruneOpeningRows, formatNowLine, ageLabelOf, modelRouteOf, sessionMemory, createSessionMemory, sessionMemoryPaths, normalizeSessionId, isSpecialKey, doctorReport, renderDoctor, resolveBackupDir, probeWritable, coreInjection, coreOptions, createSocial, detectScene, normalizeName, personIdOf, registerSocialTools, sceneLabel, socialConfigDefaults, socialPaths, searchSocialContext, backupPolicySummary, compactionStats, compactionStatusLine, noteCompaction, noteAutoSummary, compressCallsIn, nativeCompactionsIn, compressToolCallsIn, compressionKindOf, readCompactionLog, appendCompactionRecord, ingestCompactionEvent, compactionRecords, compactionSelfCheck, dutyBoardData, sendHandoff, pullHandoff, listHandoffs, compactionSuiteDetected, listAutoSummaries, deleteAutoSummary, setFactCaller, factOptions, readFactCandidates, writeFactCandidates, pendingFactCandidates, factCandidateStats, factStatusLine, parseFactCandidates, buildFactPrompt, factInventory, isDuplicateFact, extractFactCandidates, acceptFactCandidate, rejectFactCandidate, updateBackupPolicy, updateAutoSummaryPolicy, featuresView, setFeature, memoryOverview, openingUpdate, openingDelete, nowView, updateNowMode, cuepromptView, updateCuePrompt, autoSummaryConfigView, registerBackupApi, hostIsLoopback, readRequestBody, searchMemory, searchMemoryKeyword, searchTokensOf, ensureSearchIndex, bm25ScoreOf, searchTargets, writeMemory, voidMemory, exportArchive, readQqWatchSettings, writeQqWatchSettings, qqWatchView, briefOf, aliasesOf, mergeAliases, writeGuardOf, writeGuardCheck, similarityOf, backupNow, pruneOldSnapshots, shouldSkipBackup, backupStampOf, writeTurnDiary, isCompressionEvent, renameAssetImage, listAssetImages, assetDetail, arrayIndexFiles, arrayIndexFileForMonth, migrateArrayIndexIfNeeded, AUDIO_KIND, audioClassTag, buildStats, tagsOf, validateTags, checkedTags, TAG_VOCAB, clearMemos, tagCard, isVocabTag, normalizeTag, CUSTOM_TAG_MAX, CUSTOM_TAG_LEN, RARE_TAG_MAX_COUNT, recallSession, decodeSessionFile, findSessionFile, archiveSessions, scanSessionOriginals, sessionHeaderOf, findArchivedSession, rawArchiveRows, rawSessionFileName, cwdOfSlug, sha256OfFile, roundsOfSessionFile, relationInjectionLines, archiveRelationOverflow, locateMemory, jsonlHasHash, rebuildGuide, guideStats, guideLinks, guideNodes, addSource, listSources, findSources, sourceStats, loadSources, sourceTag, entryProvenance, sourceIndex, runAutoSummary, pendingTurns, autoSummaryOptions, buildAutoSummaryEntry, buildSummaryPrompt, summaryStyleLine, parseSummaryText, summaryInputOf, callWithThinkingRetry, setAutoSummaryCaller, defaultConfig, loadConfig, AUTO_SUMMARY_PREFIX, createRules, parseRulesMarkdown, formatRuleRow, rulesForSearch, parseTimeBound, handleRecord, searchRecords, searchRecordsGrouped, addSubject, subjectRows, voidRecord, unvoidRecord, isStaleInjection, addRecord, removeRecord, recordRows };
+export { buildRelationCue, writeAudioIndex, renderAudioIndex, copyWorkDir, measureDir, humanBytes, apply, loadState, saveState, STATE_PATH, filterMsgsBySeq, searchEngineOf, searchIndexStatus, closeSearchIndex, buildInjectionText, buildHandoffInjection, buildRecallInjection, buildDueInjection, buildOpeningInjection, ensureOpeningLunarRows, addOpeningRow, removeOpeningRow, readOpeningRows, pruneOpeningRows, formatNowLine, ageLabelOf, modelRouteOf, sessionMemory, createSessionMemory, sessionMemoryPaths, normalizeSessionId, isSpecialKey, doctorReport, renderDoctor, resolveBackupDir, probeWritable, coreInjection, coreOptions, createSocial, detectScene, normalizeName, personIdOf, registerSocialTools, sceneLabel, socialConfigDefaults, socialPaths, searchSocialContext, backupPolicySummary, compactionStats, compactionStatusLine, noteCompaction, noteAutoSummary, compressCallsIn, nativeCompactionsIn, compressToolCallsIn, compressionKindOf, readCompactionLog, appendCompactionRecord, ingestCompactionEvent, compactionRecords, compactionSelfCheck, dutyBoardData, sendHandoff, pullHandoff, listHandoffs, compactionSuiteDetected, listAutoSummaries, deleteAutoSummary, setFactCaller, factOptions, readFactCandidates, writeFactCandidates, pendingFactCandidates, factCandidateStats, factStatusLine, parseFactCandidates, buildFactPrompt, factInventory, isDuplicateFact, extractFactCandidates, acceptFactCandidate, rejectFactCandidate, updateBackupPolicy, updateAutoSummaryPolicy, featuresView, setFeature, memoryOverview, openingUpdate, openingDelete, nowView, updateNowMode, cuepromptView, updateCuePrompt, autoSummaryConfigView, registerBackupApi, hostIsLoopback, readRequestBody, searchMemory, searchMemoryKeyword, searchTokensOf, ensureSearchIndex, bm25ScoreOf, searchTargets, writeMemory, voidMemory, exportArchive, readQqWatchSettings, writeQqWatchSettings, qqWatchView, briefOf, aliasesOf, mergeAliases, writeGuardOf, writeGuardCheck, similarityOf, backupNow, pruneOldSnapshots, shouldSkipBackup, backupStampOf, writeTurnDiary, isCompressionEvent, renameAssetImage, listAssetImages, assetDetail, arrayIndexFiles, arrayIndexFileForMonth, migrateArrayIndexIfNeeded, AUDIO_KIND, audioClassTag, buildStats, tagsOf, validateTags, checkedTags, TAG_VOCAB, clearMemos, tagCard, isVocabTag, normalizeTag, CUSTOM_TAG_MAX, CUSTOM_TAG_LEN, RARE_TAG_MAX_COUNT, recallSession, decodeSessionFile, findSessionFile, archiveSessions, scanSessionOriginals, sessionHeaderOf, findArchivedSession, rawArchiveRows, rawSessionFileName, cwdOfSlug, sha256OfFile, roundsOfSessionFile, relationInjectionLines, archiveRelationOverflow, locateMemory, jsonlHasHash, rebuildGuide, guideStats, guideLinks, guideNodes, addSource, listSources, findSources, sourceStats, loadSources, sourceTag, entryProvenance, sourceIndex, runAutoSummary, pendingTurns, autoSummaryOptions, buildAutoSummaryEntry, buildSummaryPrompt, summaryStyleLine, parseSummaryText, summaryInputOf, callWithThinkingRetry, setAutoSummaryCaller, defaultConfig, loadConfig, AUTO_SUMMARY_PREFIX, createRules, parseRulesMarkdown, formatRuleRow, rulesForSearch, parseTimeBound, handleRecord, searchRecords, searchRecordsGrouped, addSubject, subjectRows, voidRecord, unvoidRecord, isStaleInjection, addRecord, removeRecord, recordRows };
 export default plugin;
 
 
