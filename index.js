@@ -2218,7 +2218,14 @@ function buildInjectionText(cfg, coreUsed = 0, lines = null, opts = {}) {
     }
     return out || clip(t, max);
   };
-  if (persona && want("persona")) parts.push(`【人设】${compact ? fewSentences(persona, 80) : clip(persona, 220)}`);
+  if (persona && want("persona")) {
+    // 2026-11-22：人设卡可以长到万字（参考《溟月·大肥鱼角色卡》2587 行那种），
+    // 注入只给骨架 + 一句「有全文」，别让人以为就这 220 字。
+    const personaBudget = compact ? 80 : 220;
+    const personaShown = compact ? fewSentences(persona, personaBudget) : clip(persona, personaBudget);
+    const personaTail = persona.length > personaShown.length ? "（人设超预算已截断，全文见 behavior/persona.md）" : "";
+    parts.push(`【人设】${personaShown}${personaTail}`);
+  }
 
   // v0.23：陪伴取向时多给关系记忆一点预算；工作/学习取向时按话题给对应的近料
   const primary = lines && lines.primary ? lines.primary : "balanced";
