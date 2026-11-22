@@ -9421,7 +9421,10 @@ function apply(ctx) {
         // 2026-11-22：取词器开着时不要在这里早退——它的去重与「这轮又取了一次」只能在这条链上留下痕迹，
         // 早退就没记录（人设全文删掉后，原来靠 personaDue 撑开这条门的地方没了）。
         const cuePipelineOn = Boolean(cfg && cfg.cueprompt && cfg.cueprompt.enabled);
-        if (!cuePipelineOn && !text && !socialText && !handoffText && !recallText && !conflictText && !loreText && !circleText && !lostDetailText && !dueText && !openingText && !cueText && !nowText && !rulesForInject && !habitsForInject && !coreText && !coreStateForInject && !resetNote) return decision;
+        // 2026-11-22 丹阳定：**人设印象是唯一的主锚**（压缩几百轮后仍要有效），其余都次要、靠本地文件。
+        // 所以这一行每轮都必须发：不能被「这一轮没别的东西可注入」的早退挡掉。
+        const personaAnchorOn = String(((cfg && cfg.personaHint) || {}).mode || "off") !== "off";
+        if (!personaAnchorOn && !cuePipelineOn && !text && !socialText && !handoffText && !recallText && !conflictText && !loreText && !circleText && !lostDetailText && !dueText && !openingText && !cueText && !nowText && !rulesForInject && !habitsForInject && !coreText && !coreStateForInject && !resetNote) return decision;
         const digest = sha1(`${text}\u0000${socialText}\u0000${handoffText}\u0000${recallText}\u0000${dueText}${openingText}\u0000${cueText}\u0000${nowText}\u0000${conflictText}\u0000${loreText}\u0000${circleText}\u0000${lostDetailText}\u0000${rulesForInject}\u0000${habitsForInject}\u0000${coreText}\u0000${coreStateForInject}\u0000${resetNote}`);
         // v0.44.1：注入只跟着「用户说话」走——一条新用户消息只注入一次。
         // 触发源在外部（用户消息），注入本身不会再触发注入，也就不会自激循环。
