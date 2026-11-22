@@ -28,8 +28,8 @@ const c = dedupeBlocks("s1", [["self", msg("同样的内容，改了一点")]]);
 ok("内容变了就发", c.length === 1, String(c.length));
 
 // 4. 卡类白名单：重复也发
-const d1 = dedupeBlocks("s2", [["core", msg("核心卡正文")], ["rules", msg("规则卡正文")], ["persona_full", msg("人设全文")]]);
-const d2 = dedupeBlocks("s2", [["core", msg("核心卡正文")], ["rules", msg("规则卡正文")], ["persona_full", msg("人设全文")]]);
+const d1 = dedupeBlocks("s2", [["core", msg("核心卡正文")], ["rules", msg("规则卡正文")], ["persona", msg("人设印象")]]);
+const d2 = dedupeBlocks("s2", [["core", msg("核心卡正文")], ["rules", msg("规则卡正文")], ["persona", msg("人设印象")]]);
 ok("卡类第一次发", d1.length === 3, String(d1.length));
 ok("卡类第二次照样发（白名单）", d2.length === 3, String(d2.length));
 
