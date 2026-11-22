@@ -8969,20 +8969,15 @@ function apply(ctx) {
         // 2026-11-22 丹阳定：**人设全文第二轮注入删了**——实测效果不好（一次塞几千字，之后还是靠印象，
         // 不如不给）。完整人设仍存在 behavior/persona-full.md，要看时读文件；不再自动注入。
         try { diag(`注入入口 phaseTurn=${phaseTurn} isNew=${isNewUserTurn}`); } catch {}
-        // 每轮记账（2026-11-21）：人设分只按用户消息 +1。
-        // 必须紧贴相位计算——后面有若干早退分支（没东西可注入、PTC 后续步骤等），
-        // 放在它们后面等于永远不执行：分数冻在初始值上。
+        // 2026-11-22 丹阳定：**数字不再加减**——没有每轮 +1、没有压缩扣分、没有 100 轮 −20。
+        // 它只是个显眼点，写什么都是那几个字；加减那一套纯属多余代码，删掉。
         try {
           const phCfg0 = normalizePersonaHint((loadConfig() || {}).personaHint || null);
           if (phCfg0.mode !== "off" && isNewUserTurn) {
             const phFile0 = path.join(MEM_DIR, "state", "persona-hint.json");
-            const ph0 = readJson(phFile0, null) || { turn: 0, value: phCfg0.score.value };
+            const ph0 = readJson(phFile0, null) || { turn: 0 };
             ph0.turn = (Number(ph0.turn) || 0) + 1;
-            if (typeof ph0.value !== "number") ph0.value = Number(phCfg0.score.value) || 60;
-            ph0.value = Math.min(Number(phCfg0.score.max) || 999, Number(ph0.value) + (Number(phCfg0.score.weakStep) || 1));
-            if (phaseTurn % 100 === 0) ph0.value = Math.max(0, ph0.value - 20);
             writeJson(phFile0, ph0);
-            diag(`每轮记账 phaseTurn=${phaseTurn} 人设分=${ph0.value} 分数轮=${ph0.turn}`);
           }
         } catch {}
         // 节奏（2026-11-21 丹阳定）：第 1 轮与 100 的倍数强注入，其余弱注入
@@ -9485,7 +9480,7 @@ function apply(ctx) {
             const phCfg = normalizePersonaHint((loadConfig() || {}).personaHint || null);
             if (phCfg.mode === "off") return null;
             const phFile = path.join(MEM_DIR, "state", "persona-hint.json");
-            const phState = readJson(phFile, null) || { turn: 0, value: phCfg.score.value };
+            const phState = readJson(phFile, null) || { turn: 0 };
             // 轮次与分数由上面的「每轮记账」写好了，这里只读（别重复 +1）
             // 分数跟「上下文里人设部分是否完整」走，不跟扮演好坏走：
             // 缺卡 / 被截断 = 强注入（扣分或清零）；完整 = 弱注入（+1）
@@ -9497,12 +9492,10 @@ function apply(ctx) {
             const personaIntact = coreHinted ? Boolean(coreText) : (Boolean(coreText) && !(core && core.clipped) && !coreChanged);
             // 2026-11-21 丹阳定：分数改成累积锚点——60 起、每轮 +1、不封顶；
             // 压缩 −随机(1–10)（见 compaction 事件）；每 100 轮全量卡 −20。
-            if (typeof phState.value !== "number") phState.value = Number(phCfg.score.value) || 60;
-            const ticked = { ...phCfg.score, value: phState.value };
             phState.lastIntegrity = personaIntact ? "intact" : (coreChanged ? "core-changed" : "missing-or-clipped");
             phState.coreHash = coreHash;
             if (!personaIntact) phState.lastReloadTurn = phState.turn;
-            const line = personaHintLine({ ...phCfg, score: ticked }, phState.turn, {
+            const line = personaHintLine(phCfg, phState.turn, {
               integrity: personaIntact ? "intact" : "broken",
               coreText: personaIntact ? "" : String(coreText || ""),
             });

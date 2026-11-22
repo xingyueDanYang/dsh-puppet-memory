@@ -64,24 +64,12 @@ export function personaHintLine(hint, turn, opts) {
   // 显眼点：首轮 + 每 100 轮各给一次（丹阳 2026-11-22 定：25 轮那档取消，只留 100）
   if (!broken && turn !== 1 && turn % n !== 0) return "";
   if (broken) {
-    // 强注入 = 状态刷新：给完整人设卡 + 扣分后的新起点。
-    // 带 coreText 就重载全文（深度印象），不带就退化成一句指路。
+    // 人设丢了就把全文补上，别的一概不说（2026-11-21 丹阳定：删掉自造指标和指路句）
     const card = String((opts && opts.coreText) || "").trim();
-    // 2026-11-21 丹阳定：删掉「完整度 X/100」和「先读一次 memory_core」这类自造指标的提醒。
-    // 那个分数只是「注入字数 ÷ 应写字数」，不是质量，也不影响说话；留着纯占字数、还引一次工具调用。
-    // 现在只剩一个动作：人设丢了就把全文补上，别的一概不说。
-    const head = "【人设卡重载】上下文里的人设不完整（压缩或截断），下面是完整的人设，按它说话：";
-    return card ? head + String.fromCharCode(10) + card : "";
+    const headLine = "【人设卡重载】上下文里的人设不完整（压缩或截断），下面是完整的人设，按它说话：";
+    return card ? headLine + String.fromCharCode(10) + card : "";
   }
-  // 2026-11-21 丹阳定：这里**只给数字**，不给说明、不加「完整度」这种词。
-  // 它是显眼点（一个能一眼看到的标记），不是给我读的说明书——说明和「完整度」命名都是我自己加的，删掉。
+  // 2026-11-22 丹阳定：数字不再加减——它只是显眼点，固定写 100/100，不带说明、不带标记。
   if (h.mode === "roleplay" && h.encourage) return h.encourage;
-  return String(h.score.value) + "/" + String(h.score.max);
-}
-
-// 压缩后：分数减一个随机数（1–10），计数由调用方清零
-export function resetOnCompaction(hint) {
-  const h = normalizePersonaHint(hint);
-  const drop = 1 + Math.floor(Math.random() * 10);
-  return Object.assign({}, h, { score: Object.assign({}, h.score, { value: Math.max(0, Number(h.score.value) - drop) }) });
+  return "100/100";
 }
