@@ -8686,6 +8686,7 @@ function apply(ctx) {
   // 结果整段注入链（三张卡 / 人设全文 / 分数 / 探针）全都不执行，日志里一点痕迹都没有。
   const lastRawCardHashes = new Map(); // sessionId -> { rules, core, state } sha1
   const lastCardsTurn = new Map(); // sessionId -> 上一次全量注入三卡时的 phaseTurn（同一轮不重复发）
+  const lastSelfHash = new Map(); // sessionId -> 自我层全文的 sha1（用来判断内容改过）
   const pendingStrong = new Map(); // sessionId -> true：刚压缩过，下一步做一次强补充
   const supLayerPlan = new Map(); // sessionId -> { turn, check }：补充层每 8 轮查一次
   const recentRelInjected = new Map(); // sessionId -> Map(hash -> turn)：5 轮内别重复注入同一条关系
@@ -8967,10 +8968,9 @@ function apply(ctx) {
         }
         const core = coreInjection(cfg);
         const coreAllowed = core.text && (!firstStepDone || core.everyStep) && !suppressed.has("core");
-        // v1.4（2026-11-17 丹阳定的节奏）：四张卡各走各的班次——
-        //   压缩后：先做一次「强补充」（此时在上下文开头，注意力最足）；
-        //   平时：只有轮到自己检查、且缺得够多才强补充，否则只给一句弱提示。
-        //   核心卡/自我层 每 5 轮查一次，缺 >20% 才强补；规则卡 每 10 轮，缺 >10%；状态卡 每 20 轮（或有工具调用时），只弱提示。
+        // 2026-11-22：旧的「四张卡各走各的班次 / 每 5·10·20 轮查缺口」已废（删了），
+        // 现在统一走 cardInjectMode：首轮 / 第 100 轮 / 压缩后 / 内容改过 才发，同轮只发一次。
+        // 旧设计留档在 docs/三卡注入设计史.md。
         const habitsForInject = (() => {
           try {
             const rows = learnLayer().payHabits();
@@ -9640,22 +9640,20 @@ function apply(ctx) {
               const t = selfLayer().tick({ everyN: sc.audit.everyN, fixPerTurn: sc.audit.fixPerTurn });
               if (t && (t.audited || (t.repaired && t.repaired.length))) diag(`自我层节奏：${JSON.stringify(t)}`);
             }
-            // 自我层跟核心卡同节奏：压缩后强补充一次；每 5 轮查一次，缺 >20% 才强补，否则只提醒
+            // 2026-11-22：自我层跟三卡同一节奏（旧「每 5 轮按缺口补」已删，见 docs/三卡注入设计史.md）
             const selfFull = selfLayer().injectText((sc.inject && sc.inject.maxChars) || 400);
-            const planNow = cardPlan.get(sessionId) || { turn: 0, self: 0 };
-            const selfDue = planNow.turn % 5 === 2;
-            const selfCtx = contextTextOf(decision.messages || []);
-            if (cardsOnly) {
-              // 首轮只三卡，自我层等下一轮
-            } else if (justCompressed || planNow.turn <= 1) {
-              selfText = selfFull;
-            } else if (selfDue) {
-              planNow.self = planNow.turn;
-              cardPlan.set(sessionId, planNow);
-              selfText = missingRatioOf(selfFull, selfCtx) >= 0.2 ? selfFull : "";
-            } else {
-              selfText = "";
-            }
+            const selfHash = sha1(String(selfFull || ""));
+            const prevSelf = lastSelfHash.get(sessionId);
+            const selfChanged = Boolean(prevSelf) && prevSelf !== selfHash;
+            lastSelfHash.set(sessionId, selfHash);
+            const selfMode = cardInjectMode({
+              justStarted,
+              justCompressed,
+              fullTurn,
+              changed: selfChanged,
+              sameTurnDone,
+            });
+            selfText = selfMode === "strong" && !cardsOnly ? selfFull : "";
           }
         } catch (err) {
           diag(`自我层注入失败：${err?.message || err}`);
