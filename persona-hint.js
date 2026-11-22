@@ -28,13 +28,16 @@ export function personaHintLine(hint, turn, opts) {
   if (h.mode === "off") return "";
   const broken = String((opts && opts.integrity) || "intact") === "broken";
   const n = Math.max(1, h.everyN);
-  if (!broken && turn !== 1 && turn % n !== 0) return "";
   if (broken) {
     const card = String((opts && opts.coreText) || "").trim();
     const headLine = "【人设卡重载】上下文里的人设不完整（压缩或截断），下面是完整的人设，按它说话：";
     return card ? headLine + String.fromCharCode(10) + card : "";
   }
-  // 固定 100/100：不带说明、不带标记，只是个能一眼看到的记号
-  if (h.mode === "roleplay" && h.encourage) return h.encourage;
-  return "100/100";
+  // 2026-11-22 丹阳定：鼓励词**每轮都给**（= 这段时间的方向锚），数字仍只在首轮与每 100 轮给。
+  const numDue = turn === 1 || turn % n === 0;
+  if (h.mode === "roleplay" && h.encourage) {
+    return numDue ? `100/100\n${h.encourage}` : h.encourage;
+  }
+  // 只有数字时：不带说明、不带标记，只是个能一眼看到的记号
+  return numDue ? "100/100" : "";
 }

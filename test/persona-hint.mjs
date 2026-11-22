@@ -32,10 +32,11 @@ t("破损重载补全文，不夹分数、不报完整度", () => {
   assert.equal(line.includes("完整度"), false);
   assert.equal(line.includes("我是雪风"), true);
 });
-t("roleplay 才带 encourage，且只在倍数轮", () => {
+t("roleplay 鼓励词每轮都给；数字只在倍数轮", () => {
   const h = { mode: "roleplay", everyN: 10, encourage: "唔，别撑着。" };
-  assert.equal(personaHintLine(h, 10).startsWith("唔，别撑着。"), true);
-  assert.equal(personaHintLine(h, 11), "");
+  assert.equal(personaHintLine(h, 10), "100/100\n唔，别撑着。");
+  assert.equal(personaHintLine(h, 11), "唔，别撑着。");
+  assert.equal(personaHintLine(h, 7), "唔，别撑着。");
   assert.equal(personaHintLine({ mode: "score", everyN: 10, encourage: "x" }, 10).includes("x"), false);
 });
 
