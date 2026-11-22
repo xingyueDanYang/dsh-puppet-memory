@@ -3243,6 +3243,12 @@ function qqSanitizeSettings(raw) {
   out.peakHalf = Boolean(input.peakHalf);
   const wins = Array.isArray(input.peakWindows) ? input.peakWindows.filter((w) => Array.isArray(w) && w.length === 2 && /^\d{2}:\d{2}$/.test(String(w[0])) && /^\d{2}:\d{2}$/.test(String(w[1]))).slice(0, 6) : [];
   out.peakWindows = wins.length ? wins.map((w) => [String(w[0]), String(w[1])]) : QQ_PEAK_DEFAULT;
+  // 2026-11-22 丹阳定：观察器的「自定义查看项」——别人也能往这里加，
+  // 每轮观察时按条目去查（名称 + 一句话提示）。只做字符串清洗，不校验语义。
+  out.extras = (Array.isArray(input.extras) ? input.extras : [])
+    .slice(0, 20)
+    .filter((e) => e && typeof e === "object" && String(e.name || "").trim())
+    .map((e) => ({ name: String(e.name).trim().slice(0, 40), text: String(e.text || "").trim().slice(0, 300) }));
   out.skip = (Array.isArray(input.skip) ? input.skip : [])
     .slice(0, 50)
     .filter((s) => s && typeof s === "object" && ["keyword", "regex", "group"].includes(String(s.type || "").toLowerCase()) && String(s.value || "").trim())
@@ -3453,7 +3459,8 @@ function registerBackupApi(service) {
         if (body.replyMinutes !== undefined) patch.replyMinutes = body.replyMinutes;
         if (body.peakHalf !== undefined) patch.peakHalf = body.peakHalf;
         if (Array.isArray(body.skip)) patch.skip = body.skip;
-        if (!Object.keys(patch).length) return sendJson(res, { ok: false, error: "没有要改的字段（watchMinutes / replyMinutes / peakHalf / skip）" }, 400);
+        if (Array.isArray(body.extras)) patch.extras = body.extras;
+        if (!Object.keys(patch).length) return sendJson(res, { ok: false, error: "没有要改的字段（watchMinutes / replyMinutes / peakHalf / skip / extras）" }, 400);
         const settings = writeQqWatchSettings(patch);
         return sendJson(res, { ...qqWatchView(), settings, message: "已保存（观察器下一轮热读生效，不用重启）" });
       }

@@ -393,6 +393,89 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // 2026-11-22 丹阳定：观察器的「省 token」设置从值班台搬到记忆设置（独立 tab）。
+    // 这里同时留一个开放接口：extras（自定义查看项，一行一条「名称=提示」），
+    // 别人或别的插件想加「需要时常查看的内容」，往 settings.json 的 extras 里加即可。
+    function ObserverPanel() {
+      const { useState, useEffect, useCallback } = React
+      const [qw, setQw] = useState(null)
+      const [skipText, setSkipText] = useState('')
+      const [extrasText, setExtrasText] = useState('')
+      const [savingQw, setSavingQw] = useState(false)
+      const [qwMsg, setQwMsg] = useState('')
+      const loadQw = useCallback(async () => {
+        const res = await callApi('qq-watch')
+        if (res && res.ok === true) {
+          setQw(res)
+          setSkipText((((res.settings || {}).skip) || []).map((r) => r.type + ':' + r.value).join('\n'))
+          setExtrasText((((res.settings || {}).extras) || []).map((e) => e.name + '=' + (e.text || '')).join('\n'))
+        }
+      }, [])
+      useEffect(() => { loadQw() }, [loadQw])
+      const saveQw = useCallback(async () => {
+        if (!qw) return
+        setSavingQw(true)
+        setQwMsg('')
+        const skip = skipText.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
+          const i = line.indexOf(':')
+          if (i < 0) return null
+          const type = line.slice(0, i).trim().toLowerCase()
+          const value = line.slice(i + 1).trim()
+          if (!['keyword', 'regex', 'group'].includes(type) || !value) return null
+          return { type, value }
+        }).filter(Boolean)
+        const extras = extrasText.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
+          const i = line.indexOf('=')
+          if (i <= 0) return null
+          return { name: line.slice(0, i).trim(), text: line.slice(i + 1).trim() }
+        }).filter(Boolean)
+        const res = await callApi('qq-watch', {
+          watchMinutes: qw.settings.watchMinutes,
+          replyMinutes: qw.settings.replyMinutes,
+          peakHalf: Boolean(qw.settings.peakHalf),
+          skip,
+          extras,
+        })
+        setSavingQw(false)
+        if (res && res.ok === true) { setQw(res); setQwMsg('已保存（观察器下一轮热读生效，不用重启）') }
+        else setQwMsg((res && res.error) || '保存失败')
+      }, [qw, skipText, extrasText])
+      const setQwField = (k, v) => setQw((prev) => (prev ? { ...prev, settings: { ...prev.settings, [k]: v } } : prev))
+      const numInputStyle = { width: 72, padding: '2px 6px', fontSize: 12 }
+      const taStyle = { width: '100%', marginTop: 4, boxSizing: 'border-box', fontFamily: 'ui-monospace, monospace', fontSize: 12, resize: 'vertical' }
+      if (!qw) return h('div', { className: 'pmb' }, h('div', { className: 'pmb-sub' }, '读取观察器设置…'))
+      return h('div', { className: 'pmb' },
+        h('div', { className: 'pmb-title' }, '省 token（观察器）'),
+        h('div', { className: 'pmb-sub' }, '跟值班台分开了：这里只改观察器的节奏与查看内容，保存后下一轮热读。'),
+        h('div', { className: 'pmb-grid' },
+          h('div', { className: 'pmb-kv' },
+            h('div', { className: 'pmb-k' }, '观察间隔（分钟）'),
+            h('div', { className: 'pmb-v' },
+              h('input', { type: 'number', min: 1, max: 30, value: qw.settings.watchMinutes, style: numInputStyle, onChange: (e) => setQwField('watchMinutes', Number(e.target.value) || 1) }))),
+          h('div', { className: 'pmb-kv' },
+            h('div', { className: 'pmb-k' }, '回话间隔（分钟）'),
+            h('div', { className: 'pmb-v' },
+              h('input', { type: 'number', min: 1, max: 30, value: qw.settings.replyMinutes, style: numInputStyle, onChange: (e) => setQwField('replyMinutes', Number(e.target.value) || 1) }))),
+          h('div', { className: 'pmb-kv' },
+            h('div', { className: 'pmb-k' }, '峰时减半'),
+            h('div', { className: 'pmb-v' },
+              h('label', { style: { display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' } },
+                h('input', { type: 'checkbox', checked: Boolean(qw.settings.peakHalf), onChange: (e) => setQwField('peakHalf', e.target.checked) }),
+                h('span', null, qw.settings.peakHalf ? '开（峰时两个间隔 ×2）' : '关')))),
+          h('div', { className: 'pmb-kv' },
+            h('div', { className: 'pmb-k' }, '当前生效'),
+            h('div', { className: 'pmb-v' }, '观察 ' + qw.effective.watchMinutes + ' 分钟 / 回话 ' + qw.effective.replyMinutes + ' 分钟' + (qw.effective.peak ? '（峰时）' : '')))),
+        h('div', { style: { marginTop: 10, fontSize: 12, opacity: 0.85 } }, '自定义查看项（一行一条「名称=提示」；别人也能加，观察时按它去查）'),
+        h('textarea', { value: extrasText, onChange: (e) => setExtrasText(e.target.value), rows: 3, placeholder: '待办=看有没有被卡住的事\n私信=有没有没回的人', style: taStyle }),
+        h('div', { style: { marginTop: 10, fontSize: 12, opacity: 0.85 } }, '跳过规则（一行一条，type:value；type = keyword / regex / group；留空 = 什么都不跳）'),
+        h('textarea', { value: skipText, onChange: (e) => setSkipText(e.target.value), rows: 3, placeholder: 'keyword:插眼\ngroup:123456789', style: taStyle }),
+        h('div', { className: 'pmb-actions', style: { marginTop: 8 } },
+          h('button', { className: 'pmb-btn', disabled: savingQw, onClick: () => saveQw() }, savingQw ? '保存中…' : '保存设置'),
+          qwMsg ? h('span', { className: 'pmb-sub' }, qwMsg) : null),
+        h('div', { className: 'pmb-sub' }, '文件：' + (qw.effective.file || '~/.dsh/qq-watch/settings.json') + (qw.effective.exists ? '' : '（还没创建，保存后生成）')),
+      )
+    }
+
     function MemorySettingsPanel(props) {
       const { useState } = React
       // initialTab 只给测试用（宿主不传）；页面仍按点 tab 切换
@@ -403,12 +486,14 @@ window.__ModuleLoader__.load({
         ['backup', '备份'],
         ['summary', '自动摘要'],
         ['session', '会话记忆'],
+        ['observer', '观察器'],
         ['update', '插件更新'],
       ]
       const body = tab === 'overview' ? h(OverviewPanel)
         : tab === 'features' ? h(FeaturesPanel)
         : tab === 'backup' ? h(BackupPanel)
         : tab === 'summary' ? h(AutoSummaryPanel)
+        : tab === 'observer' ? h(ObserverPanel)
         : tab === 'update' ? h(UpdatePanel)
         : h(SessionMemoryPanel)
       return h('div', { className: 'pmb' },
@@ -1452,49 +1537,6 @@ window.__ModuleLoader__.load({
         return () => clearInterval(t)
       }, [load])
 
-      // B-53 / B-54：观察器设置（观察间隔 / 回话间隔 / 峰时减半 / 跳过规则）
-      // 数据源是 host 的 /dsh-puppet-memory-api?action=qq-watch，落盘 ~/.dsh/qq-watch/settings.json；
-      // 观察器每轮热读，所以保存后不用重启它。
-      const [qw, setQw] = useState(null)
-      const [skipText, setSkipText] = useState('')
-      const [savingQw, setSavingQw] = useState(false)
-      const [qwMsg, setQwMsg] = useState('')
-      const loadQw = useCallback(async () => {
-        const res = await callApi('qq-watch')
-        if (res && res.ok === true) {
-          setQw(res)
-          setSkipText((((res.settings || {}).skip) || []).map((r) => r.type + ':' + r.value).join('\n'))
-        }
-      }, [])
-      useEffect(() => { loadQw() }, [loadQw])
-      const saveQw = useCallback(async () => {
-        if (!qw) return
-        setSavingQw(true)
-        setQwMsg('')
-        const skip = skipText.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
-          const i = line.indexOf(':')
-          if (i < 0) return null
-          const type = line.slice(0, i).trim().toLowerCase()
-          const value = line.slice(i + 1).trim()
-          if (!['keyword', 'regex', 'group'].includes(type) || !value) return null
-          return { type, value }
-        }).filter(Boolean)
-        const res = await callApi('qq-watch', {
-          watchMinutes: qw.settings.watchMinutes,
-          replyMinutes: qw.settings.replyMinutes,
-          peakHalf: Boolean(qw.settings.peakHalf),
-          skip,
-        })
-        setSavingQw(false)
-        if (res && res.ok === true) {
-          setQw(res)
-          setQwMsg('已保存（观察器下一轮热读生效，不用重启）')
-        } else {
-          setQwMsg((res && res.error) || '保存失败')
-        }
-      }, [qw, skipText])
-      const setQwField = (k, v) => setQw((prev) => (prev ? { ...prev, settings: { ...prev.settings, [k]: v } } : prev))
-      const numInputStyle = { width: 72, padding: '2px 6px', fontSize: 12 }
 
       const card = (title, rows, note) =>
         h('div', { className: 'pmb-card' },
@@ -1531,51 +1573,6 @@ window.__ModuleLoader__.load({
           ['最近报告', bili.lastReport ? (bili.lastReport.file + '（' + bili.lastReport.ago + '）') : '（还没跑过）'],
           ['最近日志', bili.lastLog ? String(bili.lastLog).slice(0, 90) : '（暂无）'],
         ], '报告在 ~/.dsh/bili-duty/out/'),
-        qw ? h('div', { className: 'pmb-card' },
-          h('div', { className: 'pmb-title' }, '省 token（观察器设置）'),
-          h('div', { className: 'pmb-grid' },
-            h('div', { className: 'pmb-kv' },
-              h('div', { className: 'pmb-k' }, '观察间隔（分钟）'),
-              h('div', { className: 'pmb-v' },
-                h('input', {
-                  type: 'number', min: 1, max: 30, value: qw.settings.watchMinutes,
-                  style: numInputStyle,
-                  onChange: (e) => setQwField('watchMinutes', Number(e.target.value) || 1),
-                }))),
-            h('div', { className: 'pmb-kv' },
-              h('div', { className: 'pmb-k' }, '回话间隔（分钟）'),
-              h('div', { className: 'pmb-v' },
-                h('input', {
-                  type: 'number', min: 1, max: 30, value: qw.settings.replyMinutes,
-                  style: numInputStyle,
-                  onChange: (e) => setQwField('replyMinutes', Number(e.target.value) || 1),
-                }))),
-            h('div', { className: 'pmb-kv' },
-              h('div', { className: 'pmb-k' }, '峰时减半'),
-              h('div', { className: 'pmb-v' },
-                h('label', { style: { display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' } },
-                  h('input', {
-                    type: 'checkbox', checked: Boolean(qw.settings.peakHalf),
-                    onChange: (e) => setQwField('peakHalf', e.target.checked),
-                  }),
-                  h('span', null, qw.settings.peakHalf ? '开（峰时两个间隔 ×2）' : '关')))),
-            h('div', { className: 'pmb-kv' },
-              h('div', { className: 'pmb-k' }, '当前生效'),
-              h('div', { className: 'pmb-v' }, '观察 ' + qw.effective.watchMinutes + ' 分钟 / 回话 ' + qw.effective.replyMinutes + ' 分钟' + (qw.effective.peakApplied ? '（峰时已 ×2）' : ''))),
-          ),
-          h('div', { style: { marginTop: 10, fontSize: 12, opacity: 0.85 } }, '跳过规则（一行一条，type:value；type = keyword / regex / group；留空 = 什么都不跳）'),
-          h('textarea', {
-            value: skipText,
-            onChange: (e) => setSkipText(e.target.value),
-            rows: 3,
-            placeholder: 'keyword:插眼\ngroup:123456789',
-            style: { width: '100%', marginTop: 4, boxSizing: 'border-box', fontFamily: 'ui-monospace, monospace', fontSize: 12, resize: 'vertical' },
-          }),
-          h('div', { className: 'pmb-actions', style: { marginTop: 8 } },
-            h('button', { className: 'pmb-btn', disabled: savingQw, onClick: () => saveQw() }, savingQw ? '保存中…' : '保存设置'),
-            qwMsg ? h('span', { className: 'pmb-sub' }, qwMsg) : null),
-          h('div', { className: 'pmb-sub' }, '文件：' + (qw.effective.file || '~/.dsh/qq-watch/settings.json') + (qw.effective.exists ? '' : '（还没创建，保存后生成）') + ' ｜ 峰时窗口 09:00–12:00、14:00–18:00'),
-        ) : null,
         )))
     }
 

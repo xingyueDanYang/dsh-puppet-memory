@@ -90,7 +90,7 @@ await t("重复手动点击只检查一次，忙时禁止改设置", async () =>
   assert.equal(h.calls.filter((x) => x.action === "update-check").length, 1);
   assert.equal(h.calls[1].body.force, true);
   // 面板现在挂在「记忆设置」里，顶部 tab 切换按钮常驻可点，不算被禁用的控件
-  const TAB_LABELS = ["记忆", "功能开关", "备份", "自动摘要", "会话记忆", "插件更新"];
+  const TAB_LABELS = ["记忆", "功能开关", "备份", "自动摘要", "会话记忆", "观察器", "插件更新"];
   assert.ok(h.nodes()
     .filter((n) => (n.type === "button" || n.type === "select") && !TAB_LABELS.includes(h.text(n)))
     .every((n) => n.props.disabled));
