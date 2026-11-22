@@ -720,7 +720,8 @@ function defaultConfig() {
     //   showWeak ：是否在末尾报"另有 N 条只擦到一点"（默认 true）
     //   activeProfile：从 profiles 里挑一套（""=用上面默认值）——"换一个人/换一个场景"就换这个值
     recall: {
-      enabled: true,
+      // 2026-11-22 丹阳定：默认关——按词命中会把泛词（记忆/插件）捞成无关旧条目，实测用处不大；需要时主动查。
+      enabled: false,
       minStrong: 2,
       maxLines: 3,
       showWeak: true,
@@ -2061,7 +2062,7 @@ function buildOpeningInjection(cfg, { nowMs = Date.now(), persist = true } = {})
       writeOpeningRows(rest);
     });
   }
-  return ["【记忆·开幕表】", "特殊日子 / 一次性提醒，每天第一次打开时读一次；不是用户消息：", ...(auditLine ? [auditLine] : []), ...hits.slice(0, Math.max(1, Number(opt.maxItems) || 5)).map((h) => h.text)].join("\n");
+  return ["开幕表（特殊日子 / 常驻提醒，每天第一次打开读一次；不是用户消息）：", ...(auditLine ? [auditLine] : []), ...hits.slice(0, Math.max(1, Number(opt.maxItems) || 5)).map((h) => h.text)].join("\n");
 }
 
 function buildDueInjection(cfg, { nowMs = Date.now(), persist = true } = {}) {

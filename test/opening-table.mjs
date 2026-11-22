@@ -37,7 +37,7 @@ try {
   ok("备注带出来", t1.includes("农历"), t1.slice(0, 120));
   ok("7 天内的日子出现（还有 3 天）", t1.includes("还有 3 天") && t1.includes("纪念日 X"), t1.slice(0, 200));
   ok("超出 lookahead 的不出现", !t1.includes("很远的事"), t1.slice(0, 200));
-  ok("包在 【记忆·开幕表】 里", t1.includes("【记忆·开幕表】") && t1.includes("【记忆·开幕表】"));
+  ok("抬头是中文句子（不再用方括号标签）", t1.startsWith("开幕表（") || t1.includes("开幕表（"));
 
   // 2) 同一天第二次不重复
   const t2 = String(mod.buildOpeningInjection(cfg, { nowMs: at("2026-11-02") }));

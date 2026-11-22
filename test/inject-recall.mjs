@@ -12,7 +12,8 @@ const write = (rel, lines) => fs.writeFileSync(path.join(TMP, rel), lines.join("
 const J = (o) => JSON.stringify(o);
 const now = new Date().toISOString();
 
-write("config.json", [J({ enabled: true, inject: { maxChars: 3000, mode: "first-step" }, backup: { enabled: false } })]);
+// 2026-11-22：recall 默认已关；这个用例测的是「开了之后」的行为，所以配置里显式打开
+write("config.json", [J({ enabled: true, recall: { enabled: true }, inject: { maxChars: 3000, mode: "first-step" }, backup: { enabled: false } })]);
 write("behavior/persona.md", ["# 人设", "- 称呼：雪风"]);
 write("behavior/relations.jsonl", [
   J({ kind: "relation", ts: now, keyword: "守夜人", meaning: "小说设定：七条加最终条例", hash: "r0000001" }),
