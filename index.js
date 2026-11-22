@@ -2264,7 +2264,7 @@ function mergeInjectionMessages(list) {
 // 压缩、复位、会话结束时清空：那些内容已经从上下文里消失，得允许重发。
 const sentBlockHashes = new Map(); // sessionId -> Set(sha1)
 const dedupeLogged = new Map(); // sessionId -> Set(块名)：同一个块只报一次「去重」回执
-const ALWAYS_SEND_BLOCKS = new Set(["reset", "rules", "core", "core_state", "persona", "persona_full"]);
+const ALWAYS_SEND_BLOCKS = new Set(["reset", "rules", "core", "core_state", "persona"]);
 
 function blockText(msg) {
   const c = msg && msg.content;
