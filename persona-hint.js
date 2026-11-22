@@ -33,8 +33,12 @@ export function personaHintLine(hint, turn, opts) {
     const headLine = "【人设卡重载】上下文里的人设不完整（压缩或截断），下面是完整的人设，按它说话：";
     return card ? headLine + String.fromCharCode(10) + card : "";
   }
-  // 2026-11-22 丹阳定：鼓励词**每轮都给**（= 这段时间的方向锚），数字仍只在首轮与每 100 轮给。
-  const numDue = turn === 1 || turn % n === 0;
+  // 2026-11-22 丹阳定：鼓励词**每轮都给**（= 这段时间的方向锚）。
+  // 数字的间隔分两段：**前 300 轮用 25**（这段是熟悉期，漂移最容易在 100 轮内冒头；
+  // 文献也说 25 轮贴近漂移窗口），**300 轮之后用配置值（100）**——那时已经历多次压缩，人设稳了，不必再密。
+  const dense = turn < 300;
+  const step = dense ? Math.min(25, n) : n;
+  const numDue = turn === 1 || turn % step === 0;
   if (h.mode === "roleplay" && h.encourage) {
     return numDue ? `100/100\n${h.encourage}` : h.encourage;
   }
