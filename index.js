@@ -65,6 +65,20 @@ export function cardInjectMode({ justStarted = false, justCompressed = false, fu
   return "skip";
 }
 
+// 2026-11-22：把 levels 真正接上——strong=全文，weak=一行提示（不再塞全文）。
+// 之前 levels 是死配置：注入处直接读 raw 文本，state=weak 根本没生效。
+// 返回 "" 表示这块这次不发。
+export function cardPartText({ mode = "skip", level = "strong", raw = "", budget = 400, label = "", target = "", changed = false } = {}) {
+  if (mode !== "strong") return "";
+  const text = String(raw || "");
+  if (!text) return "";
+  // 弱档：平时只给一行提示；但**内容改过**的那一轮要给全文，否则改了卡对方看不见
+  if (level === "weak" && !changed) {
+    return `（${label}在场，本轮只给提示；全文用 memory_core action=get target=${target} 取。）`;
+  }
+  return text.length > budget ? text.slice(0, budget).trimEnd() : text;
+}
+
 export function nextPhaseTurn(prev, userKey) {
   const turn = Number(prev && prev.turn) || 0;
   const key = String(userKey || "");
@@ -9071,9 +9085,14 @@ function apply(ctx) {
         cardPlan.set(sessionId, plan);
         diag(`卡片节奏 turn=${plan.turn} core=${modeCore} rules=${modeRules} state=${modeState}${justCompressed ? "（压缩后强补充）" : ""}`);
         // 2026-11-21：decide() 只返回 strong / skip（弱提示已取消），不再有 weak 分支
-        const rulesForInject = filterBoundRules(!coreAllowed || modeRules !== "strong" ? "" : fullOf(core.rawRules, core.rulesBudget), activeBinder());
-        const coreText = !coreAllowed || modeCore !== "strong" ? "" : fullOf(core.rawCore, core.budget);
-        const coreStateForInject = !coreAllowed || modeState !== "strong" ? "" : fullOf(core.rawState, core.stateBudget);
+        // 2026-11-22：走 cardPartText，levels 生效（strong=全文 / weak=一行提示）
+        const cardLevels = coreOptions(cfg).levels;
+        const rulesForInject = filterBoundRules(
+          !coreAllowed ? "" : cardPartText({ mode: modeRules, level: cardLevels.rules, raw: core.rawRules, budget: core.rulesBudget, label: "规则卡", target: "rules", changed: Boolean(changedNow.rules) }),
+          activeBinder(),
+        );
+        const coreText = !coreAllowed ? "" : cardPartText({ mode: modeCore, level: cardLevels.core, raw: core.rawCore, budget: core.budget, label: "核心卡", target: "core", changed: Boolean(changedNow.core) });
+        const coreStateForInject = !coreAllowed ? "" : cardPartText({ mode: modeState, level: cardLevels.state, raw: core.rawState, budget: core.stateBudget, label: "状态卡", target: "state", changed: Boolean(changedNow.state) });
         // B-47：复位时若带了一句临时约束，这一步跟着三张卡一起注入，之后删除（只生效一次）
         const resetNote = sessionResetNotes.get(sessionId) || "";
         // 完整摘要（人设+关系+笔记+日记）：mode=first-step 时只在第一次注入
