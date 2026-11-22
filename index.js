@@ -10772,20 +10772,7 @@ function apply(ctx) {
       },
     });
 
-    register({
-      name: "memory_doctor",
-      description:
-        "环境自检（只读）：记忆目录能否写、备份目录能不能用（盘不存在会自动回退到家目录）、剩余空间、关键文件、social/state/assets 目录、设置页接口、会话沙箱模式、插件版本。换机器 / 备份一直失败 / 不确定插件到底跑没跑起来时，先跑这个。不改任何数据。",
-      parameters: { type: "object", properties: {} },
-      output,
-      execute() {
-        try {
-          return renderDoctor(doctorReport({ ctx, memDir: MEM_DIR }));
-        } catch (err) {
-          return `自检失败：${err?.message || err}`;
-        }
-      },
-    });
+    ;
 
     register({
       name: "memory_forget",
@@ -10794,7 +10781,7 @@ function apply(ctx) {
       parameters: {
         type: "object",
         properties: {
-          action: { type: "string", enum: ["list", "suppress", "unsuppress", "delete", "overview"] },
+          action: { type: "string", enum: ["list", "suppress", "unsuppress", "delete", "overview", "memo-clear"], description: "…或 memo-clear=清空便签（原 memory_clear）" },
           session: { type: "string", description: "只读自检：目录可写、备份目录可用、剩余空间、关键文件与版本。跑不起来或有异常时先跑它。" },
           hashes: { type: "array", items: { type: "string" }, description: "suppress/unsuppress 用：要处理的 hash（或 core/state/social/persona）" },
           hash: { type: "string", description: "delete 用：本会话条目的 hash" },
@@ -10808,6 +10795,7 @@ function apply(ctx) {
           if (!sid) return "没有会话 id：请传 session，或从有会话的上下文里调用。";
           const mem = sessionMemory();
           const action = String(args?.action || "list");
+          if (action === "memo-clear") return clearMemos();
           if (action === "overview") {
             const o = mem.overview(sid);
             const disabled = !isEnabledForSession(loadConfig(), sid);
@@ -10852,12 +10840,13 @@ function apply(ctx) {
     register({
 
       name: "memory_stats",
-      description: "查看记忆规模、开关状态与最近备份时间。",
-      parameters: { type: "object", properties: {} },
+      description: "查看记忆规模、开关状态与最近备份时间（action=status，默认）；action=doctor 做环境自检（目录可写/备份目录/空间/关键文件/版本）。",
+      parameters: { type: "object", properties: { action: { type: "string", enum: ["status", "doctor"], description: "status=规模与开关（默认）；doctor=环境自检" } } },
       output,
-      async execute() {
+      async execute(args) {
         try {
           ensureDirs();
+          if (String(args?.action || "") === "doctor") return renderDoctor(doctorReport({ ctx, memDir: MEM_DIR }));
           return buildStats();
         } catch (err) {
           return `统计失败：${err?.message || err}`;
@@ -11197,10 +11186,18 @@ function apply(ctx) {
 
       name: "memory_backup",
       description:
-        "立刻备份记忆（深层/阵列/行为/资产/配置/原始会话）。config.backup.work 开着时（默认关，设置面板「工作文件」）手动备份会额外带上 work-<时间>/（不进记忆库、不参与检索、不进每日轮转，保留 keepArchives 份）；work:true 这一次强制带。自动备份一天最多一次、保留 30 天，手动不受限。mode=cloud 生成 AES-256-GCM 加密云包（默认 F:\\BaiduSyncdisk\\dsh-memory-cloud）。【红线】密码不写进配置/脚本/文档/记忆，只走参数或 DSH_MEMORY_BACKUP_PASS；恢复先解到独立目录、核对 sha256 再人工覆盖，不要直接解到原位。",
+        "备份 / 导出 / 归档（合并入口）：action=local 本机快照、cloud 加密云包、export 导出可交接档案、archive 归档会话原文。立刻备份记忆（深层/阵列/行为/资产/配置/原始会话）。config.backup.work 开着时（默认关，设置面板「工作文件」）手动备份会额外带上 work-<时间>/（不进记忆库、不参与检索、不进每日轮转，保留 keepArchives 份）；work:true 这一次强制带。自动备份一天最多一次、保留 30 天，手动不受限。mode=cloud 生成 AES-256-GCM 加密云包（默认 F:\\BaiduSyncdisk\\dsh-memory-cloud）。【红线】密码不写进配置/脚本/文档/记忆，只走参数或 DSH_MEMORY_BACKUP_PASS；恢复先解到独立目录、核对 sha256 再人工覆盖，不要直接解到原位。",
       parameters: {
         type: "object",
         properties: {
+          action: { type: "string", enum: ["local", "cloud", "export", "archive"], description: "local=本机快照（默认）/ cloud=加密云包 / export=导出档案 / archive=归档会话原文" },
+          outDir: { type: "string", description: "export 用：输出目录（默认记忆目录/exports/export-时间）" },
+          diaryLimit: { type: "number", description: "export 用：导出最近多少条日记，默认 300；0=不导" },
+          includeWorkbook: { type: "boolean", description: "export 用：是否连手册正文一起导出，默认 true" },
+          session: { type: "string", description: "archive 用：指定会话 id（可只给前几位）" },
+          limit: { type: "number", description: "archive 用：没指定 session 时最多取几个（默认 3，上限 20）" },
+          minBytes: { type: "number", description: "archive 用：只归档不小于这个字节数的会话" },
+          countRounds: { type: "boolean", description: "archive 用：顺便解压数用户轮数（慢，默认 false）" },
           mode: { type: "string", enum: ["local", "cloud"], description: "local=本机快照（默认）；cloud=加密云包" },
           password: { type: "string", description: "cloud 密���；更安全的是设 DSH_MEMORY_BACKUP_PASS" },
           dir: { type: "string", description: "cloud 用：输出目录（默认百度网盘同步目录；也可指定别的文件夹）" },
@@ -11214,6 +11211,9 @@ function apply(ctx) {
       async execute(args) {
         try {
           ensureDirs();
+          const act = String(args?.action || "");
+          if (act === "export") return exportArchive(args || {});
+          if (act === "archive") return archiveSessions(args || {});
           if (String(args?.mode || "local") === "cloud") return cloudBackupNow(args || {});
           return backupNow("manual", { force: true, work: args?.work === true });
         } catch (err) {
@@ -11254,51 +11254,9 @@ function apply(ctx) {
       },
     });
 
-    register({
+    ;
 
-      name: "memory_clear",
-      description: "清空便签（layer=memo）。清空前会把原便签归档到 behavior/archive/，不会直接丢内容。【使用规则】清空是不可逆面：他明确要清才清，不要自己顺手清。",
-      parameters: {
-        type: "object",
-        properties: {
-          layer: { type: "string", enum: ["memo"], description: "要清空的层，目前只支持 memo（便签）" },
-        },
-        required: ["layer"],
-      },
-      output,
-      async execute(args) {
-        try {
-          ensureDirs();
-          if (String(args?.layer || "memo") !== "memo") return "目前只能清空便签（layer=memo）";
-          return clearMemos();
-        } catch (err) {
-          return `清空失败：${err?.message || err}`;
-        }
-      },
-    });
-
-    register({
-      name: "memory_export",
-      description:
-        "把记忆导出成一份可交接的档案：<记忆目录>/exports/export-<时间>/ 下写「档案.md」（人读）+「data.json」（机器读），含人设、三张卡、关系/用户/常言/笔记/出处/便签、最近日记、标废记录、手册、会话索引。全程只读，不改任何记忆数据。用于换机器、换宿主、把记忆交给下一代模型重算，或交给人接手。",
-      parameters: {
-        type: "object",
-        properties: {
-          outDir: { type: "string", description: "输出目录（默认 ~/.dsh/memory/exports/export-<时间>）" },
-          diaryLimit: { type: "number", description: "导出最近多少条日记，默认 300；0 = 不导日记" },
-          includeWorkbook: { type: "boolean", description: "是否连手册正文一起导出，默认 true" },
-        },
-        required: [],
-      },
-      output,
-      async execute(args) {
-        try {
-          return exportArchive(args || {});
-        } catch (err) {
-          return `导出失败：${err?.message || err}`;
-        }
-      },
-    });
+    ;
 
     register({
 
@@ -11326,52 +11284,9 @@ function apply(ctx) {
       },
     });
 
-    register({
-      name: "memory_archive_session",
-      description:
-        "重要会话原文归档（B-61）：宿主的会话原文只存在 ~/.dsh/sessions/ 下，留多久由宿主决定，清掉就没了——原文是唯一不能重算的东西（摘要、要点、索引、向量都能重算）。action=list 只列不复制（有哪些会话、多大、日期、是否已归档）；action=apply 才真的整份拷进记忆目录 assets/raw-sessions/，拷完校验 sha256 并记索引（会话 id/时间/大小/sha256/来源 cwd）。归档后 memory_recall 在宿主文件缺失时自动回落到副本。不脱敏（脱敏就不是原文了），所以副本只留本机、不进导出档案；不自动跑。",
-      parameters: {
-        type: "object",
-        properties: {
-          action: { type: "string", enum: ["list", "apply"], description: "list=只列（默认）；apply=复制并记索引" },
-          session: { type: "string", description: "action=apply 时指定会话 id（可只给前几位）；不传就按体积取最大的几个" },
-          limit: { type: "number", description: "action=apply 且没指定 session 时最多取几个（默认 3，上限 20）" },
-          minBytes: { type: "number", description: "只归档不小于这个字节数的会话" },
-          countRounds: { type: "boolean", description: "顺便解压数用户轮数（慢，默认 false）" },
-        },
-        required: [],
-      },
-      output,
-      async execute(args) {
-        try {
-          return archiveSessions(args || {});
-        } catch (err) {
-          return `归档会话失败：${err?.message || err}`;
-        }
-      },
-    });
+    ;
 
-    register({
-      name: "memory_tags",
-      description:
-        "冷门标签卡（B-78）：action=list 看卡（默认，只列还冷门的自定义标签＋一句释义＋代表 hash）；action=all 看全部标签与条数；action=check 查一个标签的归一去向、是否词表内、有多少条。用法约定：同一个问题连搜三次都不相关，才来读这张卡，再按标签查；读完还找不到就直说找不到，别换着说法硬撞。",
-      parameters: {
-        type: "object",
-        properties: {
-          action: { type: "string", enum: ["list", "all", "check"], description: "list=冷门卡（默认）；all=全部标签；check=查单个标签" },
-          tag: { type: "string", description: "action=check 时必填：要查的标签（会按别名归一）" },
-        },
-        required: [],
-      },
-      output,
-      async execute(args) {
-        try {
-          return tagCard(args || {});
-        } catch (err) {
-          return `读标签卡失败：${err?.message || err}`;
-        }
-      },
-    });
+    ;
 
     ctx.tools.register({
       name: "memory_handoff",
@@ -11413,7 +11328,8 @@ function apply(ctx) {
       parameters: {
         type: "object",
         properties: {
-          action: { type: "string", enum: ["rebuild", "stats", "links"], description: "默认 rebuild" },
+          action: { type: "string", enum: ["rebuild", "stats", "links", "tags"], description: "默认 rebuild；tags=冷门标签卡（原 memory_tags）" },
+          tag: { type: "string", description: "action=tags 时：要查的标签（按别名归一）" },
           keyword: { type: "string", description: "action=links 时查的关键词" },
           hash: { type: "string", description: "action=links 时查的 hash（可只给前几位）" },
         },
@@ -11422,6 +11338,7 @@ function apply(ctx) {
       async execute(args) {
         try {
           const action = String(args?.action || "rebuild");
+          if (action === "tags") return tagCard(args || {});
           if (action === "stats") return guideStats();
           if (action === "links") return guideLinks(args || {});
           const r = rebuildGuide();

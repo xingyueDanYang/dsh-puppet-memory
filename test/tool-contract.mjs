@@ -78,7 +78,7 @@ try {
   ok("注册数量 = 36（0.45 加了 memory_people）", tools.length === 36, `实际 ${tools.length}`);
 
   const names = tools.map((t) => t.name);
-  for (const want of ["memory_rules", "memory_grants", "memory_opening", "memory_search", "memory_write", "memory_handoff", "memory_archive_session"]) {
+  for (const want of ["memory_rules", "memory_grants", "memory_opening", "memory_search", "memory_write", "memory_handoff", "memory_backup"]) {
     ok(`注册了 ${want}`, names.includes(want));
   }
   ok("没有重复工具名", new Set(names).size === names.length);

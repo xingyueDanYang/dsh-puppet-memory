@@ -97,9 +97,10 @@ try {
     applyErr = err?.message || String(err);
   }
   ok("apply() 不抛异常", !applyErr, applyErr);
-  const doctorTool = tools.find((t) => t.name === "memory_doctor");
-  ok("memory_doctor 工具已注册", Boolean(doctorTool));
-  const toolOut = doctorTool ? doctorTool.execute({}) : "";
+  // 2026-11-22：memory_doctor 已并入 memory_stats（action=doctor）
+  const doctorTool = tools.find((t) => t.name === "memory_stats");
+  ok("自检入口已并入 memory_stats", Boolean(doctorTool));
+  const toolOut = doctorTool ? await doctorTool.execute({ action: "doctor" }) : "";
   ok("工具能跑出自检报告", String(toolOut).includes("记忆插件自检"), String(toolOut).slice(0, 80));
   ok("工具不改记忆（没留探针文件）", !fs.existsSync(path.join(TMP, "behavior", ".probe")));
 
