@@ -281,13 +281,13 @@ window.__ModuleLoader__.load({
               key: m, type: 'button',
               className: (ph && ph.mode === m) ? 'pmb-btn pmb-btn-on' : 'pmb-btn',
               onClick: () => setPersonaMode(m),
-            }, m === 'off' ? '关闭' : '开（数字锚定）')),
+            }, m === 'off' ? '关闭' : '开')),
           ))
           // 2026-11-22 丹阳定：这里只留必要一句，删掉重复的解释（机制细节看代码注释）
           const explain = h('div', { className: 'pmb-hint' },
             '跟记忆内容无关，默认开；切换立刻生效。',
             h('div', null, '· 关闭：一个字不加。'),
-            h('div', null, '· 开：每轮一个 100/100 数字锚；写了鼓励词就一起给。'),
+            h('div', null, '· 开：鼓励词每轮都给；数字 100/100 只在首轮和每 25 轮。'),
           )
           if (!ph || ph.mode === 'off') return h('div', { className: 'pmb-card' },
             h('div', { className: 'pmb-title' }, '人设提示'),
@@ -298,9 +298,9 @@ window.__ModuleLoader__.load({
           const label = '数字锚定'
           return h('div', { className: 'pmb-card' },
             h('div', { className: 'pmb-title' }, '人设提示'),
-            h(Row, { label: '方式' }, h('div', null, label + '（每轮一行）')),
+            h(Row, { label: '方式' }, h('div', null, label + '（首轮 + 每 25 轮一行）')),
             h(Row, { label: '状态' }, h('div', null, ph.lastIntegrity === 'missing-or-clipped' ? '上次体检不完整，已重载过' : '正常（卡在场）')),
-            h(Row, { label: '鼓励词' }, h('div', null, ph.hasEncourage ? '有（跟数字一起每轮给；换方向时覆盖）' : '还没写（只给数字）')),
+            h(Row, { label: '鼓励词' }, h('div', null, ph.hasEncourage ? '有（每轮都给；换方向时覆盖）' : '还没写（只给数字）')),
             h(Row, { label: '切换' }, h('div', { className: 'pmb-actions' },
               ['off', 'on'].map((m) => h('button', {
                 key: m, type: 'button',
