@@ -9653,7 +9653,10 @@ function apply(ctx) {
               if (t && (t.audited || (t.repaired && t.repaired.length))) diag(`自我层节奏：${JSON.stringify(t)}`);
             }
             // 2026-11-22：自我层跟三卡同一节奏（旧「每 5 轮按缺口补」已删，见 docs/三卡注入设计史.md）
-            const selfFull = selfLayer().injectText((sc.inject && sc.inject.maxChars) || 400);
+            // 2026-11-22 丹阳：自我卡没有字数上限，别人塞多少都可能——注入时给硬顶 600 字（配置只能更小）
+            const selfBudget = Math.min(Number((sc.inject && sc.inject.maxChars) || 400) || 400, 600);
+            const selfRaw = selfLayer().injectText(selfBudget);
+            const selfFull = String(selfRaw || "").length > selfBudget ? String(selfRaw).slice(0, selfBudget).trimEnd() + "\n（自我层超硬顶已截断，全文用 memory_self action=list）" : selfRaw;
             const selfHash = sha1(String(selfFull || ""));
             const prevSelf = lastSelfHash.get(sessionId);
             const selfChanged = Boolean(prevSelf) && prevSelf !== selfHash;
