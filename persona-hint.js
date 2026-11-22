@@ -10,7 +10,8 @@
 
 export const personaHintDefaults = {
   mode: "off", // off | score | roleplay
-  everyN: 25,
+  // 2026-11-22 丹阳定：数字只在**第 100 轮**（100 的倍数）与首轮给，25 轮那档取消——100 才是特殊提醒。
+  everyN: 100,
   // 2026-11-21 丹阳定：60 起，每轮 +1，压缩 −随机(1–10)；100 轮全量卡时 −20；不封顶（max 只作显示用）
   score: { value: 60, max: 999, weakStep: 1, strongPenalty: 20, strongZero: false },
   encourage: "", // roleplay 模式下由「扮演总结」写入，每次覆盖
@@ -60,7 +61,7 @@ export function personaHintLine(hint, turn, opts) {
   if (h.mode === "off") return "";
   const broken = String((opts && opts.integrity) || "intact") === "broken";
   const n = Math.max(1, h.everyN);
-  // 显眼点：首轮 + 每 n 轮各给一次（丹阳 2026-11-21 明确：首轮也要）
+  // 显眼点：首轮 + 每 100 轮各给一次（丹阳 2026-11-22 定：25 轮那档取消，只留 100）
   if (!broken && turn !== 1 && turn % n !== 0) return "";
   if (broken) {
     // 强注入 = 状态刷新：给完整人设卡 + 扣分后的新起点。

@@ -8966,12 +8966,9 @@ function apply(ctx) {
         const justStarted = plan.turn === 1;
         if (sessionId) { phaseAll[sessionId] = phPhase; writeJson(phaseFile, phaseAll); }
         const phaseTurn = Number(phPhase.turn) || 0;
-        // 人设全文待补（2026-11-21 第二次修正）：判据用「>= 2 + 一次性标记」，不用「=== 2」。
-        // 等于 2 太脆：轮次一旦跳过去（同一个回话多步、重启、手动重置）就永远不再触发。
-        // 2026-11-21 修：压缩会把相位归零（turn=1），原来「>=2」的判据让压缩后的人设全文永远轮不到。
-        // 现在压缩当轮也认（justCompressed），一次性标记 personaDone 仍然防重复。
-        const personaDue = isNewUserTurn && (justCompressed || phaseTurn >= 2) && phPhase.personaDone !== true;
-        try { diag(`注入入口 phaseTurn=${phaseTurn} isNew=${isNewUserTurn} personaDue=${personaDue} done=${phPhase.personaDone === true}`); } catch {}
+        // 2026-11-22 丹阳定：**人设全文第二轮注入删了**——实测效果不好（一次塞几千字，之后还是靠印象，
+        // 不如不给）。完整人设仍存在 behavior/persona-full.md，要看时读文件；不再自动注入。
+        try { diag(`注入入口 phaseTurn=${phaseTurn} isNew=${isNewUserTurn}`); } catch {}
         // 每轮记账（2026-11-21）：人设分只按用户消息 +1。
         // 必须紧贴相位计算——后面有若干早退分支（没东西可注入、PTC 后续步骤等），
         // 放在它们后面等于永远不执行：分数冻在初始值上。
@@ -9428,7 +9425,7 @@ function apply(ctx) {
           diag("首轮只注入三张卡（其余块从第二轮起）");
         }
         // 第 2 轮只补人设全文：这时候三张卡和其它注入都没得给，早退会让这一条永远轮不到
-        if (!personaDue && !text && !socialText && !handoffText && !recallText && !conflictText && !loreText && !circleText && !lostDetailText && !dueText && !openingText && !cueText && !nowText && !rulesForInject && !habitsForInject && !coreText && !coreStateForInject && !resetNote) return decision;
+        if (!text && !socialText && !handoffText && !recallText && !conflictText && !loreText && !circleText && !lostDetailText && !dueText && !openingText && !cueText && !nowText && !rulesForInject && !habitsForInject && !coreText && !coreStateForInject && !resetNote) return decision;
         const digest = sha1(`${text}\u0000${socialText}\u0000${handoffText}\u0000${recallText}\u0000${dueText}${openingText}\u0000${cueText}\u0000${nowText}\u0000${conflictText}\u0000${loreText}\u0000${circleText}\u0000${lostDetailText}\u0000${rulesForInject}\u0000${habitsForInject}\u0000${coreText}\u0000${coreStateForInject}\u0000${resetNote}`);
         // v0.44.1：注入只跟着「用户说话」走——一条新用户消息只注入一次。
         // 触发源在外部（用户消息），注入本身不会再触发注入，也就不会自激循环。
@@ -9514,41 +9511,14 @@ function apply(ctx) {
             // 2026-11-21 丹阳定：**纯数字块不再注入**——<puppet_persona>97/100</puppet_persona>
             // 没有正文、只有数字和符号，是空白注入。缺卡/被截断时 personaHintLine 返回的是
             // 「重载＋完整人设」，那种仍然要发；只要分数不要。
-            // 显眼点机制（丹阳 2026-11-21 明确不可改）：首轮 + 每 25 轮给一个裸数字，不带说明、不带标记。
+            // 显眼点机制（丹阳 2026-11-21 定、11-22 改频次）：首轮 + 每 100 轮给一个裸数字，不带说明、不带标记。
             return line ? injectionMessage(line) : null;
           } catch (err) {
             return null;
           }
         })();
-        // 2026-11-21 丹阳定：人设卡只写了「怎么做」，完整人设另存一份，
-        // 平时不注入——只在压缩后第 2 轮自动塞一次，之后靠那次建立的印象继续聊。
-        // 文件：behavior/persona-full.md
-        const personaRestMessage = (() => {
-          // 全链路回执（2026-11-21）：这几行是排障用的，别再让「没发生」和「发生了但没痕迹」混在一起
-          try { diag(`人设全文·入口 personaDue=${personaDue} phaseTurn=${phaseTurn}`); } catch {}
-          if (!personaDue) return null;
-          try {
-            const pfPath = path.join(MEM_DIR, "behavior", "persona-full.md");
-            const exists = fs.existsSync(pfPath);
-            const raw = exists ? String(fs.readFileSync(pfPath, "utf8")).trim() : "";
-            try { diag(`人设全文·读文件 exists=${exists} 字数=${raw.length} 路径=${pfPath}`); } catch {}
-            if (!raw) return null;
-            const BUDGET = 6400;
-            const text = raw.length > BUDGET
-              ? raw.slice(0, BUDGET) + `\n（人设全文超 ${BUDGET} 字，已截断；要看全直接读 behavior/persona-full.md）`
-              : raw;
-            // 记一次性标记 + 留回执：下次直接从 diag.log 就能证明「这一轮到底注没注」
-            try {
-              phPhase.personaDone = true;
-              if (sessionId) { phaseAll[sessionId] = phPhase; writeJson(phaseFile, phaseAll); }
-              diag(`人设全文注入 phaseTurn=${phaseTurn} 字数=${raw.length} 预算=${BUDGET} 截断=${raw.length > BUDGET}`);
-            } catch {}
-            return injectionMessage(["【记忆·完整人设】（压缩后只补这一次；后面凭这次建立的印象说话，不必逐条复述）", text].join("\n"));
-          } catch (e) {
-            try { diag("人设全文·异常：" + (e && e.message || e)); } catch {}
-            return null;
-          }
-        })();
+        // 2026-11-22：完整人设不再自动注入（见上），这段入口保留成 null 以兼容下游拼装。
+        const personaRestMessage = (() => null)();
         const socialMessage = socialText
           ? injectionMessage(
               ["【记忆·社交档案】以下是当前场景的社交档案（按「场景 + 对象」注入，不是用户消息）：", socialText, "只按这份档案说话；档案里没有的别人的事，不要主动提起。"].join("\n"),
@@ -9633,7 +9603,7 @@ function apply(ctx) {
             ["core", coreMessage],
             ["core_state", coreStateMessage],
             ["persona", personaMsg],
-            ["persona_full", personaRestMessage],
+
             ["self", selfMessage],
             ["handoff", handoffMessage],
             ["recall", recallMessage],
