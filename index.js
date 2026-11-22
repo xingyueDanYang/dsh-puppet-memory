@@ -9131,21 +9131,11 @@ function apply(ctx) {
         try {
           const supPlan = supLayerPlan.get(sessionId) || { turn: 0, check: 0 };
           if (isNewUserTurn) supPlan.turn += 1;
-          const supLayers = ["persona", "relations", "notes", "diary"];
-          const ctxForSup = contextTextOf(decision.messages || []);
+          // 2026-11-22 丹阳定：①首轮不算（cardsOnly 反正会清掉，白算一遍）；
+          // ②「每 8 轮按缺失比例查一层」整段删除（忘了删的旧设计）。
+          // 现在补充层只剩一个触发点：压缩后那一轮，补人设 + 关系 + 笔记（不带日记）。
           let chosen = [];
-          if (justCompressed || supPlan.turn <= 1) {
-            chosen = ["persona", "relations", "notes"];
-            supPlan.check = supPlan.turn;
-          } else if (supPlan.turn - (supPlan.check || 0) >= 8) {
-            supPlan.check = supPlan.turn;
-            for (const layer of supLayers) {
-              const one = buildInjectionText(cfg, 0, null, { suppressed, only: new Set([layer]) });
-              if (!one) continue;
-              const miss = missingRatioOf(one, ctxForSup, 16);
-              if (miss >= 0.3) chosen.push(layer);
-            }
-          }
+          if (!cardsOnly && justCompressed) chosen = ["persona", "relations", "notes"];
           supLayerPlan.set(sessionId, supPlan);
           if (chosen.length) {
             // 压缩后那一轮给全量（位置在开头、注意力足）；平时只给几句
@@ -9157,7 +9147,6 @@ function apply(ctx) {
               only: new Set(chosen),
               skipDiary: !chosen.includes("diary"),
               queryText: queryForLayers,
-              compact: !justCompressed,
             });
             diag(`补充层注入：${chosen.join("+")}（turn=${supPlan.turn}${justCompressed ? "，压缩后" : ""}）`);
           }
