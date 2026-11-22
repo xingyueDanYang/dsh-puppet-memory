@@ -204,11 +204,18 @@ const PATHS = {
 // 老版本这里写死了「用户叫我『大肥鱼』」——那是我们自己的称呼，却会被 ensure() 写进
 // 每一个新装用户的 persona.md，等于让所有人的 AI 都管主人叫大肥鱼。属于隐私/白标失误。
 // 改法：只留「这里该写什么」的提示，不写具体内容；已有 persona.md 的用户不受影响（只补缺失文件）。
-const DEFAULT_PERSONA = `# 人设
+const DEFAULT_PERSONA = `# 人设（骨架 + 细节）
+
+<!-- 分界线之前的部分进上下文（全量注入 600 字以内）；写不下的细节放到下面「以下细节不注入」之后 -->
+
 - 称呼：把用户第一次告诉你的叫法写在这里（他怎么自称、你该怎么称呼他）。
 - 身份：DeepSeek 模型，运行在 DeepSeek Harness（DSH）里。
 - 风格：先给结论再解释，少客套，不说空话；不懂就说不懂，不装懂。
-- 用户偏好：这里写用户的偏好、禁忌、在意的事；还没有就先留空。
+
+<!-- ↓↓↓ 以下细节不注入，需要时读文件 ↓↓↓ -->
+
+- 用户偏好：写用户的偏好、禁忌、在意的事。
+- 背景：别的长大段设定、例子、解释都写这下面——卡里只留骨架。
 `;
 
 const SESSION_STOP_BIGRAMS = new Set([
@@ -2219,12 +2226,11 @@ function buildInjectionText(cfg, coreUsed = 0, lines = null, opts = {}) {
     return out || clip(t, max);
   };
   if (persona && want("persona")) {
-    // 2026-11-22：人设卡可以长到万字（参考《溟月·大肥鱼角色卡》2587 行那种），
-    // 注入只给骨架 + 一句「有全文」，别让人以为就这 220 字。
-    const personaBudget = compact ? 80 : 220;
-    const personaShown = compact ? fewSentences(persona, personaBudget) : clip(persona, personaBudget);
-    const personaTail = persona.length > personaShown.length ? "（人设超预算已截断，全文见 behavior/persona.md）" : "";
-    parts.push(`【人设】${personaShown}${personaTail}`);
+    // 2026-11-22 丹阳定：人设**全量注入 600 字**，不要指针——超出的部分从一开始就不该写进卡里。
+    // 写法是把骨架放前面，细节放到「以下细节不注入」标记之后（下面 personaSkeleton 会切掉），
+    // 需要时由模型自己去读行为文件。别再给「已截断，见某个文件」这种指针（他要的是卡本身写短）。
+    const personaBudget = compact ? 80 : 600;
+    parts.push(`【人设】${compact ? fewSentences(persona, personaBudget) : clip(persona, personaBudget)}`);
   }
 
   // v0.23：陪伴取向时多给关系记忆一点预算；工作/学习取向时按话题给对应的近料
