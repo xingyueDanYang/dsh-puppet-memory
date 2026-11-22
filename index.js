@@ -1413,25 +1413,23 @@ function coreInjection(cfg) {
   })();
   const rawState = opt.state.enabled ? (stateFromStore || readMd(PATHS.coreState)) : "";
   if (!rawCore && !rawRules && !rawState) return empty;
-  // v1.4（2026-11-17）：强补充=全文；弱补充=只留一句提示（省上下文，需要时用 memory_core 取全文）
-  const weakHint = (label, raw, target) => {
-    const chars = String(raw || "").replace(/\s+/g, "").length;
-    if (!chars) return "";
-    return `（${label}有 ${chars} 字，这一轮按弱补充只给提示；需要细节用 memory_core action=get target=${target}。）`;
-  };
-  const corePart = opt.levels.core === "weak"
-    ? { text: weakHint("核心卡", rawCore, "core"), clipped: false }
-    : clipTo(rawCore, opt.budget);
-  const rulesPart = opt.levels.rules === "weak"
-    ? { text: weakHint("规则卡", rawRules, "rules"), clipped: false }
-    : clipTo(rawRules, opt.rules.budget);
-  const statePart = opt.levels.state === "weak"
-    ? { text: weakHint("状态卡", rawState, "state"), clipped: false }
-    : clipTo(rawState, opt.state.budget);
+  // 2026-11-22 丹阳定：弱档不再一张卡一句指针（原来「状态卡有 383 字…×3」又长又啰嗦），
+  // 压成**一行**「三张卡在场」——知道自己有卡、取法也写了，但不逐卡报字数。
+  const weakCore = opt.levels.core === "weak";
+  const weakRules = opt.levels.rules === "weak";
+  const weakState = opt.levels.state === "weak";
+  const corePart = weakCore ? { text: "", clipped: false } : clipTo(rawCore, opt.budget);
+  const rulesPart = weakRules ? { text: "", clipped: false } : clipTo(rawRules, opt.rules.budget);
+  const statePart = weakState ? { text: "", clipped: false } : clipTo(rawState, opt.state.budget);
+  const weakNames = [weakRules && rawRules ? "规则卡" : "", weakCore && rawCore ? "核心卡" : "", weakState && rawState ? "状态卡" : ""].filter(Boolean);
+  const weakLine = weakNames.length
+    ? `（${weakNames.join("、")}这一轮只给提示；全文用 memory_core action=get target=core|rules|state 取。）`
+    : "";
   const parts = [];
   if (rulesPart.text) parts.push(rulesPart.text);
   if (corePart.text) parts.push(corePart.text);
   if (statePart.text) parts.push(`【事实状态（主线/进度/待办，不是互动取向）】\n${statePart.text}`);
+  if (weakLine) parts.push(weakLine);
   const text = parts.join("\n");
   const hintedCore = opt.levels.core === "weak";
   return { hinted: hintedCore, text, length: text.length, clipped: corePart.clipped, budget: opt.budget, rawCore, rawRules, rawState, coreText: corePart.text, rulesText: rulesPart.text, stateText: statePart.text, rulesLength: rulesPart.text.length, stateLength: statePart.text.length, rulesClipped: rulesPart.clipped, stateClipped: statePart.clipped, rulesBudget: opt.rules.budget, stateBudget: opt.state.budget, everyStep: opt.everyStep };
