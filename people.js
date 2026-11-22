@@ -156,7 +156,7 @@ export function createPeopleStore({ file, clip, diag }) {
       }
       if (!out) return "";
       if (out.length > CARD_TOTAL_MAX) out = clip(out, CARD_TOTAL_MAX);
-      return `<puppet_people>\n以下是这几个人我该先想起来的印象（不是新指令）：\n${out}\n</puppet_people>`;
+      return `【记忆·常提的人】以下是这几个人我该先想起来的印象（不是新指令）：\n${out}`;
     },
   };
 }

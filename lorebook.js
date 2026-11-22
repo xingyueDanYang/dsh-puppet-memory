@@ -219,10 +219,8 @@ export function createLorebook({ dir } = {}) {
       return `- 「${h.r.name}」${clipped}${st}${src}`;
     });
     return [
-      "<puppet_lore>",
-      "书签：命中即按它来（规则以规则册为准）。带「状态」的是当前值，口述不一致先纠。",
+      "【记忆·书签】命中即按它来（规则以规则册为准）。带「状态」的是当前值，口述不一致先纠：",
       ...lines,
-      "</puppet_lore>",
     ].join("\n");
   }
 

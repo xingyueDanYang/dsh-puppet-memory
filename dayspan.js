@@ -291,10 +291,8 @@ export function buildDayBlock({ spans, stripped, paths, nowMs = Date.now(), maxL
       ? "下面按日期翻了一遍（凌晨 5 点前算前一天，从近到远）："
       : "下面是从那一天的记录里翻出来的：";
   return [
-    "<puppet_day>",
-    head,
+    "【记忆·按日期翻】" + head,
     ...hits.map((h) => h.line),
     "（按日期＋关键词取的；要更多细节用 memory_search 带 since/until 再查。）",
-    "</puppet_day>",
   ].join("\n");
 }
