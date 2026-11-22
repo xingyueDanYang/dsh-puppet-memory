@@ -1,48 +1,37 @@
 import assert from "node:assert/strict";
-import { normalizePersonaHint, personaHintLine } from "../persona-hint.js";
+import { normalizePersonaHint, personaHintLine, personaHintDefaults } from "../persona-hint.js";
 let n = 0; const t = (name, fn) => { fn(); n += 1; console.log("  ✓ " + name); };
 
 console.log("默认与归一");
-t("默认是 off，且不产生任何字", () => {
-  assert.equal(normalizePersonaHint().mode, "off");
-  assert.equal(personaHintLine({}, 25), "");
+t("默认是开（数字锚定）", () => {
+  assert.equal(personaHintDefaults.mode, "on");
+  assert.equal(normalizePersonaHint().mode, "on");
+  assert.equal(personaHintLine({}, 7), "100/100");
 });
-t("未知 mode 回落 off", () => {
-  assert.equal(normalizePersonaHint({ mode: "crazy" }).mode, "off");
+t("旧值 score / roleplay 都算开", () => {
+  assert.equal(normalizePersonaHint({ mode: "score" }).mode, "on");
+  assert.equal(normalizePersonaHint({ mode: "roleplay" }).mode, "on");
+  assert.equal(normalizePersonaHint({ mode: "crazy" }).mode, "on");
 });
-t("everyN 夹在 5–100，默认 100", () => {
-  assert.equal(normalizePersonaHint({ everyN: 1 }).everyN, 5);
-  assert.equal(normalizePersonaHint({ everyN: 999 }).everyN, 100);
-  assert.equal(normalizePersonaHint().everyN, 100);
+t("只有 off 才关", () => {
+  assert.equal(normalizePersonaHint({ mode: "off" }).mode, "off");
+  assert.equal(personaHintLine({ mode: "off" }, 1), "");
+  assert.equal(personaHintLine({ mode: "off" }, 100), "");
 });
 
-console.log("注入节奏");
-t("显眼点：首轮必有，之后按间隔给，固定 100/100", () => {
-  assert.equal(personaHintLine({ mode: "score" }, 1), "100/100");
-  assert.equal(personaHintLine({ mode: "score" }, 100), "100/100");
-  assert.equal(personaHintLine({ mode: "score" }, 200), "100/100");
-  assert.equal(personaHintLine({ mode: "score" }, 99), "");
+console.log("每轮都给");
+t("数字锚每轮都在，不看轮次", () => {
+  for (const turn of [1, 2, 5, 25, 99, 100, 101, 300, 999]) {
+    assert.equal(personaHintLine({ mode: "on" }, turn), "100/100", String(turn));
+  }
 });
-t("不再有任何加减：首轮与第 100 轮都是 100/100", () => {
-  assert.equal(personaHintLine({ mode: "score" }, 1), personaHintLine({ mode: "score" }, 100));
-});
-t("单一间隔，不做分段（重启会重算轮次）", () => {
-  assert.equal(personaHintLine({ mode: "score" }, 25), "");
-  assert.equal(personaHintLine({ mode: "score" }, 50), "");
-  assert.equal(personaHintLine({ mode: "score" }, 100), "100/100");
-  assert.equal(personaHintLine({ mode: "score" }, 300), "100/100");
+t("有鼓励词时，数字与鼓励词一起", () => {
+  assert.equal(personaHintLine({ mode: "on", encourage: "像值班的。" }, 7), "100/100\n像值班的。");
 });
 t("破损重载补全文，不夹分数、不报完整度", () => {
-  const line = personaHintLine({ mode: "score" }, 7, { integrity: "broken", coreText: "我是雪风" });
+  const line = personaHintLine({ mode: "on" }, 7, { integrity: "broken", coreText: "我是雪风" });
   assert.equal(line.includes("完整度"), false);
   assert.equal(line.includes("我是雪风"), true);
-});
-t("roleplay 鼓励词每轮都给；数字只在倍数轮", () => {
-  const h = { mode: "roleplay", everyN: 10, encourage: "唔，别撑着。" };
-  assert.equal(personaHintLine(h, 10), "100/100\n唔，别撑着。");
-  assert.equal(personaHintLine(h, 11), "唔，别撑着。");
-  assert.equal(personaHintLine(h, 7), "唔，别撑着。");
-  assert.equal(personaHintLine({ mode: "score", everyN: 10, encourage: "x" }, 10).includes("x"), false);
 });
 
 console.log("\n" + n + " 项通过");

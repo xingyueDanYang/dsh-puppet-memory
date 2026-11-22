@@ -1,44 +1,39 @@
-// persona-hint.js — 人设提示（v0.47.0 / 2026-11-19；2026-11-22 大幅精简）
+// persona-hint.js — 人设印象锚（v0.47.0 / 2026-11-19；2026-11-22 收敛成两档）
 //
-// 来由：400 轮 × 6 组对照实验（三评委盲评）：分数式提示（C）三票一致最高；
+// 来由：400 轮 × 6 组对照实验（三评委盲评）：分数式提示三票一致最高；
 // 鼓励词次之，但极易被抄成台词。
 //
-// 2026-11-22 丹阳定：**数字不在加减**——没有每轮 +1、没有压缩扣分、没有 100 轮 −20。
-// 它只是显眼点，写什么都是那几个字；所以 tickScore / resetOnCompaction / integrityScore
-// 这一整套算术全删了，只留「什么时候给一行、给哪一行」。
+// 2026-11-22 丹阳定：
+//   1. 只有两档：关 / 开。**默认开**（加数字锚定）。原来 off/score/roleplay 三档合并——
+//      score 只是「没鼓励词的开」，roleplay 才是「带鼓励词的开」，差别不该做成两个模式。
+//   2. 数字不再有节奏（every 轮都给一个固定的 100/100）：它是压缩里的锚，要靠反复出现立住。
+//      「前 N 轮更密」这种分段也不做——轮次每次重启都会重算。
+//   3. 有鼓励词就跟在数字后面一起给；没有就只给数字。
 
 export const personaHintDefaults = {
-  mode: "off", // off | score | roleplay
-  // 数字只在首轮与每 100 轮给一次（25 轮那档 2026-11-22 取消）
-  everyN: 100,
-  encourage: "", // roleplay 模式下由「扮演总结」写入，每次覆盖
+  mode: "on", // off | on（on = 数字锚定；有鼓励词则一并给）
+  encourage: "",
 };
 
 export function normalizePersonaHint(raw) {
   const base = Object.assign({}, personaHintDefaults, raw || {});
-  const mode = ["off", "score", "roleplay"].includes(base.mode) ? base.mode : "off";
-  const everyN = Math.min(100, Math.max(5, Math.round(Number(base.everyN) || 100)));
-  return { mode, everyN, encourage: String(base.encourage || "").trim().slice(0, 240) };
+  // 兼容旧值：score / roleplay 都算「开」
+  const mode = base.mode === "off" ? "off" : "on";
+  return { mode, encourage: String(base.encourage || "").trim().slice(0, 240) };
 }
 
 // 这一轮要注入的那一行；空串 = 这轮不注入
-// integrity: "intact" | "broken"。broken 时不看节奏，当轮就把完整人设补回去。
+// integrity: "intact" | "broken"。broken 时不看开关节奏，当轮就把完整人设补回去。
 export function personaHintLine(hint, turn, opts) {
   const h = normalizePersonaHint(hint);
   if (h.mode === "off") return "";
   const broken = String((opts && opts.integrity) || "intact") === "broken";
-  const n = Math.max(1, h.everyN);
   if (broken) {
     const card = String((opts && opts.coreText) || "").trim();
     const headLine = "【人设卡重载】上下文里的人设不完整（压缩或截断），下面是完整的人设，按它说话：";
     return card ? headLine + String.fromCharCode(10) + card : "";
   }
-  // 2026-11-22 丹阳定：鼓励词**每轮都给**（= 这段时间的方向锚），数字按固定间隔给。
-  // 不做「前 N 轮更密」的分段：轮次每次重启都会重算，分段判据永远走不到后半段，等于白写。
-  const numDue = turn === 1 || turn % n === 0;
-  if (h.mode === "roleplay" && h.encourage) {
-    return numDue ? `100/100\n${h.encourage}` : h.encourage;
-  }
-  // 只有数字时：不带说明、不带标记，只是个能一眼看到的记号
-  return numDue ? "100/100" : "";
+  // 每轮都给：数字锚 + （可选）鼓励词。不带说明、不带标记。
+  const anchor = "100/100";
+  return h.encourage ? anchor + String.fromCharCode(10) + h.encourage : anchor;
 }

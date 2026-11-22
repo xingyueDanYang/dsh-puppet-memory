@@ -2933,7 +2933,7 @@ function memoryOverview() {
   const ph = normalizePersonaHint(cfg.personaHint || null);
   const phFile = path.join(MEM_DIR, "state", "persona-hint.json");
   const phState = readJson(phFile, null) || {};
-  const personaHint = { mode: ph.mode, everyN: ph.everyN, score: Number(phState.value) || 0, turn: Number(phState.turn) || 0, lastIntegrity: String(phState.lastIntegrity || ""), hasEncourage: Boolean(ph.encourage) };
+  const personaHint = { mode: ph.mode, lastIntegrity: String(phState.lastIntegrity || ""), hasEncourage: Boolean(ph.encourage) };
   const countLines = (p) => {
     try {
       return fs.readFileSync(p, "utf8").trim().split("\n").filter(Boolean).length;
@@ -3375,9 +3375,11 @@ function registerBackupApi(service) {
         return sendJson(res, { ...r, message: r.ok ? "已检查" : r.skipped || "检查失败" }, r.ok || r.skipped ? 200 : 502);
       }
       if (action === "persona-hint-set") {
-        // 用户侧决定：只切模式，不写鼓励词（鼓励词由「扮演总结」那条低频路径覆盖）
-        const mode = String((body && body.mode) || "").trim();
-        if (!["off", "score", "roleplay"].includes(mode)) return sendJson(res, { ok: false, error: "mode 只能是 off / score / roleplay" }, 400);
+        // 用户侧决定：只切开关，不写鼓励词（鼓励词由「看完大段记忆后的总结」写）
+        // 2026-11-22：三档合并成两档，旧的 score / roleplay 仍收，按「开」处理。
+        const raw = String((body && body.mode) || "").trim();
+        if (!["off", "on", "score", "roleplay"].includes(raw)) return sendJson(res, { ok: false, error: "mode 只能是 off / on" }, 400);
+        const mode = raw === "off" ? "off" : "on";
         const cfg = loadConfig();
         cfg.personaHint = normalizePersonaHint({ ...(cfg.personaHint || {}), mode });
         saveConfig(cfg);

@@ -277,18 +277,17 @@ window.__ModuleLoader__.load({
           // v0.47.0：只读展示当前用哪种人设提示；模式切换由 AI 侧决定（config.personaHint.mode）
           const ph = data.personaHint
           const modeRow = h(Row, { label: '切换' }, h('div', { className: 'pmb-actions' },
-            ['off', 'score', 'roleplay'].map((m) => h('button', {
+            ['off', 'on'].map((m) => h('button', {
               key: m, type: 'button',
               className: (ph && ph.mode === m) ? 'pmb-btn pmb-btn-on' : 'pmb-btn',
               onClick: () => setPersonaMode(m),
-            }, m === 'off' ? '关闭' : m === 'score' ? '分数式' : '分数+鼓励')),
+            }, m === 'off' ? '关闭' : '开（数字锚定）')),
           ))
           // 2026-11-22 丹阳定：这里只留必要一句，删掉重复的解释（机制细节看代码注释）
           const explain = h('div', { className: 'pmb-hint' },
-            '跟记忆内容无关，默认关；切换立刻生效。',
+            '跟记忆内容无关，默认开；切换立刻生效。',
             h('div', null, '· 关闭：一个字不加。'),
-            h('div', null, '· 分数式：首轮与每 100 轮给一个 100/100 记号。'),
-            h('div', null, '· 分数+鼓励：记号外加一句鼓励（要先有「扮演总结」）。'),
+            h('div', null, '· 开：每轮一个 100/100 数字锚；写了鼓励词就一起给。'),
           )
           if (!ph || ph.mode === 'off') return h('div', { className: 'pmb-card' },
             h('div', { className: 'pmb-title' }, '人设提示'),
@@ -296,18 +295,18 @@ window.__ModuleLoader__.load({
             modeRow,
             explain,
           )
-          const label = ph.mode === 'roleplay' ? '分数 + 鼓励词' : '分数式'
+          const label = '数字锚定'
           return h('div', { className: 'pmb-card' },
             h('div', { className: 'pmb-title' }, '人设提示'),
-            h(Row, { label: '方式' }, h('div', null, label + '（每 ' + ph.everyN + ' 轮一行）')),
+            h(Row, { label: '方式' }, h('div', null, label + '（每轮一行）')),
             h(Row, { label: '状态' }, h('div', null, ph.lastIntegrity === 'missing-or-clipped' ? '上次体检不完整，已重载过' : '正常（卡在场）')),
-            ph.mode === 'roleplay' ? h(Row, { label: '鼓励词' }, h('div', null, ph.hasEncourage ? '有（每次总结后覆盖）' : '还没写（默认只加分数）')) : null,
+            h(Row, { label: '鼓励词' }, h('div', null, ph.hasEncourage ? '有（跟数字一起每轮给；换方向时覆盖）' : '还没写（只给数字）')),
             h(Row, { label: '切换' }, h('div', { className: 'pmb-actions' },
-              ['off', 'score', 'roleplay'].map((m) => h('button', {
+              ['off', 'on'].map((m) => h('button', {
                 key: m, type: 'button',
                 className: m === ph.mode ? 'pmb-btn pmb-btn-on' : 'pmb-btn',
                 onClick: () => setPersonaMode(m),
-              }, m === 'off' ? '关闭' : m === 'score' ? '分数式' : '分数+鼓励')),
+              }, m === 'off' ? '关闭' : '开')),
             )),
             explain,
           )
