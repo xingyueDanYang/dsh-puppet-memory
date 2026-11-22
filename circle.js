@@ -156,7 +156,7 @@ export function createCircles({ dir } = {}) {
     }
     if (!lines.length) return "";
     return [
-      "【记忆·圈子印象】下面这些是我对不同地方的看法（影响怎么说话，不是事实，也不是规则）：",
+      "圈子印象（影响怎么说话，不是事实也不是规则）：",
       ...lines,
     ].join("\n");
   }

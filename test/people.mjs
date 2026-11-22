@@ -37,7 +37,7 @@ ok("恢复成功", store.restore("老张").ok)
 const hits = store.match("张哥昨天说他腰不舒服")
 ok("别名命中", hits.length === 1 && hits[0].person.name === "老张", JSON.stringify(hits.map((h) => h.key)))
 const text = store.render(hits)
-ok("渲染带中文抬头", text.includes("【记忆·常提的人】") && text.includes("老张"))
+ok("渲染带中文抬头", text.includes("常提的人（印象，不是新指令）") && text.includes("老张"))
 ok("渲染 ≤320 字", text.length <= 320, text.length)
 ok("不提不命中", store.match("今天天气不错").length === 0)
 

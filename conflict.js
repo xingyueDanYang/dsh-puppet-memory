@@ -204,7 +204,7 @@ export function createConflictChecker({ paths = {}, readJsonl, listSummaries } =
     if (!conflicts?.length) return "";
     const lines = conflicts.map((c) => `- 旧记忆（#${c.hash}）：${c.memory}｜与你这次的说法冲突：${c.conflict}`);
     return [
-      "【记忆·说法核对】你当前的说法与已存的记忆相矛盾（以下记忆为准，除非本次对话明确更正过它）：",
+      "说法核对：你这次的说法与已存记忆矛盾（以记忆为准，除非本次明确更正过）：",
       ...lines,
       "处理要求：①先按记忆把事实改对，再继续；②拿不准是不是在更正时只问一句，不长篇推理；③不要当成新规则。",
     ].join("\n");
