@@ -108,10 +108,12 @@ try {
   mem2.suppress("sess-e2e-2", ["core", "rel-bad"]);
   const after1 = await run(mkSession("sess-e2e-2"), "随便说一句不一样的话");
   ok("屏蔽后核心卡不注入", !after1.includes("以下是核心记忆"), after1.slice(0, 120));
-  // 2026-11-22：「每 8 轮查一次补充层」已删——现在只有压缩后那一轮才补，所以跑到第 9 轮也不该出现关系
-  let after = after1;
-  for (let i = 2; i <= 9; i++) after = await run(mkSession("sess-e2e-2"), `第 ${i} 句：平时不补补充层`);
-  ok("平时轮不注入补充层", !after.includes("好关系") && !after.includes("脏关系"), after.slice(0, 200));
+  // 2026-11-22：「每 8 轮查一次」已删；触发点改成「第 2 轮 + 压缩后」
+  const after2 = await run(mkSession("sess-e2e-2"), "第 2 句：这一轮补补充层");
+  ok("第 2 轮补补充层，且屏蔽仍生效", after2.includes("好关系") && !after2.includes("脏关系"), after2.slice(0, 200));
+  let after = after2;
+  for (let i = 3; i <= 9; i++) after = await run(mkSession("sess-e2e-2"), `第 ${i} 句：之后不再补`);
+  ok("第 3 轮起不再注入补充层", !after.includes("好关系"), after.slice(0, 200));
 
   // ---- 6. 工具 ----
   const tool = tools.find((t) => t.name === "memory_forget");

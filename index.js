@@ -9133,9 +9133,9 @@ function apply(ctx) {
           if (isNewUserTurn) supPlan.turn += 1;
           // 2026-11-22 丹阳定：①首轮不算（cardsOnly 反正会清掉，白算一遍）；
           // ②「每 8 轮按缺失比例查一层」整段删除（忘了删的旧设计）。
-          // 现在补充层只剩一个触发点：压缩后那一轮，补人设 + 关系 + 笔记（不带日记）。
+          // 现在补充层两个触发点：第 2 轮、压缩后那一轮（补人设 + 关系 + 笔记，不带日记）。
           let chosen = [];
-          if (!cardsOnly && justCompressed) chosen = ["persona", "relations", "notes"];
+          if (!cardsOnly && (justCompressed || supPlan.turn === 2)) chosen = ["persona", "relations", "notes"];
           supLayerPlan.set(sessionId, supPlan);
           if (chosen.length) {
             // 压缩后那一轮给全量（位置在开头、注意力足）；平时只给几句
