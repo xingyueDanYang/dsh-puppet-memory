@@ -81,6 +81,17 @@ export function cardPartText({ mode = "skip", level = "strong", raw = "", budget
   return text.length > budget ? text.slice(0, budget).trimEnd() : text;
 }
 
+// 2026-11-22 丹阳定：自我层不进首轮（首轮只三卡，免得一次注入太长不完整），改在**第 2 轮**补一次；
+// 之后跟三卡同节奏（100 轮 / 压缩后 / 内容改过），同一轮只发一次。
+export function selfInjectDecision({ mode = "skip", cardsOnly = false, secondTurn = false, sameTurnDone = false, changed = false } = {}) {
+  if (cardsOnly) return false;
+  if (mode === "strong" || secondTurn) {
+    if (sameTurnDone && !changed) return false;
+    return true;
+  }
+  return false;
+}
+
 export function nextPhaseTurn(prev, userKey) {
   const turn = Number(prev && prev.turn) || 0;
   const key = String(userKey || "");
@@ -8687,6 +8698,7 @@ function apply(ctx) {
   const lastRawCardHashes = new Map(); // sessionId -> { rules, core, state } sha1
   const lastCardsTurn = new Map(); // sessionId -> 上一次全量注入三卡时的 phaseTurn（同一轮不重复发）
   const lastSelfHash = new Map(); // sessionId -> 自我层全文的 sha1（用来判断内容改过）
+  const lastSelfTurn = new Map(); // sessionId -> 上一次发自我层的 phaseTurn（同一轮不重复）
   const pendingStrong = new Map(); // sessionId -> true：刚压缩过，下一步做一次强补充
   const supLayerPlan = new Map(); // sessionId -> { turn, check }：补充层每 8 轮查一次
   const recentRelInjected = new Map(); // sessionId -> Map(hash -> turn)：5 轮内别重复注入同一条关系
@@ -9653,7 +9665,16 @@ function apply(ctx) {
               changed: selfChanged,
               sameTurnDone,
             });
-            selfText = selfMode === "strong" && !cardsOnly ? selfFull : "";
+            const selfSameTurn = Number(lastSelfTurn.get(sessionId)) === phaseTurn && phaseTurn > 0;
+            const wantSelf = selfInjectDecision({
+              mode: selfMode,
+              cardsOnly,
+              secondTurn: plan.turn === 2,
+              sameTurnDone: selfSameTurn,
+              changed: selfChanged,
+            });
+            selfText = wantSelf ? selfFull : "";
+            if (wantSelf) lastSelfTurn.set(sessionId, phaseTurn);
           }
         } catch (err) {
           diag(`自我层注入失败：${err?.message || err}`);
