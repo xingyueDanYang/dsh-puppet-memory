@@ -11,15 +11,19 @@
 // 读侧不动：幕表本来就是「每天第一次打开读一次 + 提前 7 天」，那份逻辑在 index.js。
 
 import { parseWhen, similarity, dangerHint, absurdHint } from "./agreement-watch.js";
+// 2026-11-23：月底/初一/节气/节日/N天后 这些 parseWhen 认不出来，交给万年历表算
+import { loadCalendar, resolveWhen } from "./when.js";
+
+const CALENDAR = loadCalendar(new URL("./calendar-table.json", import.meta.url));
 
 // 假设 / 模糊推迟：不是「会到期的事」
-const HYPOTHETICAL = /(如果|要是|万一|假如|假设|不然|否则|也许|可能|大概率|看情况|再说吧|到时候再说|还没定|不一定|说不定)/;
+const HYPOTHETICAL = /(如果|要是|万一|假如|假设|不然|否则|也许|可能|大概率|看情况|再说吧|到时候再说|还没定|不一定|说不定|不去了|算了|改天|下次再说)/;
 // 反问/疑问收尾：问句不是承诺
 const ASK_TAIL = /[?？]\s*$|(吗|呢|么)\s*$/;
 // 「去不去 / 是不是 / 要不要」这类正反问：在问，不是在说会发生什么事
 const ASK_V_NOT_V = /([\u4e00-\u9fa5])不\1/;
 // 和「时间」摆在一起的动词：到、还、交、取、寄、约……没有动词的「明天」只是聊天
-const ACTION = /(到站|到货|到家|到|还钱|还账|还款|还|交费|交|取件|取|寄|发工资|发货|发|见|约|办|收|送|买|做|修|装|搬|开门|开张|开|放假|涨|上门|营业|截止|到期|考|体检|复查|面试|请客|聚|签收|复查)/;
+const ACTION = /(到站|到货|到家|到|还钱|还账|还款|还|交费|交|取件|取|寄|发工资|发货|发|见|约|办|收|送|买|做|修|装|搬|开门|开张|开|放假|涨|上门|营业|截止|到期|考|体检|复查|面试|请客|聚|签收|提醒|叫我|喊我|叫|喊|去|回|出门|上班|下班|回家|洗|睡|吃|喝)/;
 
 const TIME_WORDS = /(大后天|后天|明天|今天|下周[一二三四五六日天]|下星期[一二三四五六日天]|周[一二三四五六日天]|\d{1,2}\s*月\s*\d{1,2}\s*[日号]|\d{1,2}\s*[日号]|\d{1,2}\s*[点时](\s*\d{1,2}\s*分)?|早上|上午|中午|下午|傍晚|晚上|月底|月初)/g;
 
@@ -76,30 +80,54 @@ export function extractDueItems(text, opt = {}) {
   for (const raw of src.split(/[。！？!?\n]/)) {
     if (out.length >= maxItems) break;
     const s = raw.trim().replace(LEADING, "");
-    if (s.length < 6 || s.length > 140) continue;
+    // 2026-11-23：放宽到 4 字——「初五交房租」这类短句也是有效事项（更短由后面的 label 规则挡）
+    if (s.length < 4 || s.length > 140) continue;
     if (HYPOTHETICAL.test(s) || ASK_TAIL.test(s) || ASK_V_NOT_V.test(s)) continue;
     if (dangerHint(s) || absurdHint(s)) continue;
     if (!ACTION.test(s)) continue;
     const when = parseWhen(s, nowMs);
-    if (!when || !/^\d{4}-\d{2}-\d{2}$/.test(when.date)) continue;
+    const wn = (() => { try { return resolveWhen(s, nowMs, CALENDAR); } catch { return null; } })();
+    // 幕表能用的日期：日历类（月底/初一/节气/节日）以 when.js 为准，其余仍信 parseWhen
+    const preferCal = wn && wn.date && (!when || ["month", "lunar", "term", "festival", "clock"].includes(wn.kind));
+    const date = preferCal ? wn.date : (when && when.date);
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
+    // 钟点：when.js 认出的（今晚八点）优先，其次 parseWhen 的
+    const useClock = wn && wn.kind === "clock" && Number.isFinite(wn.hour);
+    const hour = useClock ? wn.hour : (when && Number.isFinite(when.hour) ? when.hour : 0);
+    const minute = useClock ? (Number.isFinite(wn.minute) ? wn.minute : 0) : (when && Number.isFinite(when.minute) ? when.minute : 0);
     // 只登记未来：今天要带钟点（否则一日之内的「今天」已经在过了）
-    const isToday = when.date === today;
-    if (when.date < today) continue;
-    if (when.date > horizon) continue;
-    if (isToday && when.hour === 0 && when.minute === 0) continue;
+    const isToday = date === today;
+    if (date < today) continue;
+    if (date > horizon) continue;
+    if (isToday && hour === 0 && minute === 0) continue;
     // 去掉「用户：/助手：」这类说话人前缀——label 是事项，不是谁说的
-    const label = stripTime(s).replace(/^(用户|助手|我|你|他|她|它)\s*[：:]\s*/, "").slice(0, 26).trim();
-    if (label.length < 4) continue; // 「到驿站」这种去掉时间只剩尾巴的不记
+    let label = stripTime(s).replace(/^(用户|助手|我|你|他|她|它)\s*[：:]\s*/, "").trim();
+    // 日历类时间词（初五/小雪/月底）不在 TIME_WORDS 里，用 when.js 认出来的词再剥一遍
+    if (preferCal && wn.label) label = label.split(wn.label).join("").trim();
+    // when.js 的标签是「农历初五」，原文写的是「初五」——再按日历词剥一遍
+    if (preferCal) label = label.replace(/(初[一二三四五六七八九十]|廿[一二三四五六七八九]?|三十|月底|月末|\d{1,2}\s*天后|[一二三四五六七八九十]{1,3}天后)/g, "").trim();
+    label = label.replace(/^(前|之前|以前|的时候|那天的)/, "").trim().slice(0, 26);
+    // 2026-11-23 丹阳定：幕表要的是「时间 + 事情 + 动作」三样齐全——
+    // 时间上面已经算出来了；动作由 ACTION 动词表保证；这里再把动作词和虚词剥掉，
+    // 剩下的必须是一件说得出口的「事情」，否则不进幕表。
+    const actionWord = (s.match(ACTION) || [])[0] || "";
+    const thing = label
+      .split(actionWord).join("")
+      .replace(/[的了把我你他她它要去来给再又还是就都也请帮叫喊]/g, "")
+      .trim();
+    if (thing.length < 2) continue; // 只有动作没有事情：「明天记得」「晚上提醒我」
+    if (label.length < (preferCal ? 2 : 4)) continue;
     // 主语/事项借用记录册主词：sub=谁的事，attr=这件事（副词位）
     const ent = (opt.entities && opt.entities.length ? matchEntity(s, opt.entities) : null) || ctxEnt;
     const sub = ent ? ent.sub : "";
     const attr = sub && ent.word ? label.split(ent.word).join("").trim() : label;
-    const key = when.date + "|" + sub + "|" + attr.slice(0, 12);
+    const key = date + "|" + sub + "|" + attr.slice(0, 12);
     if (seen.has(key)) continue;
     seen.add(key);
     // 2026-11-22 丹阳：「有具体时间的按自动任务，没有的用幕表提醒」——钟点单独存，供计划任务排期
-    const time = when.at.includes(" ") ? when.at.slice(11, 16) : "";
-    out.push({ date: when.date, at: when.at, time, label, note: s.slice(0, 120), sub, attr });
+    const time = hour || minute ? String(hour).padStart(2, "0") + ":" + String(minute).padStart(2, "0") : "";
+    const at = date + " " + (time || "00:00");
+    out.push({ date, at, time, label, note: s.slice(0, 120), sub, attr });
   }
   return out;
 }

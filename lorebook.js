@@ -80,6 +80,11 @@ export function createLorebook({ dir } = {}) {
     const c = String(content || "").trim();
     if (!n) return { ok: false, error: "name 必填（这条书签叫什么）" };
     if (!c) return { ok: false, error: "content 必填（要记什么）" };
+    // 2026-11-23 丹阳：书签只记一句结论，长文（相声/小说/资料）一律不收——超了直接拒，不截断
+    const MAX_CONTENT = 320;
+    if (c.length > MAX_CONTENT) {
+      return { ok: false, error: `书签正文 ${c.length} 字，超过上限 ${MAX_CONTENT} 字：只记一句结论，长文请另存笔记` };
+    }
     const ks = normKeywords(keywords);
     const isAlways = Boolean(always);
     if (!ks.length && !isAlways) return { ok: false, error: "要么给 keywords（命中才注入），要么 always=true（常驻）" };

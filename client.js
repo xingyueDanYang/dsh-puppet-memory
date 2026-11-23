@@ -621,7 +621,72 @@ window.__ModuleLoader__.load({
                 }, item.enabled ? '已开启' : '已关闭'),
               )),
             ),
+        h(RecallCard),
         h(NowHintCard),
+      )
+    }
+
+    function RecallCard() {
+      const { useState, useEffect, useCallback } = React
+      const [cfg, setCfg] = useState(null)
+      const [busy, setBusy] = useState(false)
+      const [notice, setNotice] = useState('')
+      const [error, setError] = useState('')
+      const load = useCallback(async () => {
+        try {
+          const res = await callApi('recall-view')
+          if (!res || res.ok !== true) throw new Error((res && res.error) || '读取失败')
+          setCfg(res)
+        } catch (err) {
+          setError(err && err.message ? err.message : String(err))
+        }
+      }, [])
+      useEffect(() => { load() }, [load])
+      const save = async (patch) => {
+        setBusy(true); setError(''); setNotice('')
+        try {
+          const res = await callApi('recall-update', patch)
+          if (!res || res.ok !== true) throw new Error((res && res.error) || '保存失败')
+          setCfg(res)
+          setNotice('已保存，下一轮生效。')
+        } catch (err) {
+          setError(err && err.message ? err.message : String(err))
+        } finally {
+          setBusy(false)
+        }
+      }
+      const row = (k, hint, control) => h('div', { className: 'pmb-row' },
+        h('div', { style: { flex: 1 } },
+          h('div', { className: 'pmb-k' }, k),
+          h('div', { className: 'pmb-hint' }, hint),
+        ),
+        control,
+      )
+      return h('div', { style: { marginTop: 18 } },
+        h('div', { className: 'pmb-title' }, '顺手取回（强弱提示）'),
+        h('div', { className: 'pmb-hint' }, '说话时按关键词顺手取几条记忆：命中够强的进正文，擦边的只在末尾报个数。'),
+        error ? h('div', { className: 'pmb-error' }, error) : null,
+        notice ? h('div', { className: 'pmb-hint' }, notice) : null,
+        cfg === null
+          ? h('div', { className: 'pmb-hint' }, '读取中…')
+          : h('div', { className: 'pmb-list' },
+              row('开关', '关掉就完全不取回', h('button', {
+                className: cfg.enabled ? 'pmb-btn pmb-btn-on' : 'pmb-btn',
+                disabled: busy,
+                onClick: () => save({ enabled: !cfg.enabled }),
+              }, cfg.enabled ? '已开启' : '已关闭')),
+              row('强命中阈值', '同时命中几个词才进正文', h('select', {
+                style: { minWidth: '90px' },
+                value: String(cfg.minStrong || 2),
+                disabled: busy,
+                onChange: (e) => save({ minStrong: Number(e.target.value) }),
+              }, [1, 2, 3].map((n) => h('option', { key: n, value: String(n) }, n + ' 个')))),
+              row('弱命中提示', '末尾报「另有 N 条只擦到一点」', h('button', {
+                className: cfg.showWeak === false ? 'pmb-btn' : 'pmb-btn pmb-btn-on',
+                disabled: busy,
+                onClick: () => save({ showWeak: cfg.showWeak === false }),
+              }, cfg.showWeak === false ? '不报' : '报')),
+            ),
       )
     }
 

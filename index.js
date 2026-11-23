@@ -74,10 +74,8 @@ export function cardPartText({ mode = "skip", level = "strong", raw = "", budget
   if (mode !== "strong") return "";
   const text = String(raw || "");
   if (!text) return "";
-  // 弱档：平时只给一行提示；但**内容改过**的那一轮要给全文，否则改了卡对方看不见
-  if (level === "weak" && !changed) {
-    return `（${label}在场，本轮只给提示；全文用 memory_core action=get target=${target} 取。）`;
-  }
+  // 2026-11-23 丹阳定（B 方案）：全量注入就是三卡全给，不再用一行「去翻全卡」的提示占位。
+  // 也就是说 mode=strong 时 level 只影响预算之外的部分，不再降级成提示行。
   return text.length > budget ? text.slice(0, budget).trimEnd() : text;
 }
 
@@ -107,6 +105,9 @@ import { pickCandidates } from "./session-digest.js";
 import { appendCandidates } from "./session-pool.js";
 import { judgePending as judgePoolPending } from "./session-pool-judge.js";
 import { extractDueItems, isDuplicateRow } from "./opening-autorecord.js";
+import { shouldExtract, buildExtractPrompt, parseExtracted } from "./relation-extract.js";
+import { loadCalendar, resolveAll } from "./when.js";
+import { judgePromiseDue } from "./promise-due.js";
 import { scanTurn as scanAgreements, summarize as summarizeAgreements, collectKnown as collectKnownAgreements, collectRejected as collectRejectedAgreements, collectNonWork as collectNonWorkTurns, renderInbox, classifyTurn, promote as promoteAgreement, absurdHint, dangerHint } from "./agreement-watch.js";
 import { judgeInbox as judgeAgreementInbox } from "./agreement-judge.js";
 import { readKnowledge } from "./knowledge.js";
@@ -170,6 +171,8 @@ const PATHS = {
   notes: path.join(MEM_DIR, "behavior", "notes.jsonl"),
   // 出处表：媒体资产（图片/音频/视频）的「谁说的、在哪看到的」；文字条目不用它，直接写条目的 source 字段
   sources: path.join(MEM_DIR, "behavior", "sources.jsonl"),
+  // 2026-11-23 丹阳：关系只当索引，正文放外置冷数据（一行一个文件），需要时再读
+  cold: path.join(MEM_DIR, "behavior", "cold"),
   diaryDir: path.join(MEM_DIR, "behavior", "diary"),
   deep: path.join(MEM_DIR, "deep"),
   sayings: path.join(MEM_DIR, "deep", "sayings.jsonl"),
@@ -899,12 +902,15 @@ function defaultConfig() {
       timeoutMs: 20000,
     },
     // v0.34（B-52）：写入守卫。只挡「明显坏数据」——乱码、超长、把注入块整段复制进记忆；
-    // 判不准的一律放行（宁可少拦，不可误杀）。dedupe 负责把近似重复的便签/笔记合并掉。
+    // 判不准的一律放行（宁可少拦，不可误杀）。
     writeGuard: {
       enabled: true,
-      dedupe: true,
-      // 字符二元组 Jaccard 相似度下限；1 = 只有完全相同才合并（等于关闭近似合并）
-      dedupeThreshold: 0.82,
+      // 2026-11-23 丹阳：写入侧不做近似合并——合并应该发生在分片之后。
+      // 实测：200 条不同内容（只差序号）被并成 16 条；评测里 6581 轮历史只落 493 条，
+      // 冰可乐/麻辣烫/科目二 这些约定当场被吞。默认关掉。
+      dedupe: false,
+      // 字符二元组 Jaccard 相似度下限；开 dedupe 时才生效
+      dedupeThreshold: 0.9,
       maxChars: WRITE_GUARD_DEFAULT_MAX,
     },
     // v0.34（B-52）：要点层。检索结果顶部先给几条「要点 + hash」速览，扫一眼就知道要不要读原文。
@@ -918,6 +924,12 @@ function defaultConfig() {
     // push=主动推送（2026-11-22 C 方案：到点直接 followup 一条消息）。默认关——会自己唤起一轮会话，
     // 由 config.opening.push 打开；开着时到点通道（buildTimedDueInjection）自动让位，避免同一条提两次。
     opening: { enabled: true, lookaheadDays: 1, maxItems: 5, autoRecord: true, push: false },
+    // 2026-11-23：幕表提醒的两条路。openingSchedule.enabled=true 时，每天 07:00 的「幕表排任务」
+    // 会把带钟点的事项排成宿主计划任务；关着（默认）就只用插件到点通道（到点后的第一轮提一句），不建任何计划任务。
+    openingSchedule: { enabled: false },
+    // 2026-11-23：写入侧关系抽取。默认关；开了在出现「金额/日期/欠还/生日/否定」时调一次小模型，
+    // 把事实抽成记录册三槽位（主词｜属性｜状态 + 确定性/来源/日期）。抽不出就不写。
+    relationExtract: { enabled: false, model: null, minGapMs: 120000, windowTurns: 3 },
     // v0.38（B-70）：检索走哪条路。scan=每次扫 JSONL（默认，行为跟以前一模一样）；
     // sqlite=用 state/search-index.sqlite 这份派生索引拿候选（按文件增量重建，删了会自动重放）。
     // 默认 scan：新路径必须先在真数据上跑赢、跑稳才改默认（0.37.0 的教训）。
@@ -969,6 +981,7 @@ function loadConfig() {
   merged.recall.profiles = { ...((defaultConfig().recall || {}).profiles || {}), ...((cfg.recall && cfg.recall.profiles) || {}) };
   merged.due = { ...defaultConfig().due, ...(cfg.due || {}) };
   merged.opening = { ...defaultConfig().opening, ...(cfg.opening || {}) };
+  merged.openingSchedule = { enabled: false, ...(cfg.openingSchedule || {}) };
   merged.search = { ...defaultConfig().search, ...(cfg.search || {}) };
   merged.cueprompt = { ...defaultConfig().cueprompt, ...(cfg.cueprompt || {}) };
   merged.social = { ...defaultConfig().social, ...(cfg.social || {}) };
@@ -1052,6 +1065,11 @@ function writeGuardCheck(text, layer, guard) {
   for (const sign of MOJIBAKE_SIGNS) {
     if (body.includes(sign)) return `内容里出现乱码片段「${sign}」，多半是编码错了。给一份干净的文本来。`;
   }
+  // 2026-11-23 丹阳：危险线先进守卫（记错会真出事），荒诞线随后
+  const danger = dangerHint(body);
+  if (danger) return "内容里有危险行为（" + danger + "），不入记忆——这类记错会真出事，要记也请写成明确的安全说明。";
+  const absurd = absurdHint(body);
+  if (absurd) return "内容像荒诞句（" + absurd + "），不入记忆。真实的事再来。";
   for (const re of INJECTION_SIGNS) {
     if (re.test(body)) {
       return "内容里带着系统注入的痕迹（比如【记忆·跨会话摘要】【核心记忆】这类抬头，或旧版的英文标记），那是注入格式，不能当记忆存。改成你自己的话。";
@@ -1745,21 +1763,24 @@ function buildRecallInjection(cfg, userText, { nowMs = Date.now(), collect } = {
       );
     } catch {}
   };
-  // A-145：记录册命中——主词/副词/别名任一命中就给一行；冲突条目自带「两种说法未确认」
-  const recordLines = (() => {
-    try {
-      return searchRecordsGrouped(String(userText || ""), { hitLimit: 3, groupLimit: 8 }).map(
-        (r) => `· [记录] ${formatRecordRow(r)}`,
-      );
-    } catch {
-      return [];
-    }
-  })();
+  // A-145 + 2026-11-23：记录册分强弱——主词+副词都命中进正文；只命中主词算弱提示
+  let strongRecordRows = [];
+  let weakRecordRows = [];
+  try {
+    const recHits = matchRecordHits(String(userText || ""));
+    strongRecordRows = recHits.filter((h) => h.attrHit).map((h) => h.row);
+    weakRecordRows = recHits.filter((h) => !h.attrHit).map((h) => h.row);
+  } catch {}
+  const recordLines = strongRecordRows.slice(0, 3).map((r) => `· [记录] ${formatRecordRow(r)}`);
+  const weakRecordLine = weakRecordRows.length && rec.showWeak !== false
+    ? `· 记录册里还有 ${weakRecordRows.length} 条只提到主词（${[...new Set(weakRecordRows.map((r) => r.sub))].slice(0, 3).join("、")}），要细节用 memory_search`
+    : "";
   if (!hits.length) {
     if (dayBlock || recordLines.length) {
       logRecall({ n: 0, strong: 0, weak: 0, matched: [], day: dayBlock ? 1 : 0, dayN: dayStats.n, days: dayStats.days, records: recordLines.length });
     }
-    const recBlock = recordLines.length ? ["以下是记录册里能对上的条目（主词命中时整组带出）：", ...recordLines] : [];
+    const recBlock = recordLines.length ? ["以下是记录册里主词和副词都对上的条目：", ...recordLines] : [];
+    if (weakRecordLine) recBlock.push(weakRecordLine);
     return [dayBlock, ...recBlock].filter(Boolean).join("\n");
   }
   const seen = new Set();
@@ -1810,6 +1831,7 @@ function buildRecallInjection(cfg, userText, { nowMs = Date.now(), collect } = {
   }
   const body = [clip(shown.slice(0, maxLines).map(lineOf).join("\n"), 300), ...knowLines];
   if (recordLines.length) body.push(...recordLines);
+  if (weakRecordLine) body.push(weakRecordLine);
   if (weak.length && rec.showWeak !== false) body.push(`· 另有 ${weak.length} 条只擦到一点（${[...new Set(weak.flatMap((h) => h.matched || []))].slice(0, 3).join("、")}），需要时再查`);
   // v0.42（B-102）：埋点——只记"注入了什么、强/弱各几条"，供一周后判断提示有没有促成真查询
   logRecall({
@@ -2224,6 +2246,8 @@ function buildOpeningInjection(cfg, { nowMs = Date.now(), persist = true } = {})
  * 和到点通道共用同一批行，但各自记「提没提过」——push 开着时到点通道让位。
  */
 function collectPushDueRows(nowMs = Date.now()) {
+  // 2026-11-23：开了宿主计划任务就不主动推，避免同一条提两次。
+  if (((loadConfig() || {}).openingSchedule || {}).enabled === true) return [];
   const d = new Date(nowMs);
   const pad = (n) => String(n).padStart(2, "0");
   const today = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -2263,6 +2287,8 @@ function markPushDone(rows, nowMs = Date.now()) {
  * 每条每天只提一次，隔天不再补（补一次就够，别变成事后唠叨）。
  */
 function buildTimedDueInjection(cfg, { nowMs = Date.now(), persist = true } = {}) {
+  // 2026-11-23：幕表提醒两条路互斥——openingSchedule.enabled=true 时交给宿主计划任务，插件不重复提。
+  if ((cfg && cfg.openingSchedule || {}).enabled === true) return '';
   const opt = { ...defaultConfig().opening, ...(cfg?.opening || {}) };
   if (opt.enabled === false) return "";
   // push 开着时由主动推送负责，同一件事不在轮次里再念一遍
@@ -2292,6 +2318,33 @@ function buildTimedDueInjection(cfg, { nowMs = Date.now(), persist = true } = {}
   }
   const lines = pick.map((r) => `- 今天 ${r.time}：${r.label}${r.note ? `（${clip(String(r.note), 60)}）` : ""}`);
   return ["【幕表·到点】有件事到点了，按下面的说，别装没这回事：", ...lines].join("\n");
+}
+
+// 2026-11-23：约定到点播报（带原话）。关系层里挂了 due 的条目，到了那天念一次。
+function buildPromiseDueInjection(cfg, { nowMs = Date.now(), persist = true } = {}) {
+  const d = new Date(nowMs);
+  const pad = (n) => String(n).padStart(2, "0");
+  const today = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  let rows = [];
+  try { rows = readJsonl(PATHS.relations); } catch { return ""; }
+  const due = rows.filter((r) => r && !r.voided && r.due && String(r.due.date || "") === today);
+  if (!due.length) return "";
+  const seenPath = path.join(PATHS.stateDir, "promise-due-seen.json");
+  let seen = {};
+  try { seen = readJson(seenPath, {}) || {}; } catch { seen = {}; }
+  const shown = new Set(String(seen.date || "") === today ? (seen.hashes || []).map(String) : []);
+  const fresh = due.filter((r) => !shown.has(String(r.hash || "")));
+  if (!fresh.length) return "";
+  const pick = fresh.slice(0, 3);
+  if (persist) {
+    const hashes = [...shown, ...pick.map((r) => String(r.hash || ""))];
+    safe("约定到点标记", () => writeJson(seenPath, { date: today, hashes: hashes.slice(-200) }));
+  }
+  const lines = pick.map((r) => {
+    const label = String((r.due && r.due.label) || r.keyword || "").trim();
+    return `- 今天：${r.keyword || "约定"}——${clip(label, 80)}`;
+  });
+  return ["【约定·到点】和人有约的事到日子了，按下面说，别装没这回事：", ...lines].join("\n");
 }
 
 function buildDueInjection(cfg, { nowMs = Date.now(), persist = true } = {}) {
@@ -3180,8 +3233,48 @@ const FEATURE_TOGGLES = [
   { id: "lore", label: "约定书签", desc: "跨会话说好的约定/口径：命中关键词才注入；不记设定、不当规则（≤30 条）", group: "lore", def: true },
   { id: "conflict", label: "冲突核对", desc: "本地小模型核对事实矛盾；没配 endpoint 就自动跳过", group: "conflict", def: false },
   { id: "cueprompt", label: "取词器", desc: "每回合按话题取词（可能多一次模型调用）", group: "cueprompt", def: false },
+  { id: "relationExtract", label: "写入侧关系抽取", desc: "出现金额/日期/欠还/生日时，自动把事实抽成记录册（主词｜属性｜状态+确定性/来源/日期）；会多一次小模型调用", group: "relationExtract", def: false },
+  { id: "openingSchedule", label: "幕表·自动排计划任务", desc: "开：每天 07:00 把带钟点的事项排成宿主计划任务；关（默认）：只用插件到点提醒，不建计划任务", group: "openingSchedule", def: false },
   { id: "social", label: "多人多群记忆", desc: "群聊与多人身份分区：同一人跨群识别、信息按群隔离（只跟一个人聊可以关）", group: "social", def: false },
 ];
+
+// 2026-11-23：顺手取回（强弱提示）的面板读写。之前这块没有 UI，只能靠 memory_control 调。
+function recallView() {
+  const cfg = loadConfig();
+  const r = { ...defaultConfig().recall, ...(cfg.recall || {}) };
+  return {
+    ok: true,
+    enabled: r.enabled === true,
+    minStrong: Math.max(1, Math.min(3, Number(r.minStrong) || 2)),
+    maxLines: Math.max(1, Math.min(6, Number(r.maxLines) || 3)),
+    showWeak: r.showWeak !== false,
+    profile: String(r.activeProfile || ""),
+    profiles: Object.keys(r.profiles || {}),
+  };
+}
+
+function updateRecall(patch = {}) {
+  const body = patch && typeof patch === "object" ? patch : {};
+  const cfg = loadConfig();
+  const cur = { ...defaultConfig().recall, ...(cfg.recall || {}) };
+  if (body.enabled !== undefined) cur.enabled = body.enabled === true;
+  if (body.minStrong !== undefined) cur.minStrong = Math.max(1, Math.min(3, Math.round(Number(body.minStrong) || 2)));
+  if (body.showWeak !== undefined) cur.showWeak = body.showWeak === true;
+  if (body.profile !== undefined) {
+    const name = String(body.profile || "");
+    const preset = (cur.profiles || {})[name];
+    if (name && preset) {
+      cur.activeProfile = name;
+      Object.assign(cur, preset);
+    } else {
+      cur.activeProfile = "";
+    }
+  }
+  cfg.recall = cur;
+  saveConfig(cfg);
+  diag("面板：顺手取回 " + (cur.enabled ? "开" : "关") + "（阈值 " + cur.minStrong + "，弱提示 " + (cur.showWeak === false ? "关" : "开") + "）");
+  return { ...recallView(), message: "已保存，下一轮生效" };
+}
 
 function featuresView() {
   const cfg = loadConfig();
@@ -3619,6 +3712,9 @@ function registerBackupApi(service) {
             disabled: !isEnabledForSession(loadConfig(), sid),
           });
         }
+        // 2026-11-23：客户端 callApi('recall-view') 走的是 GET，宿主原来只在 POST 分支处理，
+        // 面板因此显示「未知 action：recall-view」、开关也画不出来。这里补一条 GET。
+        if (action === "recall-view") return sendJson(res, recallView());
         return sendJson(res, { ok: false, error: `未知 action：${action}` }, 404);
       }
       if (req.method !== "POST") return sendJson(res, { ok: false, error: "只支持 GET / POST" }, 405);
@@ -3681,6 +3777,11 @@ function registerBackupApi(service) {
         try { s = updateChecker.configure(patch); }
         catch (err) { return sendJson(res, { ok: false, error: err.message }, 400); }
         return sendJson(res, { ok: true, ...s, message: "已保存" });
+      }
+      if (action === "recall-view") return sendJson(res, recallView());
+      if (action === "recall-update") {
+        const result = updateRecall(body);
+        return sendJson(res, result, result.ok ? 200 : 400);
       }
       if (action === "save-feature") {
         const result = setFeature(body.id, body.enabled);
@@ -3874,10 +3975,11 @@ function spawnPoolJudge(reason) {
 const inboxPending = new Map(); // sessionId -> [{ at, text }]
 
 function queueNonWork(sessionId, userText, tools = []) {
+  // 2026-11-23 修：幕表登记**不跟着活日记走**——工作轮（调过工具）也要能记「明早八点提醒我开会」，
+  // 之前放在 leisure 判定之后，导致凡是用过工具的那一轮，幕表一条都记不上。
+  safe("幕表自动登记", () => autoRegisterOpening(userText, { source: "活日记·自动登记" }));
   // 调过工具/技能就是工作（愉悦工具除外）——工作轮不进活日记。
   if (classifyTurn(tools) !== "leisure") return;
-  // 幕表写侧：这一轮里如果有「未来时点 + 具体事项」，当场登记（不等压缩后才整理）
-  safe("幕表自动登记", () => autoRegisterOpening(userText, { source: "活日记·自动登记" }));
   const rows = inboxPending.get(sessionId) || [];
   for (const text of collectNonWorkTurns(userText)) {
     // 2026-11-21 丹阳：「太长的超过 200 字，不算约定记录」——整段粘贴（小说、相声、资料）
@@ -3955,6 +4057,8 @@ function spawnAgreementJudge(reason) {
         const doneRows = [];
         let kept = 0;
         let dropped = 0;
+        // 2026-11-23 丹阳定：一次整理最多落 1 条书签——多的留在 inbox 下一轮再判，避免一口气塞一堆
+        let promotedThisRound = 0;
         for (const v of r.verdicts) {
           const text = String(v.text || "").trim();
           if (!text) continue;
@@ -3969,13 +4073,17 @@ function spawnAgreementJudge(reason) {
             }
             // 2026-11-22 丹阳：幕表已经有自动登记（opening-autorecord），这里不再把带时间的约定
             // 转一遍幕表、也不再补一条〔幕表〕书签索引——同一件事两个地方记，纯重复。
+            if (promotedThisRound >= 1) continue; // 本轮额度用完：这条留到下一轮整理
             const res = promoteAgreement(loreLayer(), {
               name: v.event || text.slice(0, 10),
               content: v.content || text,
               state: v.state || "",
               stateAt: v.state ? new Date().toISOString().slice(0, 10) : "",
             });
-            if (res && res.ok) kept += 1;
+            if (res && res.ok) {
+              kept += 1;
+              promotedThisRound += 1;
+            }
             else diag(`活日记整理：书签没落成（${res && res.error}）：${text.slice(0, 20)}`);
           } else {
             const why = v.absurd ? "荒诞：" + (v.why || "小模型判定") : "小模型判定不是约定" + (v.why ? "：" + v.why : "");
@@ -5777,6 +5885,8 @@ function clearMemos() {
   const lines = readText(file).split(/\r?\n/).filter((l) => l.trim());
   if (!lines.length) return "便签本来就是空的，不用清。";
   fs.mkdirSync(PATHS.archive, { recursive: true });
+  // 冷数据目录：关系条目的外置正文（2026-11-23）
+  fs.mkdirSync(PATHS.cold, { recursive: true });
   const stamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "");
   const dest = path.join(PATHS.archive, `memo-${stamp}.jsonl`);
   fs.copyFileSync(file, dest);
@@ -7277,6 +7387,7 @@ function mergeIntoEntry(old, incoming, ts, tags) {
 // 与 relations.jsonl 分开存、分别检索；钩子沿用 relations 的判定方式（主词/副词任一命中）。
 // 冲突不在这里裁决（那是 A-144）：同 (主词,副词) 已有不同状态时**不覆盖**，只回执点出。
 // ---------------------------------------------------------------------------
+const RECORD_CERTAINTY = ["亲历", "转述", "猜测", "未确认"];
 const RECORD_STATE_MAX = 60;
 
 // 记录册类别（2026-11-21 丹阳提的「芹菜是食物」）：主词说明是谁，类别说明这条是关于什么的。
@@ -7410,8 +7521,9 @@ function recordKey(sub, attr) {
 
 function formatRecordRow(r) {
   const star = r.prev ? `（先前：${r.prev}）` : "";
+  const meta = [r.at ? "@" + r.at : "", r.certainty ? "〔" + r.certainty + "〕" : "", r.source ? "(来源:" + r.source + ")" : ""].filter(Boolean).join(" ");
   const cls = r.cls ? `〔${r.cls}〕` : "";
-  return `${r.sub} ｜ ${r.attr} ｜ ${r.state}${star}${r.note ? `（${r.note}）` : ""}${cls}  #${String(r.hash || "").slice(0, 8)}`;
+  return `${r.sub} ｜ ${r.attr} ｜ ${r.state}${star}${r.note ? `（${r.note}）` : ""}${cls}${meta ? " " + meta : ""}  #${String(r.hash || "").slice(0, 8)}`;
 }
 
 // addRecord：一行「主词｜副词｜状态」；同 (主词,副词) 改值 → 追加新版本（历史保留），不覆盖也不拒写
@@ -7436,6 +7548,10 @@ function addRecord(line, opts = {}) {
   // 新值追加成一行，取回显示最新一条并带出「先前：X」。唯一性提醒归书签，不归这里。
   const prev = current ? String(current.state) : "";
   const cls = clip(String((opts && opts.cls) || "").trim(), 8);
+  const certainty = RECORD_CERTAINTY.includes(String((opts && opts.certainty) || "").trim()) ? String((opts && opts.certainty) || "").trim() : "";
+  const srcWho = clip(String((opts && opts.source) || "").trim(), 40);
+  const atRaw = String((opts && opts.at) || "").trim();
+  const at = /^\d{4}-\d{2}-\d{2}$/.test(atRaw) ? atRaw : "";
   const row = {
     kind: "record",
     ts: nowISO(),
@@ -7446,6 +7562,9 @@ function addRecord(line, opts = {}) {
     state: clip(state, RECORD_STATE_MAX),
     ...(note ? { note: clip(note, 120) } : {}),
     ...(aliases.length ? { aliases: aliases.map((a) => clip(a, 16)) } : {}),
+    ...(certainty ? { certainty } : {}),
+    ...(srcWho ? { source: srcWho } : {}),
+    ...(at ? { at } : {}),
     hash: sha1(`${key}|${state}|${nowISO()}`).slice(0, 16),
   };
   appendJsonl(PATHS.records, row);
@@ -7453,6 +7572,26 @@ function addRecord(line, opts = {}) {
 }
 
 // searchRecords：主词/副词/状态任一命中即算；主词权重最高（问「我爸」要能带出「父亲」）
+// 2026-11-23 丹阳定的口径：记录册本身分强弱——
+//   主词 + 副词 都命中 → 强命中（进正文）
+//   只命中主词        → 弱提示（一行，作为「该翻这条记忆了」的起点）
+// 之前只按 searchRecordsGrouped 整组带出，主词一擦到就全给，强弱就没了。
+function matchRecordHits(text, map) {
+  const t = String(text || "").toLowerCase();
+  if (!t) return [];
+  const subj = map || subjectMap();
+  const rows = latestRecordRows().filter((r) => !r.voided && isSubEnabled(r.sub, subj));
+  const out = [];
+  for (const r of rows) {
+    const keys = [r.sub, ...(Array.isArray(r.aliases) ? r.aliases : [])].map((x) => String(x || "").trim().toLowerCase()).filter((x) => x.length >= 1);
+    const subHit = keys.some((k) => t.includes(k));
+    if (!subHit) continue;
+    const attrHit = String(r.attr || "").trim() && t.includes(String(r.attr).trim().toLowerCase());
+    out.push({ row: r, subHit: true, attrHit: Boolean(attrHit) });
+  }
+  return out;
+}
+
 function searchRecords(query, limit = 8) {
   const map = subjectMap();
   const rows = latestRecordRows().filter((r) => !r.voided && isSubEnabled(r.sub, map));
@@ -7630,7 +7769,7 @@ function writeRecordsOf(args) {
       : [item && item.sub, item && item.attr, item && item.state].filter(Boolean).join("｜");
     if (!line) continue;
     const obj = item && typeof item === "object" ? item : {};
-    const r = addRecord(line, { note: obj.note || args.recordNote, aliases: obj.aliases || args.recordAliases, cls: obj.cls || obj.class || args.recordClass });
+    const r = addRecord(line, { note: obj.note || args.recordNote, aliases: obj.aliases || args.recordAliases, certainty: obj.certainty || args.recordCertainty, source: obj.source || args.recordSource, at: obj.at || obj.date || args.recordAt, cls: obj.cls || obj.class || args.recordClass });
     if (r) out.push(r);
   }
   return out.length ? `记录册：${out.join("；")}` : "";
@@ -7698,6 +7837,11 @@ function writeMemoryCore(args) {
     const hash = sha1(`${keyword}|${meaning}`).slice(0, 16);
     const { tags, note: tagsNote } = checkedTags(args.tags);
     const entry = { kind: "relation", ts, keyword, meaning, links: String(args.links || ""), source: String(args.source || ""), ...(sourceKind ? { source_kind: sourceKind } : {}), useCount: 0, hash };
+    // 2026-11-23：带日期的「约定/欠账」加一次判定——够格才挂 due，到点播报原话。
+    // 判据在 promise-due.js（日期 + 约定动作 + 具体对象，三条同时满足），宁可漏判不乱提醒。
+    const promiseDue = judgePromiseDue(`${meaning} ${String(args.note || "")}`, Date.now());
+    // 播报只用「事」那句话，不要把关键词再拼一遍
+    if (promiseDue) entry.due = { ...promiseDue, label: clip(meaning || String(args.note || ""), 80), keywords: keyword };
     if (aliases.length) entry.aliases = aliases;
     markState(entry);
     if (quote) entry.quote = quote;
@@ -7823,7 +7967,11 @@ function writeMemoryCore(args) {
   }
 
   if (layer === "note") {
-    const text = String(args.text || "").trim();
+    // 2026-11-23：冷数据——低频长文（邮件往来、对外提交的完整记录）落成独立文件，
+    // notes 里只留一行摘要 + 指针，不占注入、不占检索配额。
+    const coldBody = String(args.cold || "").trim();
+    let text = String(args.text || "").trim();
+    if (!text && coldBody) text = coldBody.split("\n")[0].slice(0, 120);
     if (!text) return "note 需要 text";
     {
       const rejected = guardReject(text, "note");
@@ -7843,6 +7991,15 @@ function writeMemoryCore(args) {
     if (images.length) entry.images = imageEntries(images);
     if (audios.length) entry.audios = audioEntries(audios);
     autoRegisterSources(entry, entryMediaRefs(entry));
+    if (coldBody) {
+      if (coldBody.length > 200000) return "冷数据太长（超过 200KB）：拆成几份再存";
+      const rawSlug = String(args.keyword || "").trim() || `cold-${Date.now()}`;
+      const slug = rawSlug.replace(/[^\p{L}\p{N}_-]+/gu, "-").replace(/^-+|-+$/g, "").slice(0, 40) || `cold-${Date.now()}`;
+      fs.mkdirSync(PATHS.cold, { recursive: true });
+      const rel = path.join("behavior", "cold", `${slug}.md`);
+      fs.writeFileSync(path.join(MEM_DIR, rel), coldBody, "utf8");
+      entry.cold = rel;
+    }
     if (jsonlHasHash(PATHS.notes, entry.hash)) return `已存在相同内容的笔记（hash ${entry.hash}），未重复写入；可用 memory_locate 定位原文`;
     if (guard.dedupe) {
       const rows = readJsonl(PATHS.notes);
@@ -8922,6 +9079,49 @@ function apply(ctx) {
     scheduleAutoSummary({ session: sessionRefs.get(sessionId) || null }, sessionId, "compaction", 5000);
   }
 
+  // 2026-11-23：写入侧关系抽取。环形缓冲保留每个会话最近几轮用户原话，
+  // 因为证据轮常是省略句（「这周日我自己跑一趟」），单轮抽不出实体。
+  const relationRing = new Map();
+  let calendarCache = null; // calendar-table.json 只读一次
+  const relationLastAt = new Map();
+  function noteRelationRing(sessionId, text) {
+    const t = String(text || "").trim();
+    if (!t) return;
+    const arr = relationRing.get(sessionId) || [];
+    arr.push(t.slice(0, 800));
+    while (arr.length > 3) arr.shift();
+    relationRing.set(sessionId, arr);
+  }
+  function scheduleRelationExtract(rx, sessionId) {
+    const now = Date.now();
+    const last = relationLastAt.get(sessionId) || 0;
+    if (now - last < Math.max(10000, Number(rx.minGapMs) || 120000)) return;
+    const ring = relationRing.get(sessionId) || [];
+    if (!ring.length) return;
+    const blob = ring.join("\n");
+    if (!shouldExtract(blob)) return;
+    const caller = createLlmCaller({ session: null, model: rx.model || null });
+    if (!caller) return;
+    relationLastAt.set(sessionId, now);
+    // 2026-11-23：把「今天 + 时间说法换算表」一起给模型，否则月底/初一/小雪这类它算不出来
+    let todayIso = "";
+    let hints = [];
+    try {
+      if (!calendarCache) calendarCache = loadCalendar(new URL("./calendar-table.json", import.meta.url));
+      todayIso = new Date().toLocaleDateString("sv-SE");
+      hints = resolveAll(blob, Date.now(), calendarCache);
+    } catch {}
+    Promise.resolve()
+      .then(() => caller({ prompt: buildExtractPrompt(blob, { today: todayIso, hints }), maxTokens: 600, timeoutMs: 20000 }))
+      .then((raw) => {
+        const rows = parseExtracted(raw);
+        if (!rows.length) return;
+        const res = writeRecordsOf({ records: rows });
+        if (res) diag(`关系抽取：${res.slice(0, 160)}`);
+      })
+      .catch((err) => diag(`关系抽取跳过：${err?.message || err}`));
+  }
+
   // 调宿主 llm 服务生成摘要正文。取不到 llm / 路由就返回 null（调用方静默跳过）。
   function createLlmCaller({ session = null, model = null } = {}) {
     let llm = null;
@@ -9517,8 +9717,18 @@ function apply(ctx) {
           if (!suppressed.has("opening")) openingText = buildOpeningInjection(cfgLive);
           // 到点通道：带钟点的条目走这条（首轮不构建，省得白标已提）
           if (!cardsOnly && !suppressed.has("opening")) {
-            const timedText = buildTimedDueInjection(cfgLive);
+            const timedText = buildTimedDueInjection(cfgLive) + (buildPromiseDueInjection(cfgLive) ? "\n" + buildPromiseDueInjection(cfgLive) : "");
             if (timedText) openingText = [openingText, timedText].filter(Boolean).join("\n");
+          }
+          // 2026-11-23：写入侧关系抽取（默认关）。先无条件记环形缓冲，再按开关决定是否调模型。
+          try {
+            // 2026-11-23 修：这里没有 userText 变量（那是别的函数的参数名），自己取一次当前用户正文
+            const relText = (() => { try { return stripInjected(lastUserText(decision.messages || []).text); } catch { return ""; } })();
+            if (relText) noteRelationRing(sessionId, relText);
+            const rx = { enabled: false, model: null, minGapMs: 120000, ...((cfgLive && cfgLive.relationExtract) || {}) };
+            if (rx.enabled === true) scheduleRelationExtract(rx, sessionId);
+          } catch (err) {
+            diag(`关系抽取调度失败：${err?.message || err}`);
           }
 
           // v0.39（B-94）：取词器 + 提词器。默认关；开着时每回合可能多一次小模型调用。
@@ -10181,6 +10391,11 @@ function apply(ctx) {
             type: "string",
             description: "人类可读备注（跟着落盘，进 guide 索引）",
           },
+          cold: {
+            type: "string",
+            description:
+              "冷数据正文（低频长文，如邮件往来/对外提交完整记录）：写到 behavior/cold/<keyword 或时间戳>.md，note 条目只留 text 摘要 + 指针；text 省略时取正文首行",
+          },
           sourceKind: {
             type: "string",
             enum: ["user_said", "assistant_said", "told", "imagined", "inferred", "tool"],
@@ -10278,6 +10493,9 @@ function apply(ctx) {
                 cls: { type: "string", description: "类别：食物/身体/习惯/出行/时间/物品/关系/情绪/钱/工作。取的时候按类别联想——「芹菜」是食物，问「准备吃的」才带得出来" },
                 enabled: { type: "boolean", description: "只给 sub、不给 attr/state 时：这是主词启停。false=该主词下所有记录退出检索（不必逐条标废），true=恢复" },
                 void: { type: "boolean", description: "给 sub+attr 且 void=true：把这一条标废（黑名单），不再参与检索，数据保留，可恢复" },
+                certainty: { type: "string", description: "确定性：亲历/转述/猜测/未确认（不传=未标）" },
+                source: { type: "string", description: "这句话是谁说的：用户/霜霜/房东/妈妈…" },
+                at: { type: "string", description: "事件日期 YYYY-MM-DD（把「月底/周日/下个月10号」换算成绝对日期再传）" },
                 note: { type: "string", description: "备注，不参与检索主键" },
               },
             },
@@ -11794,7 +12012,7 @@ const plugin = {
   apply,
 };
 
-export { buildRelationCue, writeAudioIndex, renderAudioIndex, copyWorkDir, measureDir, humanBytes, apply, loadState, saveState, STATE_PATH, filterMsgsBySeq, searchEngineOf, searchIndexStatus, closeSearchIndex, buildInjectionText, buildHandoffInjection, buildRecallInjection, buildDueInjection, buildOpeningInjection, buildTimedDueInjection, collectPushDueRows, markPushDone, ensureOpeningLunarRows, addOpeningRow, removeOpeningRow, readOpeningRows, pruneOpeningRows, formatNowLine, ageLabelOf, modelRouteOf, sessionMemory, createSessionMemory, sessionMemoryPaths, normalizeSessionId, isSpecialKey, doctorReport, renderDoctor, resolveBackupDir, probeWritable, coreInjection, coreOptions, createSocial, detectScene, normalizeName, personIdOf, registerSocialTools, sceneLabel, socialConfigDefaults, socialPaths, searchSocialContext, backupPolicySummary, compactionStats, compactionStatusLine, noteCompaction, noteAutoSummary, compressCallsIn, nativeCompactionsIn, compressToolCallsIn, compressionKindOf, readCompactionLog, appendCompactionRecord, ingestCompactionEvent, compactionRecords, compactionSelfCheck, dutyBoardData, sendHandoff, pullHandoff, listHandoffs, compactionSuiteDetected, listAutoSummaries, deleteAutoSummary, setFactCaller, factOptions, readFactCandidates, writeFactCandidates, pendingFactCandidates, factCandidateStats, factStatusLine, parseFactCandidates, buildFactPrompt, factInventory, isDuplicateFact, extractFactCandidates, acceptFactCandidate, rejectFactCandidate, updateBackupPolicy, updateAutoSummaryPolicy, featuresView, setFeature, memoryOverview, openingUpdate, openingDelete, nowView, updateNowMode, cuepromptView, updateCuePrompt, autoSummaryConfigView, registerBackupApi, hostIsLoopback, readRequestBody, searchMemory, searchMemoryKeyword, searchTokensOf, ensureSearchIndex, bm25ScoreOf, searchTargets, writeMemory, voidMemory, exportArchive, readQqWatchSettings, writeQqWatchSettings, qqWatchView, briefOf, aliasesOf, mergeAliases, writeGuardOf, writeGuardCheck, similarityOf, backupNow, pruneOldSnapshots, shouldSkipBackup, backupStampOf, writeTurnDiary, isCompressionEvent, renameAssetImage, listAssetImages, assetDetail, arrayIndexFiles, arrayIndexFileForMonth, migrateArrayIndexIfNeeded, AUDIO_KIND, audioClassTag, buildStats, tagsOf, validateTags, checkedTags, TAG_VOCAB, clearMemos, tagCard, isVocabTag, normalizeTag, CUSTOM_TAG_MAX, CUSTOM_TAG_LEN, RARE_TAG_MAX_COUNT, recallSession, decodeSessionFile, findSessionFile, archiveSessions, scanSessionOriginals, sessionHeaderOf, findArchivedSession, rawArchiveRows, rawSessionFileName, cwdOfSlug, sha256OfFile, roundsOfSessionFile, relationInjectionLines, archiveRelationOverflow, locateMemory, jsonlHasHash, rebuildGuide, guideStats, guideLinks, guideNodes, addSource, listSources, findSources, sourceStats, loadSources, sourceTag, entryProvenance, sourceIndex, runAutoSummary, pendingTurns, autoSummaryOptions, buildAutoSummaryEntry, buildSummaryPrompt, summaryStyleLine, parseSummaryText, summaryInputOf, callWithThinkingRetry, setAutoSummaryCaller, defaultConfig, loadConfig, AUTO_SUMMARY_PREFIX, createRules, parseRulesMarkdown, formatRuleRow, rulesForSearch, parseTimeBound, handleRecord, searchRecords, searchRecordsGrouped, addSubject, subjectRows, voidRecord, unvoidRecord, isStaleInjection, addRecord, removeRecord, recordRows };
+export { buildPromiseDueInjection, recallView, updateRecall, buildRelationCue, writeAudioIndex, renderAudioIndex, copyWorkDir, measureDir, humanBytes, apply, loadState, saveState, STATE_PATH, filterMsgsBySeq, searchEngineOf, searchIndexStatus, closeSearchIndex, buildInjectionText, buildHandoffInjection, buildRecallInjection, buildDueInjection, buildOpeningInjection, buildTimedDueInjection, collectPushDueRows, markPushDone, ensureOpeningLunarRows, addOpeningRow, removeOpeningRow, readOpeningRows, pruneOpeningRows, formatNowLine, ageLabelOf, modelRouteOf, sessionMemory, createSessionMemory, sessionMemoryPaths, normalizeSessionId, isSpecialKey, doctorReport, renderDoctor, resolveBackupDir, probeWritable, coreInjection, coreOptions, createSocial, detectScene, normalizeName, personIdOf, registerSocialTools, sceneLabel, socialConfigDefaults, socialPaths, searchSocialContext, backupPolicySummary, compactionStats, compactionStatusLine, noteCompaction, noteAutoSummary, compressCallsIn, nativeCompactionsIn, compressToolCallsIn, compressionKindOf, readCompactionLog, appendCompactionRecord, ingestCompactionEvent, compactionRecords, compactionSelfCheck, dutyBoardData, sendHandoff, pullHandoff, listHandoffs, compactionSuiteDetected, listAutoSummaries, deleteAutoSummary, setFactCaller, factOptions, readFactCandidates, writeFactCandidates, pendingFactCandidates, factCandidateStats, factStatusLine, parseFactCandidates, buildFactPrompt, factInventory, isDuplicateFact, extractFactCandidates, acceptFactCandidate, rejectFactCandidate, updateBackupPolicy, updateAutoSummaryPolicy, featuresView, setFeature, memoryOverview, openingUpdate, openingDelete, nowView, updateNowMode, cuepromptView, updateCuePrompt, autoSummaryConfigView, registerBackupApi, hostIsLoopback, readRequestBody, searchMemory, searchMemoryKeyword, searchTokensOf, ensureSearchIndex, bm25ScoreOf, searchTargets, writeMemory, voidMemory, exportArchive, readQqWatchSettings, writeQqWatchSettings, qqWatchView, briefOf, aliasesOf, mergeAliases, writeGuardOf, writeGuardCheck, similarityOf, backupNow, pruneOldSnapshots, shouldSkipBackup, backupStampOf, writeTurnDiary, isCompressionEvent, renameAssetImage, listAssetImages, assetDetail, arrayIndexFiles, arrayIndexFileForMonth, migrateArrayIndexIfNeeded, AUDIO_KIND, audioClassTag, buildStats, tagsOf, validateTags, checkedTags, TAG_VOCAB, clearMemos, tagCard, isVocabTag, normalizeTag, CUSTOM_TAG_MAX, CUSTOM_TAG_LEN, RARE_TAG_MAX_COUNT, recallSession, decodeSessionFile, findSessionFile, archiveSessions, scanSessionOriginals, sessionHeaderOf, findArchivedSession, rawArchiveRows, rawSessionFileName, cwdOfSlug, sha256OfFile, roundsOfSessionFile, relationInjectionLines, archiveRelationOverflow, locateMemory, jsonlHasHash, rebuildGuide, guideStats, guideLinks, guideNodes, addSource, listSources, findSources, sourceStats, loadSources, sourceTag, entryProvenance, sourceIndex, runAutoSummary, pendingTurns, autoSummaryOptions, buildAutoSummaryEntry, buildSummaryPrompt, summaryStyleLine, parseSummaryText, summaryInputOf, callWithThinkingRetry, setAutoSummaryCaller, defaultConfig, loadConfig, AUTO_SUMMARY_PREFIX, createRules, parseRulesMarkdown, formatRuleRow, rulesForSearch, parseTimeBound, handleRecord, searchRecords, searchRecordsGrouped, addSubject, subjectRows, voidRecord, unvoidRecord, isStaleInjection, addRecord, removeRecord, recordRows };
 export default plugin;
 
 

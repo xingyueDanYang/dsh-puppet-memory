@@ -1,4 +1,4 @@
-// 三卡等级：strong=全文，weak=一行提示（内容改过则给全文）
+// 三卡等级：2026-11-23 起全量注入一律全文（weak 不再降级成「去翻全卡」提示行）
 import { cardPartText } from "../index.js";
 
 let pass = 0;
@@ -10,9 +10,9 @@ const raw = "x".repeat(600);
 ok("strong：全文", cardPartText({ mode: "strong", level: "strong", raw: "abc", budget: 400 }) === "abc");
 ok("strong：超预算截断", cardPartText({ mode: "strong", level: "strong", raw, budget: 400 }).length === 400);
 // weak
-const hint = cardPartText({ mode: "strong", level: "weak", raw: "状态正文", budget: 100, label: "状态卡", target: "state" });
-ok("weak：给提示不给正文", hint.includes("状态卡") && hint.includes("target=state") && !hint.includes("状态正文"), hint);
-ok("weak：提示带取法", hint.includes("memory_core action=get"));
+const weakText = cardPartText({ mode: "strong", level: "weak", raw: "状态正文", budget: 100, label: "状态卡", target: "state" });
+ok("weak：全量时给正文", weakText === "状态正文", weakText);
+ok("weak：不再出现提示行", !weakText.includes("本轮只给提示") && !weakText.includes("target=state"));
 // weak + 内容改过
 ok("weak：内容改过给全文", cardPartText({ mode: "strong", level: "weak", raw: "新状态", budget: 100, label: "状态卡", target: "state", changed: true }) === "新状态");
 // skip
