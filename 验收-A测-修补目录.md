@@ -101,6 +101,12 @@
 |---|---|---|---|---|---|
 | A-60 | 写入层没有任何门禁：`memory_write` 对乱码、超长粘贴、**把注入块整段复制进记忆**照收不误；便签/笔记只按完全相同去重，近似重复会一条条堆积；人设文件同一行写两遍会真的出现两遍 | 〔数据〕 | v0.34 加**写入守卫**：①乱码拦截（替换字符 `�`、`锟斤拷`/`烫烫烫`、`Ã¢`/`â€` 一类误编序列）；②按层设字数上限（relation/saying 1200、user 800、memo 4000、note 8000、persona 1200、diary 4000）；③注入块结构标记（`<puppet_memory>`、`【核心记忆】` 等）拒收；④便签/笔记近似重复合并进旧条目（字符二元组 Jaccard ≥0.82，或长度比 ≥0.7 且包含度 ≥0.9），标签取并集、新文本多两成以上才替换正文；⑤人设整行去重。拒收只返回可读原因，不抛异常 | `node test/write-guard.mjs` 23 项全过；全套 24 套测试无回归；`writeGuard.enabled=false` 时行为回到 0.33.1 | 配置里把 `writeGuard.enabled` 设 `false` 即可回到旧行为，数据格式没变 |
 
+## 0.52.1（2026-11-23，正式版：npm 元数据修正）
+
+| # | 现象 | 影响面 | 修法 | 怎么验 | 回滚 |
+|---|---|---|---|---|---|
+| A-101 | 市场卡片没有版本号和下载数（只显示作者与「已安装」）。原因：市场靠 npm 包里的 `repository` 把包和仓库对上，我们 `package.json` 里 `repository/homepage/bugs` 三个字段全缺，npm 上 0.52.0 的 packument 里也是 undefined | 〔接口〕〔文档〕 | `package.json` 补三个字段（指向 github.com/xingyueDanYang/dsh-puppet-memory），发 0.52.1，代码零改动 | `npm view dsh-puppet-memory repository` 有值；registry 的 versions.0.52.1.repository 存在；市场下次抓取后卡片出现版本与下载数 | 无数据风险；回退只是元数据缺失 |
+
 ## 0.52.0（2026-11-23，正式版：约定到点播报 + 关写入近似合并）
 
 | # | 现象 | 影响面 | 修法 | 怎么验 | 回滚 |
