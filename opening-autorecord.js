@@ -24,6 +24,11 @@ const ASK_TAIL = /[?？]\s*$|(吗|呢|么)\s*$/;
 const ASK_V_NOT_V = /([\u4e00-\u9fa5])不\1/;
 // 2026-11-24 丹阳：「这种还是设计一个屏蔽吧，不然每天都有」——寒暄收尾句不是事项。
 // 「明天见，雪风大人」「晚安」这类每天都会出现的道别，靠动词表挡不住（见 在 ACTION 里），单独列。
+// 2026-11-24：过去时/回顾句不是「以后要做的事」。截图里的真实误登记：
+//   「文档不一样是昨天又写了，没发上去，准备一起的」→ 被解析成今天 01:00 的事项。
+// 只要句子里出现回顾标记，就先当过去，不进幕表（宁可漏，不挂噪声）。
+// 注意别把「转过去了，下周三记得还我」误伤——单字动词+了 不算回顾标记，只留明确的时间/状态词
+const PAST = /(昨天|前天|上周|上个月|去年|刚刚|刚才|已经|曾经|上次|上回|没发上去|没发|做完了|写完了|改完了|好久|那时候)/;
 // 只认「句末式的道别」：后面不能再接汉字，否则「后天见客户」会被误伤
 const PHATIC = /^(明天见|明儿见|明晚见|后天见|晚安|早安|再见|回见|拜拜|明天聊|回头聊|改天聊|下次聊|先这样|睡吧|睡了|我睡了|去睡了|早睡|好梦|辛苦了|谢谢|收到了|OK|ok|好的|嗯嗯)(?![\u4e00-\u9fa5])/;
 // 称呼不是事项：把称呼剥掉后不足 2 字，说明这句话里只有人、没有事
@@ -96,6 +101,7 @@ export function extractDueItems(text, opt = {}) {
     if (s.length < 4 || s.length > 140) continue;
     if (HYPOTHETICAL.test(s) || ASK_TAIL.test(s) || ASK_V_NOT_V.test(s)) continue;
     if (PHATIC.test(s)) continue;
+    if (PAST.test(s)) continue;
     if (blocked.length && blocked.some((re) => re.test(s))) continue;
     if (dangerHint(s) || absurdHint(s)) continue;
     if (!ACTION.test(s)) continue;
