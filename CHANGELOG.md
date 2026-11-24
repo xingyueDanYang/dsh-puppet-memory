@@ -1,6 +1,6 @@
 # 版本历史
 
-- **未发版（2026-11-24）**：工具从 29 个压到 **24 个**——`memory_void`→`memory_forget action=void`、`memory_cue`→`memory_guide cue-*`、`memory_identity`→`memory_person identity-*`、`memory_visibility`→`memory_group visibility-*`、`memory_source`→`memory_image source-*`；面板「弱命中提示」按钮改成「报个数/不报个数」，插件更新页新增「本版发布」行（配合发版 24 小时冷却）；修 `buildStats` 两处口径（核心卡不再写「每步注入」；状态卡按 rawState 判存在性，弱档也报字数）；六项测试断言按现行行为重写，全套 94 个测试全绿。
+- **0.52.2（2026-11-24，正式版）**：工具从 29 个压到 **24 个**——`memory_void`→`memory_forget action=void`、`memory_cue`→`memory_guide cue-*`、`memory_identity`→`memory_person identity-*`、`memory_visibility`→`memory_group visibility-*`、`memory_source`→`memory_image source-*`；面板「弱命中提示」按钮改成「报个数/不报个数」，插件更新页新增「本版发布」行（配合发版 24 小时冷却）；修 `buildStats` 两处口径（核心卡不再写「每步注入」；状态卡按 rawState 判存在性，弱档也报字数）；六项测试断言按现行行为重写，全套 94 个测试全绿。
 - **0.52.1（2026-11-23，正式版）**：npm 元数据修正——`package.json` 补 `repository` / `homepage` / `bugs`。DSH 市场靠 npm 包里的 `repository` 关联 GitHub 仓库，缺字段会让市场卡片没有版本号与下载数（只显示作者和「已安装」）。代码零改动。
 - **0.52.0（2026-11-23，正式版）**：约定到点播报（`promise-due.js` + 关系条目 `due` 字段 + 到点注入原话）；写入守卫关掉近似合并（`writeGuard.dedupe=false`，阈值同时抬到 0.90）。实测 200 条不同内容被并成 16 条、评测 6581 轮历史只落 493 条，约定被吞；合并应在分片之后做，不在写入侧。
 - **0.52.0（2026-11-23，正式版）**：新增冷数据层 `behavior/cold/`——低频正文外置成文件，按需读、不注入、不挂关系层。初始化时自动建目录；关系行渲染不引用冷数据（曾试过挂指针，按「邮件不用天天看」撤回）。

@@ -1,7 +1,9 @@
 # 木偶记忆（Puppet Memory）
 
-> 当前最新发布为 `0.52.1`｜渠道：GitHub Release / npm latest（Gitee 偶尔同步，不作发布渠道）；版本日期与说明见下一行
+> 当前最新发布为 `0.52.2`｜渠道：GitHub Release / npm latest（Gitee 偶尔同步，不作发布渠道）；版本日期与说明见下一行
 
+> ⭐ **0.52.2（2026-11-24，正式版）**：**工具从 29 个压到 24 个**——`memory_void`→`memory_forget action=void`、`memory_cue`→`memory_guide cue-*`、`memory_identity`→`memory_person identity-*`、`memory_visibility`→`memory_group visibility-*`、`memory_source`→`memory_image source-*`。另修面板两处（弱命中按钮截断、插件更新页显示本版发布时间），幕表加回顾句过滤（「昨天又写了…」不再被登记），六项测试断言对齐现行行为。
+>
 > ⭐ **0.52.1（2026-11-23，正式版）**：**npm 元数据修正**——补 `repository` / `homepage` / `bugs` 三个字段。DSH 市场靠 npm 包里的 `repository` 把包和 GitHub 仓库对上，缺了它市场卡片就只显示作者、「已安装」，没有版本号和下载数。本版不改任何代码逻辑。
 >
 > ⭐ **0.52.0（2026-11-23，正式版）**：**约定到点播报**——关系里带日期的「约定/欠账」（说好/答应/约好，涉及第三方则可带请/还/借/托/带…）写入时自动挂 `due`，到那天注入【约定·到点】并带原话；判定器 `promise-due.js`（双方只认承诺词、多方放宽动作词）。另修：写入侧关掉近似合并（原先 200 条不同内容会被并成 16 条、约定被吞）、`when.js` 修「上周三」算成未来与「27号」解析不出、宿主 GET 补 `recall-view`（面板顺手取回开关此前不显示）。
