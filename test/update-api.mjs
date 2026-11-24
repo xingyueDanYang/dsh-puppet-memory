@@ -76,7 +76,11 @@ try {
   await t("手动强制检查并返回已校验元数据", async () => {
     const res = await call({ action: "update-check", method: "POST", body: { force: true } });
     assert.equal(res.status, 200); assert.equal(res.json.latest.version, "0.49.0");
-    assert.equal(res.json.latest.packageSize, 671477); assert.equal(requests, 1);
+    assert.equal(res.json.latest.packageSize, 671477);
+    // 2026-11-24：检查流程多抓一次「当前版本 tag 的发布时间」（面板显示本版发布于 X 天前）；
+    // 读状态仍然不联网（上面几条断过 requests=0）
+    assert.equal(requests, 2);
+    assert.ok(res.json.currentRelease && res.json.currentRelease.publishedAt, "应带当前版本发布时间");
   });
 } finally {
   dispose(); globalThis.fetch = originalFetch; fs.rmSync(tmp, { recursive: true, force: true });

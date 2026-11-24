@@ -22,6 +22,12 @@ const HYPOTHETICAL = /(如果|要是|万一|假如|假设|不然|否则|也许|�
 const ASK_TAIL = /[?？]\s*$|(吗|呢|么)\s*$/;
 // 「去不去 / 是不是 / 要不要」这类正反问：在问，不是在说会发生什么事
 const ASK_V_NOT_V = /([\u4e00-\u9fa5])不\1/;
+// 2026-11-24 丹阳：「这种还是设计一个屏蔽吧，不然每天都有」——寒暄收尾句不是事项。
+// 「明天见，雪风大人」「晚安」这类每天都会出现的道别，靠动词表挡不住（见 在 ACTION 里），单独列。
+// 只认「句末式的道别」：后面不能再接汉字，否则「后天见客户」会被误伤
+const PHATIC = /^(明天见|明儿见|明晚见|后天见|晚安|早安|再见|回见|拜拜|明天聊|回头聊|改天聊|下次聊|先这样|睡吧|睡了|我睡了|去睡了|早睡|好梦|辛苦了|谢谢|收到了|OK|ok|好的|嗯嗯)(?![\u4e00-\u9fa5])/;
+// 称呼不是事项：把称呼剥掉后不足 2 字，说明这句话里只有人、没有事
+const ADDRESS = /(雪风|大人|主人|丹阳|亲爱的|宝贝|鲸鱼娘|大肥鱼|小克|克劳德)/g;
 // 和「时间」摆在一起的动词：到、还、交、取、寄、约……没有动词的「明天」只是聊天
 const ACTION = /(到站|到货|到家|到|还钱|还账|还款|还|交费|交|取件|取|寄|发工资|发货|发|见|约|办|收|送|买|做|修|装|搬|开门|开张|开|放假|涨|上门|营业|截止|到期|考|体检|复查|面试|请客|聚|签收|提醒|叫我|喊我|叫|喊|去|回|出门|上班|下班|回家|洗|睡|吃|喝)/;
 
@@ -74,6 +80,12 @@ export function extractDueItems(text, opt = {}) {
   const horizon = dayOf(nowMs + horizonDays * 86400000);
   const out = [];
   const seen = new Set();
+  // 用户可配的屏蔽词（正则字符串数组）：命中的句子直接跳过，不进幕表
+  const blocked = [];
+  for (const p of Array.isArray(opt.blockPatterns) ? opt.blockPatterns : []) {
+    if (typeof p !== "string" || !p.trim()) continue;
+    try { blocked.push(new RegExp(p)); } catch { /* 写错的规则跳过，不影响其它 */ }
+  }
 
   // 笔记/归档常带「[逻辑时间] 用户：…」前缀——前缀不是事项内容，先切掉
   const src = String(text || "").replace(/^\s*\[[^\]]{10,40}\]\s*/, "");
@@ -83,6 +95,8 @@ export function extractDueItems(text, opt = {}) {
     // 2026-11-23：放宽到 4 字——「初五交房租」这类短句也是有效事项（更短由后面的 label 规则挡）
     if (s.length < 4 || s.length > 140) continue;
     if (HYPOTHETICAL.test(s) || ASK_TAIL.test(s) || ASK_V_NOT_V.test(s)) continue;
+    if (PHATIC.test(s)) continue;
+    if (blocked.length && blocked.some((re) => re.test(s))) continue;
     if (dangerHint(s) || absurdHint(s)) continue;
     if (!ACTION.test(s)) continue;
     const when = parseWhen(s, nowMs);
@@ -116,6 +130,8 @@ export function extractDueItems(text, opt = {}) {
       .replace(/[的了把我你他她它要去来给再又还是就都也请帮叫喊]/g, "")
       .trim();
     if (thing.length < 2) continue; // 只有动作没有事情：「明天记得」「晚上提醒我」
+    // 2026-11-24：剥掉称呼后还得有事情——「明天见，雪风大人」只剩称呼，不是事项
+    if (thing.replace(ADDRESS, "").trim().replace(/[，,。.！!？?、\s]/g, "").length < 2) continue;
     if (label.length < (preferCal ? 2 : 4)) continue;
     // 主语/事项借用记录册主词：sub=谁的事，attr=这件事（副词位）
     const ent = (opt.entities && opt.entities.length ? matchEntity(s, opt.entities) : null) || ctxEnt;

@@ -12,6 +12,10 @@ const cases = [
   ['今天下午三点去取体检报告', '2026-09-01T09:00:00+08:00', true, '今天+钟点'],
   ['快递昨天就到了', '2026-09-05T10:00:00+08:00', false, '过去'],
   ['下周三记得还我', '2026-11-18T12:00:00+08:00', true, '短句也要能过'],
+  // 2026-11-24：寒暄/称呼句不进幕表（「明天见，雪风大人」每天都会出现）
+  ['明天见，雪风大人', '2026-11-24T22:00:00+08:00', false, '道别+称呼不是事项'],
+  ['晚安', '2026-11-24T22:00:00+08:00', false, '纯寒暄'],
+  ['明天见', '2026-11-24T22:00:00+08:00', false, '纯道别'],
 ]
 
 let pass = 0
@@ -45,6 +49,16 @@ console.log(semanticDup ? 'pass  同主词同天同动作判重' : 'FAIL 语义�
 // 不同主词同一天不判重
 const notDup = isDuplicateRow([{ date: '2026-11-19', sub: '霜霜', attr: '还钱' }], { date: '2026-11-19', sub: '小赵', attr: '还钱' })
 console.log(!notDup ? 'pass  不同主词不判重' : 'FAIL 误判重')
+// 用户可配屏蔽词：命中的句子不登记（config.opening.blockPatterns）
+const blockedOut = extractDueItems('明天下午三点去驿站取快递', {
+  nowMs: Date.parse('2026-11-24T09:00:00+08:00'),
+  blockPatterns: ['快递'],
+})
+const unblockedOut = extractDueItems('明天下午三点去驿站取快递', { nowMs: Date.parse('2026-11-24T09:00:00+08:00') })
+console.log(blockedOut.length === 0 && unblockedOut.length > 0 ? 'pass  屏蔽词生效（快递）' : 'FAIL 屏蔽词：' + JSON.stringify(blockedOut))
+// 写错的规则不能把整段搞挂
+const badPat = extractDueItems('明天下午三点去驿站取快递', { nowMs: Date.parse('2026-11-24T09:00:00+08:00'), blockPatterns: ['[坏('] })
+console.log(badPat.length > 0 ? 'pass  坏规则被忽略' : 'FAIL 坏规则把正常句也挡了')
 console.log(`
 ${pass}/${cases.length} 用例通过`)
 process.exit(pass === cases.length ? 0 : 1)

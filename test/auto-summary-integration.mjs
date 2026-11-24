@@ -137,7 +137,8 @@ check("hooks wired", hooks.has("agent/disposed") && hooks.has("session/event") &
 const control = tools.get("memory_control");
 const actionEnum = control?.parameters?.properties?.action?.enum || [];
 check("memory_control has summary actions", actionEnum.includes("summary") && actionEnum.includes("summarize"), actionEnum.join(","));
-check("memory_summary actions documented", String(control?.description || "").includes("auto-summary"));
+// 2026-11-24：工具描述里写的是中文「自动摘要」+ summary/summarize，不再出现英文 kind 名 auto-summary
+check("memory_summary actions documented", /自动摘要/.test(String(control?.description || "")) && String(control?.description || "").includes("summarize"));
 
 // ---- 一期：会话结束触发 ----
 const s1 = makeSession("s-int-1");

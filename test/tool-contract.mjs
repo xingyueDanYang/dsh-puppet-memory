@@ -75,7 +75,8 @@ try {
 
   ok("apply 不抛异常", applyErr === "", applyErr);
   ok("没有被宿主契约拒收的工具", rejected.length === 0, rejected.map((r) => `${r.name}: ${r.why}`).join("；"));
-  ok("注册数量 = 36（0.45 加了 memory_people）", tools.length === 36, `实际 ${tools.length}`);
+  // 2026-11-22 QQ 通道拆除 -7；2026-11-24 工具合并 5 个（void→forget、cue→guide、identity→person、visibility→group、source→image）
+  ok("注册数量 = 24", tools.length === 24, `实际 ${tools.length}`);
 
   const names = tools.map((t) => t.name);
   for (const want of ["memory_rules", "memory_grants", "memory_opening", "memory_search", "memory_write", "memory_handoff", "memory_backup"]) {

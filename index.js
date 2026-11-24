@@ -923,7 +923,9 @@ function defaultConfig() {
     // 2026-11-22：autoRecord=写侧自动登记（每轮原文抽「未来时点+事项」），见 opening-autorecord.js
     // push=主动推送（2026-11-22 C 方案：到点直接 followup 一条消息）。默认关——会自己唤起一轮会话，
     // 由 config.opening.push 打开；开着时到点通道（buildTimedDueInjection）自动让位，避免同一条提两次。
-    opening: { enabled: true, lookaheadDays: 1, maxItems: 5, autoRecord: true, push: false },
+    // 2026-11-24：blockPatterns=幕表自动登记的屏蔽词（正则字符串数组），命中的句子不登记。
+    // 默认空；寒暄/称呼句由 opening-autorecord.js 内置规则挡（「明天见，雪风大人」这类）。
+    opening: { enabled: true, lookaheadDays: 1, maxItems: 5, autoRecord: true, push: false, blockPatterns: [] },
     // 2026-11-23：幕表提醒的两条路。openingSchedule.enabled=true 时，每天 07:00 的「幕表排任务」
     // 会把带钟点的事项排成宿主计划任务；关着（默认）就只用插件到点通道（到点后的第一轮提一句），不建任何计划任务。
     openingSchedule: { enabled: false },
@@ -2001,7 +2003,7 @@ function autoRegisterOpening(text, { source = "", nowMs = Date.now() } = {}) {
     const cfg = loadConfig();
     const op = cfg.opening || {};
     if (op.enabled === false || op.autoRecord === false) return 0;
-    const items = extractDueItems(text, { nowMs, entities: dueEntities() });
+    const items = extractDueItems(text, { nowMs, entities: dueEntities(), blockPatterns: op.blockPatterns });
     if (!items.length) return 0;
     let rows = [];
     try { rows = readOpeningRows(); } catch { rows = []; }
@@ -7007,12 +7009,15 @@ function buildStats() {
     const core = coreInjection(loadConfig());
     // A-48：拆成三张卡之后，core.length 是「三张卡合起来」的长度，拿它跟 core 的 600 预算比会骗人
     // （实测 310+187+116=613，报表显示 619/600「超预算」，实际每张都没超）。这里分别报各自的字数与预算。
-    fileStats.push(`behavior/core.md: ${core.coreText.length}/${core.budget} 字（核心记忆，${core.everyStep ? "每步注入" : "按 mode 注入"}${core.clipped ? "，超预算已截断" : ""}）`);
+    // 2026-11-24：节奏口径改成现行（首轮/每 100 轮/改过才补），「每步注入」是旧文案
+    fileStats.push(`behavior/core.md: ${core.coreText.length}/${core.budget} 字（核心记忆，首轮/每 100 轮/改过才补${core.clipped ? "，超预算已截断" : ""}）`);
     if (core.rulesText) {
-      fileStats.push(`behavior/core-rules.md: ${core.rulesText.length}/${core.rulesBudget} 字（行为规则，改过或压缩后补一次${core.rulesClipped ? "，超预算已截断" : ""}）`);
+      fileStats.push(`behavior/core-rules.md: ${core.rulesText.length}/${core.rulesBudget} 字（行为规则，首轮/每 100 轮/改过才补${core.rulesClipped ? "，超预算已截断" : ""}）`);
     }
-    if (core.stateText) {
-      fileStats.push(`behavior/core-state.md: ${core.stateText.length}/${core.stateBudget} 字（当前状态，每步注入${core.stateClipped ? "，超预算已截断" : ""}）`);
+    // 2026-11-24：存在性用 rawState 判（弱档 stateText 为空，但文件里有内容也得报这一行）
+    if (core.rawState && String(core.rawState).trim()) {
+      const shown = core.stateText || String(core.rawState).slice(0, core.stateBudget);
+      fileStats.push(`behavior/core-state.md: ${String(core.rawState).trim().length}/${core.stateBudget} 字（当前状态，首轮/每 100 轮/改过才补${core.stateClipped ? "，超预算已截断" : ""}）`);
     }
   } catch {
     /* 核心记忆统计失败不影响其它统计 */
@@ -10871,7 +10876,8 @@ function apply(ctx) {
     });
 
     // v0.39（B-94）：取词器 / 提词器的干预面。只动 deep/ 下那三张表，不碰记忆本体。
-    register({
+    // 2026-11-24：memory_cue 并进 memory_guide（工具数 29 → 24），这里保留成对象，由 guide 用 cue- 前缀转发
+    const cueTool = {
 
       name: "memory_cue",
       description:
@@ -10978,33 +10984,10 @@ function apply(ctx) {
           return `取词器/提词器操作失败：${err?.message || err}`;
         }
       },
-    });
+    };
+    const cueExecute = (args) => cueTool.execute(args, undefined);
+    // 兼容旧代码里可能残留的 register(cueTool) 写法：不再注册，直接忽略
 
-    register({
-
-      name: "memory_void",
-      description:
-        "把一条记忆标记为「已作废」——**不删数据、可恢复**。用途：旧结论被推翻、记错了、过期了、来源不成立。标废后：①不再进每轮注入；②memory_search 默认不返回；③memory_locate 仍能按 hash 查到原文和作废原因；④guide 索引保留。**reason 必填**（否则等于无声删除，以后查不回来）。action=unvoid 撤销。要真正删数据请手工改库，这个工具永远不删。【使用规则】作废是不可逆面：先确认作废哪一条、reason 写清为什么（「以后可能还想不起来」不够，要写结论被什么推翻/哪来的证据）；拿不准就先问。",
-      parameters: {
-        type: "object",
-        properties: {
-          hash: { type: "string", description: "把一条记忆标记作废（不删数据、可恢复，reason 必填）；action=unvoid 撤销。旧结论被推翻或记错时用它。" },
-          keyword: { type: "string", description: "或按关键词定位（配合 layer）" },
-          layer: { type: "string", enum: ["behavior", "deep", "array", "user", "memo", "all"], description: "限定层，默认 all" },
-          reason: { type: "string", description: "为什么作废（必填，写进条目，以后 memory_locate 能看到）" },
-          by: { type: "string", description: "替换链：被哪条新记忆取代（新条 hash，可只给前 8 位）。给了就记成 supersededBy，旧条检索/定位时显示「→ 被 #新 取代」。注意：note/memo/diary 这类追加型层不会自动建链，只有 relation/saying 同 keyword 更新时才自动生成 supersedes。" },
-          action: { type: "string", enum: ["void", "unvoid"], description: "默认 void=标废；unvoid=恢复" },
-        },
-      },
-      output,
-      async execute(args) {
-        try {
-          return voidMemory(args || {});
-        } catch (err) {
-          return `标废失败：${err?.message || err}`;
-        }
-      },
-    });
 
     register({
 
@@ -11335,15 +11318,20 @@ function apply(ctx) {
       parameters: {
         type: "object",
         properties: {
-          action: { type: "string", enum: ["list", "suppress", "unsuppress", "delete", "overview", "memo-clear"], description: "…或 memo-clear=清空便签（原 memory_clear）" },
+          action: { type: "string", enum: ["list", "suppress", "unsuppress", "delete", "overview", "memo-clear", "void", "unvoid"], description: "…或 memo-clear=清空便签（原 memory_clear）" },
           session: { type: "string", description: "只读自检：目录可写、备份目录可用、剩余空间、关键文件与版本。跑不起来或有异常时先跑它。" },
           hashes: { type: "array", items: { type: "string" }, description: "suppress/unsuppress 用：要处理的 hash（或 core/state/social/persona）" },
-          hash: { type: "string", description: "delete 用：本会话条目的 hash" },
+          hash: { type: "string", description: "delete 用：本会话条目的 hash；action=void/unvoid 用：要标废/恢复的条目 hash（可只给前 8 位）" },
+          keyword: { type: "string", description: "action=void 用：没有 hash 时按关键词定位" },
+          reason: { type: "string", description: "action=void 用：为什么作废（必填，写进条目，以后能查回来）" },
+          by: { type: "string", description: "action=void 用：被哪条新记忆取代（新条 hash 前 8 位）" },
         },
       },
       output,
       execute(args, exec) {
         try {
+          // 2026-11-24：memory_void 并进来（工具数从 29 压到 24）；action=void / unvoid 走原来的标废实现
+          if (args?.action === "void" || args?.action === "unvoid") return voidMemory(args || {});
           ensureDirs();
           const sid = normalizeSessionId(args?.session || exec?.agent?.session?.header?.id || "");
           if (!sid) return "没有会话 id：请传 session，或从有会话的上下文里调用。";
@@ -11784,10 +11772,23 @@ function apply(ctx) {
       parameters: {
         type: "object",
         properties: {
-          action: { type: "string", enum: ["list", "rename", "meta", "index"], description: "操作；index=重建音频索引（assets/音频索引.md）" },
+          action: { type: "string", enum: ["list", "rename", "meta", "index", "source-add", "source-list", "source-find", "source-stats"], description: "操作；index=重建音频索引；source-* 是出处那半边（原 memory_source）ssets/音频索引.md）" },
           name: { type: "string", description: "rename/meta 时：文件名（可先用 list 查看）" },
           newName: { type: "string", description: "rename 时：新名字（可带 png/jpg 或 mp3/wav 等扩展名）" },
           kind: { type: "string", enum: AUDIO_KIND, description: "list 时可筛：音频内容类型" },
+          asset: { type: "string", description: "source-*：出处挂到哪个资产（文件名或 sha256 前缀）" },
+          hash: { type: "string", description: "source-*：出处挂到哪条记忆（条目 hash 前 8 位）" },
+          author: { type: "string", description: "source-*：谁说的/谁做的" },
+          id: { type: "string", description: "source-*：平台上的 ID（如 BV1jNpo61E39）" },
+          url: { type: "string", description: "source-*：原文链接" },
+          platform: { type: "string", description: "source-*：平台" },
+          date: { type: "string", description: "source-*：素材日期（YYYY-MM-DD）" },
+          title: { type: "string", description: "source-*：标题" },
+          quote: { type: "string", enum: ["verbatim", "paraphrase"], description: "source-*：原文照抄/转述" },
+          note: { type: "string", description: "source-*：备注" },
+          type: { type: "string", enum: ["image", "video", "audio", "text", "page"], description: "source-*：出处类型" },
+          query: { type: "string", description: "source-find：关键词" },
+          limit: { type: "number", description: "source-list/find：最多几条，默认 20" },
         },
         required: ["action"],
       },
@@ -11796,6 +11797,15 @@ function apply(ctx) {
         try {
           ensureDirs();
           const action = String(args?.action || "list");
+          // 2026-11-24：memory_source 并进 memory_image（工具数 29 → 24）：source-* 前缀转发
+          if (action.startsWith("source-")) {
+            const a = action.slice("source-".length);
+            if (a === "list") return listSources(args || {});
+            if (a === "find") return findSources(args?.query, args?.limit);
+            if (a === "stats") return sourceStats();
+            if (a === "add") return addSource(args || {});
+            return `未知 source 操作：${a}（add / list / find / stats）`;
+          }
           if (action === "list") return listAssetImages(args || {});
           if (action === "meta") return assetDetail(args?.name);
           if (action === "rename") return renameAssetImage(args?.name, args?.newName);
@@ -11874,7 +11884,7 @@ function apply(ctx) {
       parameters: {
         type: "object",
         properties: {
-          action: { type: "string", enum: ["rebuild", "stats", "links", "tags"], description: "默认 rebuild；tags=冷门标签卡（原 memory_tags）" },
+          action: { type: "string", enum: ["rebuild", "stats", "links", "tags", "cue-list", "cue-events", "cue-misrecall", "cue-forget", "cue-promote", "cue-demote", "cue-stats"], description: "默认 rebuild；cue-* 是取词器/提词器那半边（原 memory_cue）；tags=冷门标签卡（原 memory_tags）" },
           tag: { type: "string", description: "action=tags 时：要查的标签（按别名归一）" },
           keyword: { type: "string", description: "action=links 时查的关键词" },
           hash: { type: "string", description: "action=links 时查的 hash（可只给前几位）" },
@@ -11884,6 +11894,7 @@ function apply(ctx) {
       async execute(args) {
         try {
           const action = String(args?.action || "rebuild");
+          if (action.startsWith("cue-")) return cueExecute({ ...args, action: action.slice(4) });
           if (action === "tags") return tagCard(args || {});
           if (action === "stats") return guideStats();
           if (action === "links") return guideLinks(args || {});
@@ -11894,46 +11905,7 @@ function apply(ctx) {
         }
       },
     });
-    ctx.tools.register({
-      name: "memory_source",
-      description:
-        "出处（provenance）：记「谁说的、在哪看到的」，也给图片/音频资产登记来源。add：asset（资产名或 sha256 前缀，memory_image list 可看）或 hash 二选一，配 author/id/url/platform/date/title/quote/note；list 按时间列（可筛 platform/asset/author/quote）；find 按关键词查；stats 看出处概况与「没出处的资产」。找不到就留空，不编造；检索结果会自动显示出处，视频标 ▶。",
-      parameters: {
-        type: "object",
-        properties: {
-          action: { type: "string", enum: ["add", "list", "find", "stats"], description: "默认 add" },
-          asset: { type: "string", description: "出处挂到哪个资产：资产文件名（可只给 sha256 前缀）" },
-          hash: { type: "string", description: "出处挂到哪条记忆：条目 hash（可只给前 8 位）" },
-          author: { type: "string", description: "谁说的/谁做的（UP 主、公众号、作者名）" },
-          id: { type: "string", description: "平台上的 ID（如 BV1jNpo61E39）" },
-          url: { type: "string", description: "原文链接" },
-          platform: { type: "string", description: "平台；不给就按 id/url 猜" },
-          date: { type: "string", description: "素材/文章的日期（YYYY-MM-DD）" },
-          title: { type: "string", description: "标题" },
-          quote: { type: "string", enum: ["verbatim", "paraphrase"], description: "verbatim=原文照抄；paraphrase=我自己的转述" },
-          note: { type: "string", description: "备注（上下文、看到的场景等）" },
-          type: { type: "string", enum: ["image", "video", "audio", "text", "page"], description: "出处类型；挂资产时默认同资产" },
-          query: { type: "string", description: "action=find 的关键词" },
-          limit: { type: "number", description: "list/find 最多显示几条，默认 20" },
-        },
-      },
-      output,
-      async execute(args) {
-        try {
-          ensureDirs();
-          const action = String(args?.action || "add");
-          if (action === "list") return listSources(args || {});
-          if (action === "find") return findSources(args?.query, args?.limit);
-          if (action === "stats") return sourceStats();
-          if (action === "add") return addSource(args || {});
-          return `未知 action：${action}（可选 add / list / find / stats）`;
-        } catch (err) {
-          return `出处操作失败：${err?.message || err}`;
-        }
-      },
-    });
 
-    // v0.21 多人记忆骨架：memory_person / memory_identity / memory_group / memory_visibility
     registerSocialTools(register, output, social);
   }
 

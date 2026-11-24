@@ -124,7 +124,7 @@ try {
     if (!tool) throw new Error(`工具没注册：${name}`);
     return tool.execute(args || {});
   };
-  const mergeOut = await call("memory_identity", { action: "merge", keep: X.id, candidateId: pendingRes.candidateId, note: "同一个人，两个群身份" });
+  const mergeOut = await call("memory_person", { action: "identity-merge", keep: X.id, candidateId: pendingRes.candidateId, note: "同一个人，两个群身份" });
   ok("归一：工具确认候选并合并", mergeOut.includes("已合并") || mergeOut.includes("已确认"), mergeOut);
   const mergedView = social.personView(X.id);
   ok("归一：合并后在群 2 个", mergedView.groups.length === 2, JSON.stringify(mergedView.groups));
@@ -159,14 +159,14 @@ try {
   ok("工具：登记新人", added.includes("已登记"));
   const groupGet = await call("memory_group", { action: "get", id: G1 });
   ok("工具：群档案含语气与我在本群位置", groupGet.includes("短、直") && groupGet.includes("老人"));
-  const visAdded = await call("memory_visibility", { action: "add", scope: { kind: "group", groupId: G2 }, text: "二创群不聊政治" });
+  const visAdded = await call("memory_group", { action: "visibility-add", scope: { kind: "group", groupId: G2 }, text: "二创群不聊政治" });
   ok("工具：新增分区事实", visAdded.includes("二创群不聊政治"));
-  const visList = await call("memory_visibility", { action: "list", kind: "group" });
+  const visList = await call("memory_group", { action: "visibility-list", kind: "group" });
   ok("工具：按分区列事实", visList.includes(G1) && visList.includes(G2));
   const idOf = visAdded.match(/f_[a-z0-9]+/i)?.[0];
-  const visSet = await call("memory_visibility", { action: "set", id: idOf, scope: { kind: "shared" }, shared: true });
+  const visSet = await call("memory_group", { action: "visibility-set", id: idOf, scope: { kind: "shared" }, shared: true });
   ok("工具：改分区", visSet.includes("已改分区"));
-  const identList = await call("memory_identity", { action: "list" });
+  const identList = await call("memory_person", { action: "identity-list" });
   ok("工具：无候选时说人话", identList.includes("没有待确认"));
 
   // 红线：social 只写 social/

@@ -77,6 +77,8 @@ export function normalizeSettings(raw, current) {
     lastError: base.lastError || "",
     lastErrorAt: validDate(base.lastErrorAt),
     latest: base.latest && base.latest.version ? base.latest : null,
+    // 2026-11-24：当前版本本身是什么时候发的——面板上显示「本版发布于 X 天前」，配合 24h 发版冷却
+    currentRelease: base.currentRelease && base.currentRelease.version ? base.currentRelease : null,
     currentVersion: current || base.currentVersion || "",
   };
 }
@@ -108,6 +110,7 @@ export function createUpdateChecker(opts = {}) {
       canRetryAt: retryAt ? new Date(retryAt).toISOString() : "",
       nextCheckAt: nextAt ? new Date(nextAt).toISOString() : "",
       hasUpdate: s.latest ? compareVersion(s.latest.version, version) > 0 : false,
+      cooldownHours: 24,
       releaseUrl: "https://github.com/" + repo + "/releases/latest",
     };
   }
@@ -130,6 +133,38 @@ export function createUpdateChecker(opts = {}) {
     const next = normalizeSettings({ ...cur, ...changes }, version);
     store.set(next);
     return state();
+  }
+
+  // 只读缓存；需要网络的那次刷新由 refreshCurrentRelease() 触发（面板打开时调一次，失败不影响其它字段）
+  const RELEASE_CACHE_MS = 24 * 3600 * 1000;
+
+  async function refreshCurrentRelease() {
+    if (!version) return null;
+    // 预发布版（-rc/-beta）不查 tag：GitHub 上可能没有对应 release，也免得给检查流程多一次请求
+    if (version.includes("-")) return null;
+    const cur = normalizeSettings(store.get() || {}, version);
+    const cached = cur.currentRelease;
+    if (cached && cached.version === version && cached.publishedAt) {
+      const at = Date.parse(cached.fetchedAt || "");
+      if (Number.isFinite(at) && now() - at < RELEASE_CACHE_MS) return cached;
+    }
+    const url = "https://api.github.com/repos/" + repo + "/releases/tags/v" + version;
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), timeoutMs);
+    try {
+      const res = await fetchImpl(url, { signal: ctl.signal, redirect: "error", headers: { Accept: "application/vnd.github+json" } });
+      if (!res.ok) return cached || null;
+      const j = await res.json();
+      const rec = { version, publishedAt: validDate(j.published_at), tag: String(j.tag_name || "v" + version), fetchedAt: new Date(now()).toISOString() };
+      if (!rec.publishedAt) return cached || null;
+      const next = normalizeSettings({ ...cur, currentRelease: rec }, version);
+      store.set(next);
+      return rec;
+    } catch {
+      return cached || null;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async function fetchLatest() {
@@ -183,6 +218,9 @@ export function createUpdateChecker(opts = {}) {
       const checkedAt = new Date(now()).toISOString();
       try {
         const latest = await fetchLatest();
+        // 2026-11-24：同一个检查动作里顺手把「本版是什么时候发的」抓回来（缓存 24h）。
+        // 不放在 update-state 里，是因为「读状态」必须不联网（test/update-api 明确断言过）。
+        try { await refreshCurrentRelease(); } catch { /* 失败不影响检查结果 */ }
         const next = normalizeSettings({ ...store.get(), latest, lastCheckedAt: checkedAt, lastError: "", lastErrorAt: "" }, version);
         store.set(next);
         return { ok: true, ...state() };
@@ -206,7 +244,7 @@ export function createUpdateChecker(opts = {}) {
     return task;
   }
 
-  return { state, configure, check, repo, version };
+  return { state, configure, check, refreshCurrentRelease, repo, version };
 }
 
 async function boundedResponseText(response, limit) {

@@ -98,7 +98,8 @@ try {
     applyErr = err?.message || String(err);
   }
   ok("apply() 不抛异常", !applyErr, applyErr);
-  ok("memory_cue 工具已注册", ctx.toolList.some((t) => t.name === "memory_cue"));
+  // 2026-11-24：memory_cue 并进 memory_guide
+  ok("取词器入口（已并入 memory_guide）已注册", ctx.toolList.some((t) => t.name === "memory_guide"));
 
   const rawPreStep = ctx.handlers.get("agent/pre-step")?.[0];
 // 2026-11-21：首轮只给三张卡，到期块/回忆提示从第二轮起才注入——测试先热身一轮，

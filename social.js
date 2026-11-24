@@ -851,7 +851,7 @@ export function registerSocialTools(register, output, social) {
     }
   };
 
-  register({
+  const personTool = {
     name: "memory_person",
     description:
       "多人记忆（v0.21 骨架）：人的档案与私聊事件。action=add（登记一个人：nickname/aliases/platformIds，平台 id 如 {qq:\"123\"}/{bilibili:\"uid\"}）| list（列人）| get（一个人 + 跨群视图：在哪些群、什么角色、跟他聊过什么、熟悉度）| update（改昵称/别名/平台 id）| alias（加别名）| event（记一条私聊事件）| resolve（给昵称+平台 id 判是不是同一个人：同平台 id 直接命中，否则只提案进待确认，绝不自动合并）。多人记忆默认关闭注入，只有 config.social.enabled=true 且识别出场景才注入。关系不做数值分（v0.29）：要记就记具体的事（memory_visibility / facts / event）。",
@@ -931,9 +931,9 @@ export function registerSocialTools(register, output, social) {
       }
       return `未知 action：${action}`;
     }),
-  });
+  };
 
-  register({
+  const identityTool = {
     name: "memory_identity",
     description:
       "身份归一（v0.21 骨架）：同一个人跨群/跨平台合并成一个。action=list（看待确认候选）| scan（拿一个人现有信息重算候选）| merge（keep=保留的 person id，absorb=被并掉的；会把别名、平台 id、事实、边、事件一起改指向，并标 pending=merged）| split（把某些平台 id 或某个群的档案拆出去，id=原 person，platformIds={qq:\"...\"}，group=群号）| reject（拒绝一条候选）。**合并绝不自动发生**，必须显式调用。",
@@ -993,9 +993,26 @@ export function registerSocialTools(register, output, social) {
       }
       return `未知 action：${action}`;
     }),
-  });
+  };
 
-  register({
+  // 2026-11-24：memory_identity 并进 memory_person（工具数 29 → 24）：identity-* 前缀转发
+  for (const extra of ["identity-list", "identity-scan", "identity-merge", "identity-split", "identity-reject"]) personTool.parameters.properties.action.enum.push(extra);
+  Object.assign(personTool.parameters.properties, {
+    keep: { type: "string", description: "identity-merge：保留的 person id" },
+    absorb: { type: "string", description: "identity-merge：被并掉的 person id" },
+    candidateId: { type: "string", description: "identity-merge/reject：候选 id" },
+    group: { type: "string", description: "identity-split：把这个群的档案一起拆出去" },
+    note: { type: "string", description: "identity-*：备注（记进候选决策）" },
+  });
+  const personRun = personTool.execute;
+  personTool.execute = async (args) => {
+    const a = String((args && args.action) || "");
+    if (a.startsWith("identity-")) return identityTool.execute({ ...args, action: a.slice("identity-".length) });
+    return personRun(args);
+  };
+  register(personTool);
+
+  const groupTool = {
     name: "memory_group",
     description:
       "群档案（v0.21 骨架）：群的性格与我在群里的位置。action=add（id=群号，name/aliases，culture={tone,medianLen,atRate,emojiRate,activeHours,topics[],taboo[]}）| list | get（群档案 + 我在本群的 self 档案 + 本群事实 + 最近事件）| update（改 name/culture）| event（记一条群事件：groupId/speakerId/summary）| self（设置我在该群的地位/习惯）。不同群说话不一样，出站前先看这里的 culture。",
@@ -1054,9 +1071,9 @@ export function registerSocialTools(register, output, social) {
       }
       return `未知 action：${action}`;
     }),
-  });
+  };
 
-  register({
+  const visibilityTool = {
     name: "memory_visibility",
     description:
       "记忆分区可见性（v0.21 骨架）：控制一条社交记忆能被谁看到。action=list（按分区列事实）| set（id=事实 id，scope={kind:self|person|group|shared, personId?, groupId?}，shared=true 表示显式可跨群）| add（新建一条带分区的事实：scope + text + source）| delete。**默认规则：person@group 的信息不跨群；主人的私事（self）只在和主人私聊时注入；shared 必须显式标。**",
@@ -1097,5 +1114,21 @@ export function registerSocialTools(register, output, social) {
       }
       return `未知 action：${action}`;
     }),
+  };
+
+  // 2026-11-24：memory_visibility 并进 memory_group（工具数 29 → 24）：visibility-* 前缀转发
+  for (const extra of ["visibility-list", "visibility-set", "visibility-add", "visibility-delete"]) groupTool.parameters.properties.action.enum.push(extra);
+  Object.assign(groupTool.parameters.properties, {
+    scope: { type: "object", description: "visibility-*：{kind:self|person|group|shared, personId?, groupId?}" },
+    text: { type: "string", description: "visibility-add：事实正文" },
+    source: { type: "string", description: "visibility-add：出处（谁说的/在哪看到的）" },
+    shared: { type: "boolean", description: "visibility-set：显式标为可跨群公共事实" },
   });
+  const groupRun = groupTool.execute;
+  groupTool.execute = async (args) => {
+    const a = String((args && args.action) || "");
+    if (a.startsWith("visibility-")) return visibilityTool.execute({ ...args, action: a.slice("visibility-".length) });
+    return groupRun(args);
+  };
+  register(groupTool);
 }

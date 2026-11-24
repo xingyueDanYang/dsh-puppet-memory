@@ -21,6 +21,9 @@ write("behavior/relations.jsonl", [
 write("behavior/user.jsonl", [J({ kind: "user", ts: "2026-10-28T03:00:00.000Z", keyword: "档案", text: "用户档案里的档案条目", hash: "bbb00001" })]);
 write("deep/sayings.jsonl", [J({ kind: "saying", ts: "2026-10-28T04:00:00.000Z", keyword: "档案常言", meaning: "深层里的档案梗", hash: "ccc00001" })]);
 write("behavior/diary/2026-10.jsonl", [
+  // 2026-11-24：kind=diary 只认真日记（实现里 turn 与 diary 是两个 kind），
+  // 所以夹具里必须有一条真日记，否则「只命中日记」是在空结果上蒙对的。
+  J({ kind: "diary", ts: "2026-10-27T06:00:00.000Z", text: "真日记：档案整理完成", hash: "ddd00002" }),
   J({ kind: "turn", ts: "2026-10-27T05:00:00.000Z", user: "日记里的档案记录", assistant: "好", hash: "ddd00001" }),
 ]);
 write("behavior/notes.jsonl", [J({ kind: "note", ts: "2026-10-28T06:00:00.000Z", text: "笔记里的档案结论", hash: "eee00001", tags: ["工作"] })]);
@@ -69,16 +72,19 @@ try {
 
   // ---- kind ----
   const onlyDiary = s("档案", { kind: "diary" });
-  ok("kind=diary 只命中日记", onlyDiary.includes("日记里的档案记录") && !onlyDiary.includes("笔记里的档案结论"));
+  ok("kind=diary 只命中真日记（不含 turn、不含笔记）", onlyDiary.includes("真日记：档案整理完成") && !onlyDiary.includes("日记里的档案记录") && !onlyDiary.includes("笔记里的档案结论"));
   const onlyTurn = s("档案", { kind: "turn" });
-  ok("kind=turn 命中回合条目", onlyTurn.includes("日记里的档案记录"));
+  ok("kind=turn 只命中对话流水（不含真日记）", onlyTurn.includes("日记里的档案记录") && !onlyTurn.includes("真日记：档案整理完成"));
   const onlyNote = s("档案", { kind: "note" });
   ok("kind=note 命中笔记", onlyNote.includes("笔记里的档案结论"));
 
   // ---- 空结果提示 & 旧调用兼容 ----
   ok("空结果会说明是哪个过滤造成的", s("档案", { status: "failed" }).includes("加了过滤"));
   const legacy = searchMemory("档案", "behavior", 5);
-  ok("旧位置参数仍可用", legacy.includes("档案甲") && !legacy.includes("深层里的档案梗"));
+  // 2026-11-24：原来断「结果里有档案甲」——夹具多一条真日记后排序就变了，断成了对排序的依赖。
+  // 改成断「位置参数 == 对象参数」：层和条数都真的映射上了，且不串到 deep 层。
+  const objectForm = s("档案", { layer: "behavior", limit: 5 });
+  ok("旧位置参数与对象参数等价（layer + limit 都映射）", legacy === objectForm && !legacy.includes("深层里的档案梗"), legacy.slice(0, 60));
 
   // ---- parseTimeBound 边界 ----
   const d1 = new Date(parseTimeBound("2026-10-01", false));

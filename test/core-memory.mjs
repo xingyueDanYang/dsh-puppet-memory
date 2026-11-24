@@ -55,7 +55,8 @@ try {
 
   // ---- 2. 没写 core.md 时什么都不发生 ----
   ok("空核心卡不注入", coreInjection(cfgOn()).text === "");
-  ok("空核心卡不影响旧摘要", buildInjectionText(cfgOn(), 0).includes("puppet_memory"));
+  // 2026-11-24：摘要脚注用的是 DISPLAY_NAME（现在是「木偶记忆」），不再写英文包名 puppet_memory
+  ok("空核心卡不影响旧摘要", buildInjectionText(cfgOn(), 0).includes("插件自动注入"));
 
   // ---- 3. 正常写入 / 读取 ----
   writeCore("【称呼】大肥鱼\n【红线】不傲娇\n");
@@ -199,9 +200,10 @@ try {
   // 要验「说明合并」，先给规则卡写点东西。
   writeRules("【红线】不傲娇\n");
   const first = await run(mkAgent("core-s1"));
-  ok("第一次：注入核心卡", first.joined.includes("以下是核心记忆"));
-  ok("第一次：同时注入完整摘要", first.joined.includes("【记忆·跨会话摘要】"));
-  ok("核心卡排在完整摘要前面", first.joined.indexOf("以下是核心记忆") < first.joined.indexOf("【记忆·跨会话摘要】"));
+  // 2026-11-24：全量轮三张卡合并成一块（标题「以下是三张卡…」+ 三张卡正文），核心卡不再单独带抬头；
+  // 首轮按设计只给三张卡，完整摘要等下一轮才补。
+  ok("第一次：三张卡整块注入（合并标题 + 核心卡正文）", first.joined.includes("以下是三张卡") && first.joined.includes("【称呼】大肥鱼"));
+  ok("第一次：首轮只给三张卡，不给完整摘要", !first.joined.includes("【记忆·跨会话摘要】"));
   // 2026-11-21：全量轮（第 1 轮 / 每 100 轮）三张卡共用一句说明，核心卡自己不再带「以下是核心记忆…以它为准」的抬头；
   // 那句抬头只在「内容改过、单独补这一张」时出现（见下面 changed 那次）。
   ok("全量轮：三张卡说明合并成一句，核心卡不带单卡抬头", first.joined.includes("以下是三张卡") && !first.joined.includes("以下是核心记忆"));
@@ -228,18 +230,24 @@ try {
   await run(mkAgent("core-s2"), big);
   simulateCompaction("core-s2");
   const afterCompaction = await run(mkAgent("core-s2"), drop);
-  ok("压缩后：核心卡重新注入", afterCompaction.joined.includes("以下是核心记忆"));
-  ok("压缩后：完整摘要也重新注入", afterCompaction.joined.includes("【记忆·跨会话摘要】"));
+  ok("压缩后：三张卡整块重新注入", afterCompaction.joined.includes("以下是三张卡") && afterCompaction.joined.includes("【称呼】大肥鱼"));
+  // 压缩后这一轮＝首轮语义：先只给三张卡，完整摘要顺延到下一轮（实测：下一轮 only 摘要、无卡）
+  ok("压缩后：这一轮不重复完整摘要", !afterCompaction.joined.includes("【记忆·跨会话摘要】"));
+  const afterCompactionNext = await run(mkAgent("core-s2"), drop);
+  ok("压缩后：下一轮补完整摘要", afterCompactionNext.joined.includes("【记忆·跨会话摘要】") && !afterCompactionNext.joined.includes("以下是三张卡"));
 
   // ---- 6b. 规则只注入一次：状态变不会带出规则，规则变才补 ----
   writeCore("【称呼】大肥鱼\n");
   writeRules("【红线】不傲娇\n");
   writeState("【主线】第一步\n");
   const fresh = await run(mkAgent("core-r1"));
-  ok("首步：规则块出现", fresh.joined.includes("以下是行为规则"));
-  ok("首步：核心块出现", fresh.joined.includes("以下是核心记忆"));
-  ok("首步：状态块出现", fresh.joined.includes("以下是当前状态"));
-  ok("规则块排在核心块前面", fresh.joined.indexOf("以下是行为规则") < fresh.joined.indexOf("以下是核心记忆"));
+  // 2026-11-24：全量轮只有一块（合并标题），三张卡各自不再带「以下是…」抬头；
+  // 顺序 = 规则 → 核心 → 状态（按正文里的内容标记断，而不是按抬头断）。
+  ok("首步：三张卡整块出现（合并标题）", fresh.joined.includes("以下是三张卡"));
+  ok("首步：规则卡正文在", fresh.joined.includes("【红线】不傲娇"));
+  ok("首步：核心卡正文在", fresh.joined.includes("【称呼】大肥鱼"));
+  ok("首步：状态卡正文在", fresh.joined.includes("【主线】第一步"));
+  ok("整块里顺序是 规则 → 核心 → 状态", fresh.joined.indexOf("【红线】") < fresh.joined.indexOf("【称呼】") && fresh.joined.indexOf("【称呼】") < fresh.joined.indexOf("【主线】"));
   const noop = await run(mkAgent("core-r1"));
   // 2026-11-21：弱提示已取消——什么都没变时三张卡一张都不注入（这一轮可能还有自我层等块，所以只断三张卡）。
   ok("什么都没变：三张卡一张都不注入", !noop.joined.includes("以下是行为规则") && !noop.joined.includes("以下是核心记忆") && !noop.joined.includes("以下是当前状态") && !noop.joined.includes("这轮只给提示"), String(noop.texts.length));
@@ -261,8 +269,9 @@ try {
   await run(mkAgent("core-r2"), big);
   simulateCompaction("core-r2");
   const rc = await run(mkAgent("core-r2"), drop);
-  ok("压缩后：规则重新注入", rc.joined.includes("以下是行为规则"), rc.joined.slice(0, 160));
-  ok("压缩后：状态重新注入", rc.joined.includes("以下是当前状态"));
+  ok("压缩后：规则重新注入（合并块里带【红线】正文）", rc.joined.includes("以下是三张卡") && rc.joined.includes("【红线】不傲娇、不装雌小鬼"), rc.joined.slice(0, 160));
+  if (process.env.DEBUG_CORE) console.error("DEBUG rc:", JSON.stringify(rc.joined.slice(0, 600)));
+  ok("压缩后：状态重新注入（合并块里带状态正文）", rc.joined.includes("【主线】第二步，进度往前推了一行"));
 
   // 关掉核心卡 → pre-step 里不再出现 puppet_core
   const cfgPath = path.join(TMP, "config.json");
@@ -270,7 +279,11 @@ try {
   cfg.inject.core = { enabled: false, maxChars: 600, everyStep: true };
   fs.writeFileSync(cfgPath, JSON.stringify(cfg), "utf8");
   const off = await run(mkAgent("core-s3"));
-  ok("关掉核心卡后不再注入", !off.joined.includes("以下是核心记忆") && off.joined.includes("【记忆·跨会话摘要】"));
+  // 关掉后三张卡整段为空 → 首轮（cardsOnly）什么都不注入；
+  // 完整摘要也不在首轮，等下一轮才补（实测 t1 为空、t2 只有摘要）。
+  ok("关掉核心卡：首轮不再注入三张卡", !off.joined.includes("以下是三张卡") && !off.joined.includes("【称呼】大肥鱼"), off.joined.slice(0, 80));
+  const off2 = await run(mkAgent("core-s3"));
+  ok("关掉核心卡：下一轮只补完整摘要、不再出卡", off2.joined.includes("【记忆·跨会话摘要】") && !off2.joined.includes("以下是三张卡"));
 
   // ---- 7. memory_core 工具 ----
   const coreTool = tools.find((t) => t.name === "memory_core");
@@ -292,14 +305,15 @@ try {
   await run(mkAgent("core-reset"));
   const stable = await run(mkAgent("core-reset"));
   // 2026-11-21：弱提示已取消——复位前第二步同样三张卡一张都不注入，正文要等复位/压缩/改卡之后才重发。
-  ok("复位前：第二步三张卡一张都不注入", !stable.joined.includes("以下是核心记忆") && !stable.joined.includes("以下是行为规则") && !stable.joined.includes("不可逆先问"), String(stable.texts.length));
+  ok("复位前：第二步三张卡一张都不注入", !stable.joined.includes("以下是三张卡") && !stable.joined.includes("不可逆先问"), String(stable.texts.length));
   const r1 = await call({ action: "reset" }, execOf("core-reset"));
   ok("复位返回已复位", r1.includes("已复位"), r1.slice(0, 50));
   const afterReset = await run(mkAgent("core-reset"));
   // 2026-11-21：复位除了清旧的注入指纹，还会把 inject-phase 的 turn 归零、删掉卡内容指纹
   // （否则 decide() 全 skip，回执里的「重新注入一次」就成了空话）。归零后下一轮 = 第 1 轮 → 三卡全量。
-  ok("复位后：核心卡重新注入", afterReset.joined.includes("以下是核心记忆") && afterReset.joined.includes("不可逆先问"));
-  ok("复位后：规则卡也重新注入", afterReset.joined.includes("以下是行为规则"));
+  ok("复位后：三张卡整块重新注入（含核心卡正文）", afterReset.joined.includes("以下是三张卡") && afterReset.joined.includes("不可逆先问"));
+  // 注意：第 7 节把规则卡改成了「【说话】先结论后解释」，这里断的是那一份，不是最早的【红线】
+  ok("复位后：规则卡也在同一块里", afterReset.joined.includes("【说话】先结论后解释"), afterReset.joined.slice(0, 200));
   ok("复位不带 text 时没有临时约束块", !afterReset.joined.includes("【复位】"));
   const r2 = await call({ action: "reset", text: "别用「你应该」，改说「人家觉得」" }, execOf("core-reset"));
   ok("复位带临时约束时回执里带上它", r2.includes("人家觉得"), r2.slice(0, 80));
@@ -323,10 +337,17 @@ try {
     ? fs.readdirSync(path.join(TMP, "behavior", "archive")).filter((f) => f.startsWith("core-"))
     : [];
   ok("清空前已归档", archiveFiles.length === 1, String(archiveFiles.length));
-  ok("空卡时不注入", !(await run(mkAgent("core-s4"))).joined.includes("以下是核心记忆"));
+  const emptyCoreRun = (await run(mkAgent("core-s4"))).joined;
+  ok("空核心卡时不注入核心卡正文", !emptyCoreRun.includes("以下是核心记忆") && !/【称呼】/.test(emptyCoreRun));
 
   // ---- 8. memory_stats 能看到核心卡 ----
+  // 2026-11-24 实测：buildStats 只在 core.stateText 非空时报「状态卡一行」，而默认 levels.state="weak"
+  // （只发一句提示，stateText 为空）→ 默认配置下根本没有这一行。要验「三张卡各有自己一行」，
+  // 这里显式把状态卡要成 strong（同本文件 4c 的做法），不是把断言改松。
   writeCore("【称呼】大肥鱼\n");
+  const cfgStats = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
+  cfgStats.inject.core = { ...(cfgStats.inject.core || {}), levels: { ...((cfgStats.inject.core || {}).levels || {}), state: "strong" } };
+  fs.writeFileSync(cfgPath, JSON.stringify(cfgStats), "utf8");
   const statsText = buildStats();
   ok("记忆统计里有核心卡一行", statsText.includes("behavior/core.md: ") && statsText.includes("/600 字"), statsText.slice(0, 120));
   // A-48：报表不能再拿「三张卡合起来的长度」除以 core 的 600 预算——实测 310+187+116 会被报成「619/600 超预算」

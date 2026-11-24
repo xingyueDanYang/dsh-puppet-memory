@@ -685,7 +685,7 @@ window.__ModuleLoader__.load({
                 className: cfg.showWeak === false ? 'pmb-btn' : 'pmb-btn pmb-btn-on',
                 disabled: busy,
                 onClick: () => save({ showWeak: cfg.showWeak === false }),
-              }, cfg.showWeak === false ? '不报' : '报')),
+              }, cfg.showWeak === false ? '不报个数' : '报个数')),
             ),
       )
     }
@@ -1747,6 +1747,12 @@ window.__ModuleLoader__.load({
         h('div', { className: 'pmb-hint' }, '只查 GitHub 上的稳定版，只显示版本号和链接；不会下载、也不会替换插件。'),
         h('div', { className: 'pmb-card' },
           h(Row, { label: '当前版本' }, h('div', null, data.currentVersion || '(未读到)')),
+          // 2026-11-24 丹阳：「面板显示本版发布于 X 天前」，配合发版 24h 冷却（release.mjs 里有硬门禁）
+          h(Row, { label: '本版发布' }, h('div', null,
+            data.currentRelease && data.currentRelease.publishedAt ? relTime(data.currentRelease.publishedAt) : '（没取到发布时间）',
+            h('span', { className: 'pmb-hint', style: { marginLeft: '8px' } },
+              '发版冷却 ' + (data.cooldownHours || 24) + ' 小时；不到就别急着发下一版'),
+          )),
           h(Row, { label: '最新版' }, h('div', null,
             status,
             latest && latest.url
