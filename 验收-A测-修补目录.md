@@ -101,17 +101,14 @@
 |---|---|---|---|---|---|
 | A-60 | 写入层没有任何门禁：`memory_write` 对乱码、超长粘贴、**把注入块整段复制进记忆**照收不误；便签/笔记只按完全相同去重，近似重复会一条条堆积；人设文件同一行写两遍会真的出现两遍 | 〔数据〕 | v0.34 加**写入守卫**：①乱码拦截（替换字符 `�`、`锟斤拷`/`烫烫烫`、`Ã¢`/`â€` 一类误编序列）；②按层设字数上限（relation/saying 1200、user 800、memo 4000、note 8000、persona 1200、diary 4000）；③注入块结构标记（`<puppet_memory>`、`【核心记忆】` 等）拒收；④便签/笔记近似重复合并进旧条目（字符二元组 Jaccard ≥0.82，或长度比 ≥0.7 且包含度 ≥0.9），标签取并集、新文本多两成以上才替换正文；⑤人设整行去重。拒收只返回可读原因，不抛异常 | `node test/write-guard.mjs` 23 项全过；全套 24 套测试无回归；`writeGuard.enabled=false` 时行为回到 0.33.1 | 配置里把 `writeGuard.enabled` 设 `false` 即可回到旧行为，数据格式没变 |
 
+## 未发版（2026-11-24：工具合并 24 个 + 六项测试对齐 + 面板两处）
+
+| # | 现象 | 影响面 | 修法 | 怎么验 | 回滚 |
+|---|---|---|---|---|---|
+| A-102 | 工具太多（29 个），长尾工具挤占上下文；且六项测试断言跟不上 0.52.0 的行为改动（write-guard 仍断「近似合并」、tool-contract 断 36 个、core-memory 断三卡分行、inject-time 断插件产【现在】、query-params 断 turn=diary） | 〔接口〕〔文档〕 | 5 个工具并进同类：`memory_void`→`memory_forget action=void`、`memory_cue`→`memory_guide cue-*`、`memory_identity`→`memory_person identity-*`、`memory_visibility`→`memory_group visibility-*`、`memory_source`→`memory_image source-*`；六项测试按现行行为重写 | `node test/*.mjs` 94/94 全绿；`tool-contract` 断言 24；真机工具清单只有 24 个 | 无数据风险；回退到 0.52.1 即可恢复 29 个工具 |
+| A-103 | 面板「弱命中提示」按钮被截成「报」；「插件更新」页看不到本版发布时间（无法自查发版是否过密） | 〔接口〕 | 按钮文案改「报个数/不报个数」；检查流程顺手抓当前 tag 的发布时间（缓存 24h，`update-state` 仍不联网），面板加「本版发布 / 冷却 24h」一行 | 面板实际显示「报个数」；`本版发布 19 小时前` 出现；`update-api` 断言读状态 requests=0 仍过 | 纯 UI/只读缓存，回退无数据影响 |
+
 ## 0.52.1（2026-11-23，正式版：npm 元数据修正）
 
 | # | 现象 | 影响面 | 修法 | 怎么验 | 回滚 |
 |---|---|---|---|---|---|
-| A-101 | 市场卡片没有版本号和下载数（只显示作者与「已安装」）。原因：市场靠 npm 包里的 `repository` 把包和仓库对上，我们 `package.json` 里 `repository/homepage/bugs` 三个字段全缺，npm 上 0.52.0 的 packument 里也是 undefined | 〔接口〕〔文档〕 | `package.json` 补三个字段（指向 github.com/xingyueDanYang/dsh-puppet-memory），发 0.52.1，代码零改动 | `npm view dsh-puppet-memory repository` 有值；registry 的 versions.0.52.1.repository 存在；市场下次抓取后卡片出现版本与下载数 | 无数据风险；回退只是元数据缺失 |
-
-## 0.52.0（2026-11-23，正式版：约定到点播报 + 关写入近似合并）
-
-| # | 现象 | 影响面 | 修法 | 怎么验 | 回滚 |
-|---|---|---|---|---|---|
-| A-97 | 写入侧近似合并把不同的内容也并掉：隔离库写 200 条各不相同的笔记，只落盘 16 条（184 条回「内容与已有笔记相近」）；评测里写入 6581 轮历史只落 493 条，「冰可乐」在历史里 10 次只剩 1 次、「麻辣烫」6 次剩 0 次——约定和欠账在写入时就被吞了 | 〔数据〕〔默认〕 | 写入守卫默认关掉近似合并（`writeGuard.dedupe=false`），阈值同时从 0.82 抬到 0.90；合并应在分片之后做，不在写入侧 | 隔离 HOME 连写 200 条不同内容 → 落盘 200 条；`node test/*.mjs` 全过；预检 20/20 | 把 `writeGuard.dedupe` 改回 `true`（阈值可留 0.90）；已合并的历史条目无法自动还原，但合并只发生在新写入 |
-| A-98 | 和人有约的事到点不提醒：关系里写着「说好27号前请他吃麻辣烫」「借他五十，下周三还」，到那天既不播报也检索不出（题干若是中性句，检索更检不到） | 〔接口〕〔数据〕 | 新增 `promise-due.js` 判定器（双方只认承诺词，出现第三方才放开动作词；仍要求「能解析出日期 + 剩具体对象」）；关系写入时命中即挂 `due{date,label,keywords}`；新增 `buildPromiseDueInjection` 在到点那天注入【约定·到点】并带原话，一天一次 | 真机写一条「说好明天中午请小周吃饭」→ relations 里 `due.date=2026-11-24`；`buildPromiseDueInjection` 在 11-24 命中、11-25 不念；`test/promise-due.mjs` 16/16 | 删掉关系条目里的 `due` 字段即可停提醒；彻底回滚则撤掉 `buildPromiseDueInjection` 的调用与 import，文件保留不影响 |
-| A-99 | 日期解析两处错：「上周三」被算成未来那天（应为往回推）；只说「27号」解析不出（返回 null） | 〔接口〕 | `when.js` 周分支把「上」加进前缀并往前推；新增「N号/N日」分支（本月那天，过了顺延下月）；顺带修「明天早上八点」落回今天（前找相对日词） | `node test/when.mjs` 45/45；`resolveWhen("上周三")` 返回 11-11、`resolveWhen("27号")` 返回 11-27 | `git revert` 对应提交；解析结果只影响新写入/新查询，旧条目不动 |
-| A-100 | 面板「顺手取回」页读不出数据、开关不显示：页面用 GET 调 `recall-view`，宿主只在 POST 分支处理，回「未知 action」 | 〔接口〕 | 宿主 GET 分支补 `action=recall-view → recallView()` | `curl '…/dsh-puppet-memory-api?action=recall-view'` 返回 `{ok:true,enabled,minStrong,maxLines,showWeak,profiles}`；面板出现开关与三项设置 | 撤掉那条 GET 分支（POST 路径仍在） |
