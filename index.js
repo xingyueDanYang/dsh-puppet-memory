@@ -3982,6 +3982,8 @@ function queueNonWork(sessionId, userText, tools = []) {
   safe("幕表自动登记", () => autoRegisterOpening(userText, { source: "活日记·自动登记" }));
   // 调过工具/技能就是工作（愉悦工具除外）——工作轮不进活日记。
   if (classifyTurn(tools) !== "leisure") return;
+  // 幕表写侧：这一轮里如果有「未来时点 + 具体事项」，当场登记（不等压缩后才整理）
+  safe("幕表自动登记", () => autoRegisterOpening(userText, { source: "活日记·自动登记" }));
   const rows = inboxPending.get(sessionId) || [];
   for (const text of collectNonWorkTurns(userText)) {
     // 2026-11-21 丹阳：「太长的超过 200 字，不算约定记录」——整段粘贴（小说、相声、资料）
